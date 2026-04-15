@@ -1,0 +1,39 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# PyInstaller
+*.spec
+*.manifest
+
+# NetSentinel runtime data (generated at runtime, not source)
+# Users should NOT commit their local data
+*.pkl
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Distribution
+*.exe
+*.zip

@@ -1,0 +1,24 @@
+# NetSentinel Dependencies
+# ========================
+
+# Core packet capture
+scapy>=2.5.0
+
+# System monitoring
+psutil>=5.9.0
+
+# Machine Learning
+scikit-learn>=1.3.0
+numpy>=1.24.0
+
+# Desktop notifications (optional)
+plyer>=2.1.0
+
+# Encryption for forensics credential storage
+cryptography>=41.0.0
+
+# Build tools (for creating Windows executable)
+pyinstaller>=6.0.0
+
+# Optional: For enhanced Windows packet capture
+# Install Npcap from https://npcap.com/ (required on Windows)

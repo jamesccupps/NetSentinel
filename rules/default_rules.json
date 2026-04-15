@@ -1,0 +1,50 @@
+{
+  "metadata": {
+    "name": "NetSentinel Default Rules",
+    "version": "1.0.0",
+    "description": "Built-in detection rules for common threats",
+    "last_updated": "2025-01-01"
+  },
+  "known_bad_ports": {
+    "description": "Ports commonly used by malware, trojans, and backdoors",
+    "ports": {
+      "4444":  "Metasploit default handler / Meterpreter",
+      "5555":  "Android ADB / Various trojans",
+      "6666":  "IRC backdoors",
+      "6667":  "IRC (often used for botnet C2)",
+      "1337":  "Common backdoor port",
+      "31337": "Back Orifice / Elite backdoor",
+      "12345": "NetBus trojan",
+      "65535": "Common test backdoor",
+      "3127":  "MyDoom backdoor",
+      "27374": "SubSeven trojan",
+      "1080":  "SOCKS proxy (potential pivot)",
+      "8888":  "Alternative HTTP (sometimes suspicious)",
+      "9999":  "Common backdoor / RAT",
+      "7777":  "Common game cheat / backdoor port"
+    }
+  },
+  "suspicious_tlds": [
+    ".xyz", ".top", ".buzz", ".tk", ".ml", ".ga", ".cf",
+    ".gq", ".work", ".click", ".link", ".info", ".biz",
+    ".icu", ".monster", ".rest"
+  ],
+  "known_c2_patterns": {
+    "description": "Patterns indicative of Command & Control communication",
+    "indicators": [
+      "Regular beacon intervals (low coefficient of variation)",
+      "Small fixed-size packets at regular intervals",
+      "DNS queries with high-entropy subdomains",
+      "HTTP/HTTPS to IP addresses (no domain)",
+      "Long-lived connections with periodic small data bursts",
+      "Traffic to known TOR exit nodes or VPN endpoints"
+    ]
+  },
+  "protocol_anomalies": {
+    "dns_over_non53": "DNS traffic on ports other than 53/5353",
+    "http_on_high_port": "HTTP headers on port > 8443",
+    "ssh_on_non22": "SSH handshake on non-standard port",
+    "icmp_with_payload": "ICMP packets with large payloads (tunnel)",
+    "tcp_unusual_flags": "Invalid TCP flag combinations"
+  }
+}
