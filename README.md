@@ -36,7 +36,7 @@ NetSentinel is a desktop network security application that monitors all traffic 
 ### Install
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/NetSentinel.git
+git clone https://github.com/jamesccupps/NetSentinel.git
 cd NetSentinel
 pip install -r requirements.txt
 ```
