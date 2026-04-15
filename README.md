@@ -69,6 +69,10 @@ build_exe.bat
 6. The **Devices** tab shows all discovered devices and their classifications
 7. The **Incidents** tab groups related alerts into correlated events
 
+## Screenshots
+
+<img width="1897" height="1033" alt="image" src="https://github.com/user-attachments/assets/ced27cca-5803-4f50-b0ed-73edd7dbd627" />
+
 ## Architecture
 
 ```
