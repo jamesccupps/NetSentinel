@@ -4,7 +4,7 @@
 
 NetSentinel is a desktop network security application that monitors all traffic on your machine, detects anomalies using machine learning, and alerts you to suspicious activity in real time. It learns your network automatically — no configuration required.
 
-![Python](https://img.shields.io/badge/python-3.10+-blue) ![Platform](https://img.shields.io/badge/platform-Windows-lightgrey) ![License](https://img.shields.io/badge/license-MIT-green) ![Tests](https://img.shields.io/badge/tests-218%20unit%20%2B%2014%20integration-brightgreen)
+![Python](https://img.shields.io/badge/python-3.10+-blue) ![Platform](https://img.shields.io/badge/platform-Windows-lightgrey) ![License](https://img.shields.io/badge/license-MIT-green) ![Tests](https://img.shields.io/badge/tests-273%20unit%20%2B%2014%20integration-brightgreen)
 
 ## Key Features
 
@@ -28,7 +28,7 @@ TLS stack stands out even when everything it sends is encrypted.
 
 **Baseline Whitelist** — During the initial learning period *only*, records every domain, IP, port, and periodic pattern as "normal for this network." Once that window closes, learning stops — so nothing an attacker does later can whitelist itself. No hardcoded whitelists.
 
-**PCAP Export** — Ring buffer of raw packets with on-demand "save last 5 minutes" export and continuous recording with auto-rotation.
+**PCAP Export** — Ring buffer of raw packets with on-demand "save last 5 minutes" export and continuous recording with auto-rotation. Serious alerts automatically save the traffic that triggered them, narrowed to the hosts involved, so every CRITICAL finding opens in Wireshark.
 
 ## Quick Start
 
@@ -118,6 +118,9 @@ Configuration lives in `~/.netsentinel/config.json` (created on first run with d
 | `forensics` | `vault_passphrase` | `""` | Set for real vault confidentiality (scrypt) |
 | `forensics` | `retention_days` | 365 | Findings older than this are pruned at startup |
 | `capture` | `pcap_max_files` | 20 | Recordings kept before the oldest are pruned |
+| `capture` | `pcap_on_alert` | true | Save the traffic behind serious alerts |
+| `capture` | `pcap_on_alert_severity` | CRITICAL | Minimum severity that triggers a save |
+| `capture` | `pcap_on_alert_seconds` | 60 | Seconds of buffered traffic to save |
 
 Every key in `config.json` is read by the code. If you set something, it takes effect.
 
@@ -188,7 +191,7 @@ Worth knowing before you rely on a detector:
 ## Testing
 
 ```bash
-# Everything (218 tests)
+# Everything (273 tests)
 python -m unittest discover -s . -p "test_*.py"
 
 # Regression tests for the v1.5.0 audit fixes
@@ -199,6 +202,9 @@ python -m unittest test_coverage -v
 
 # TLS ClientHello parsing, fingerprinting and hostile input
 python -m unittest test_tls -v
+
+# Presentation logic (formatting, thresholds, filtering)
+python -m unittest test_presentation -v
 
 # End-to-end integration checks (real code paths, no capture required)
 python tools/integration_check.py
@@ -235,6 +241,7 @@ NetSentinel/
 │   ├── pcap_analyzer.py      # Offline PCAP file analysis
 │   ├── feature_store.py      # Persistent ML feature vector storage
 │   ├── tls_inspect.py        # ClientHello parsing: SNI, JA3/JA4, QUIC detection
+│   ├── presentation.py       # Pure formatting/threshold/filter logic (no tkinter)
 │   ├── ipcache.py            # Cached IP address classification
 │   ├── config.py             # Configuration management
 │   └── gui.py                # tkinter dashboard (11 tabs)

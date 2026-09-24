@@ -12,6 +12,7 @@ Features:
 """
 
 import os
+import re
 import struct
 import time
 import logging
@@ -29,6 +30,31 @@ PCAP_LINKTYPE_ETHERNET = 1
 PCAP_LINKTYPE_RAW = 101       # Raw IP, no link layer
 PCAP_LINKTYPE_NULL = 0        # BSD loopback
 PCAP_SNAPLEN = 65535
+
+
+def _frame_involves(frame, endpoints):
+    """
+    Cheap check for whether an Ethernet frame involves one of these IPv4/IPv6 hosts.
+
+    Deliberately byte-level rather than a Scapy parse: this runs over the whole ring
+    buffer when an alert fires, and re-parsing 150k frames would stall the caller.
+    """
+    try:
+        if len(frame) < 34:
+            return False
+        ethertype = (frame[12] << 8) | frame[13]
+        if ethertype == 0x0800:                      # IPv4
+            src = '.'.join(str(b) for b in frame[26:30])
+            dst = '.'.join(str(b) for b in frame[30:34])
+        elif ethertype == 0x86dd and len(frame) >= 54:  # IPv6
+            import ipaddress
+            src = str(ipaddress.IPv6Address(bytes(frame[22:38])))
+            dst = str(ipaddress.IPv6Address(bytes(frame[38:54])))
+        else:
+            return False
+        return src in endpoints or dst in endpoints
+    except (IndexError, ValueError):
+        return False
 
 
 class PcapWriter:
@@ -138,6 +164,64 @@ class PcapWriter:
         except Exception as e:
             logger.error("Failed to export PCAP: %s", e)
             return None
+
+    def export_for_alert(self, alert, seconds=60):
+        """
+        Save the packets around an alert so it can be opened in Wireshark.
+
+        The ring buffer already holds recent traffic, so the evidence for an alert
+        is usually still in memory at the moment it fires — this just writes it out
+        before it ages away. Returns the path, or None if there was nothing to save.
+        """
+        cutoff = time.time() - seconds
+        endpoints = {ip for ip in (getattr(alert, 'src_ip', ''),
+                                   getattr(alert, 'dst_ip', '')) if ip}
+
+        with self._lock:
+            candidates = [(ts, data) for ts, data in self._buffer if ts >= cutoff]
+
+        if not candidates:
+            return None
+
+        # Narrow to the hosts involved when we can identify them; a scan or flood
+        # alert is far easier to read without the rest of the network mixed in.
+        packets = candidates
+        if endpoints:
+            focused = [(ts, data) for ts, data in candidates
+                       if _frame_involves(data, endpoints)]
+            if focused:
+                packets = focused
+
+        safe_rule = re.sub(r'[^A-Za-z0-9_.-]', '_', str(getattr(alert, 'rule_id', 'alert')))
+        filename = (f"alert_{safe_rule}_{getattr(alert, 'id', 0)}_"
+                    f"{datetime.now():%Y%m%d_%H%M%S}.pcap")
+        filepath = os.path.join(self.output_dir, filename)
+
+        try:
+            with open(filepath, 'wb') as f:
+                self._write_pcap_header(f)
+                for ts, raw in packets:
+                    self._write_packet_record(f, ts, raw)
+            logger.info("Saved %d packets for %s to %s",
+                        len(packets), safe_rule, filepath)
+            self._prune_alert_captures()
+            return filepath
+        except OSError as e:
+            logger.error("Could not save alert capture: %s", e)
+            return None
+
+    def _prune_alert_captures(self):
+        """Cap how many per-alert captures accumulate on disk."""
+        keep = self.config.get('capture', 'pcap_max_alert_files', default=50)
+        try:
+            files = [os.path.join(self.output_dir, f)
+                     for f in os.listdir(self.output_dir)
+                     if f.startswith('alert_') and f.endswith('.pcap')]
+            files.sort(key=os.path.getmtime, reverse=True)
+            for path in files[keep:]:
+                os.remove(path)
+        except OSError as e:
+            logger.debug("Alert capture pruning error: %s", e)
 
     def start_recording(self, filename=None):
         """Start continuous PCAP recording."""

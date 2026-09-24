@@ -9,6 +9,8 @@ import logging
 import threading
 from collections import deque
 
+from src.ids_engine import Severity
+
 logger = logging.getLogger("NetSentinel.App")
 
 # Human-readable names and units for ML feature vector elements.
@@ -222,6 +224,15 @@ class NetSentinelApp:
         self._forensics_cred_cursor = 0
         self._forensics_sensitive_cursor = 0
 
+        # PCAP-on-alert: automatically save the traffic behind serious alerts
+        self._pcap_on_alert = self.config.get('capture', 'pcap_on_alert', default=True)
+        self._pcap_on_alert_severity = self.config.get(
+            'capture', 'pcap_on_alert_severity', default='CRITICAL')
+        self._pcap_on_alert_seconds = self.config.get(
+            'capture', 'pcap_on_alert_seconds', default=60)
+        self._pcap_alert_cooldown = 60
+        self._pcap_alert_cooldowns = {}
+
         # Packet window for ML analysis
         self._packet_window = deque(maxlen=5000)
         self._analysis_interval = self.config.get('analysis', 'stats_interval_sec', default=5)
@@ -232,8 +243,46 @@ class NetSentinelApp:
 
         logger.info("NetSentinel App initialized.")
 
+    def _capture_alert_evidence(self, alert):
+        """
+        Save the traffic around a serious alert so it can be examined later.
+
+        The ring buffer already holds recent packets, so the evidence is usually
+        still in memory when the alert fires — this writes it out before it ages
+        away. Without it, a CRITICAL alert names an IP and a rule and leaves the
+        user with nothing to actually look at.
+        """
+        if not self._pcap_on_alert:
+            return
+        if not Severity.gte(alert.severity, self._pcap_on_alert_severity):
+            return
+
+        now = time.time()
+        # One capture per rule+source per cooldown, so an alert storm cannot fill
+        # the disk with near-identical files.
+        key = f"{alert.rule_id}:{alert.src_ip}"
+        if now - self._pcap_alert_cooldowns.get(key, 0) < self._pcap_alert_cooldown:
+            return
+        self._pcap_alert_cooldowns[key] = now
+        if len(self._pcap_alert_cooldowns) > 500:
+            cutoff = now - self._pcap_alert_cooldown
+            self._pcap_alert_cooldowns = {
+                k: t for k, t in self._pcap_alert_cooldowns.items() if t >= cutoff}
+
+        try:
+            path = self.pcap_writer.export_for_alert(
+                alert, seconds=self._pcap_on_alert_seconds)
+            if path:
+                alert.evidence['packet_capture'] = path
+                alert.evidence['packet_capture_note'] = (
+                    'Traffic around this alert was saved. Open it in Wireshark to '
+                    'see exactly what triggered the detection.')
+        except Exception as e:
+            logger.debug("Alert capture error: %s", e)
+
     def _emit_alert(self, alert):
         """Deliver a finished alert to storage, the GUI and the correlator."""
+        self._capture_alert_evidence(alert)
         self.alert_manager.add_alert(alert)
         try:
             self.alert_correlator.process_alert(alert)

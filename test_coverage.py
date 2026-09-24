@@ -429,3 +429,117 @@ class TestPcapRoundTrip(unittest.TestCase):
         writer.buffer_packet(self._frames(1)[0])   # must still write
         self.assertGreaterEqual(writer._record_packets, 1)
         writer.stop_recording()
+
+
+# ══════════════════════════════════════════════════════════════════════
+# PCAP-on-alert
+# ══════════════════════════════════════════════════════════════════════
+class TestPcapOnAlert(unittest.TestCase):
+    """
+    A CRITICAL alert used to leave the user with a rule name and an IP and nothing
+    to actually look at. The ring buffer already holds the traffic; this writes it
+    out before it ages away.
+    """
+
+    def setUp(self):
+        if not SCAPY_REAL:
+            self.skipTest('real scapy unavailable')
+        from src.pcap_writer import PcapWriter
+        self.tmp = tempfile.mkdtemp(prefix='ns_alertpcap_')
+        self.writer = PcapWriter(cfg(), output_dir=self.tmp)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _fill(self):
+        from scapy.all import Ether, IP, TCP, Raw
+        for i in range(120):
+            src, dst = (('203.0.113.9', '192.168.1.50') if i % 2
+                        else ('192.168.1.50', '203.0.113.9'))
+            self.writer.buffer_packet(bytes(
+                Ether() / IP(src=src, dst=dst) / TCP(sport=4444, dport=80) / Raw(b'x' * 40)))
+        for _ in range(80):      # unrelated hosts
+            self.writer.buffer_packet(bytes(
+                Ether() / IP(src='10.9.9.9', dst='10.8.8.8') / TCP() / Raw(b'y' * 40)))
+
+    def test_export_produces_a_readable_pcap(self):
+        from scapy.all import rdpcap
+        self._fill()
+        alert = Alert('SYN-FLOOD', Severity.CRITICAL, 'flood', 'd',
+                      src_ip='203.0.113.9', dst_ip='192.168.1.50')
+        path = self.writer.export_for_alert(alert)
+        self.assertIsNotNone(path)
+        self.assertTrue(rdpcap(path))
+
+    def test_capture_is_narrowed_to_the_hosts_involved(self):
+        from scapy.all import rdpcap
+        self._fill()
+        alert = Alert('SYN-FLOOD', Severity.CRITICAL, 'flood', 'd',
+                      src_ip='203.0.113.9', dst_ip='192.168.1.50')
+        packets = rdpcap(self.writer.export_for_alert(alert))
+        self.assertEqual(len(packets), 120, "unrelated traffic should be filtered out")
+        for p in packets:
+            self.assertIn(p['IP'].src, ('203.0.113.9', '192.168.1.50'))
+
+    def test_falls_back_to_everything_when_hosts_do_not_match(self):
+        """Better to save the window than to save nothing."""
+        from scapy.all import rdpcap
+        self._fill()
+        alert = Alert('ARP-SPOOF', Severity.CRITICAL, 'spoof', 'd', src_ip='192.168.99.99')
+        packets = rdpcap(self.writer.export_for_alert(alert))
+        self.assertEqual(len(packets), 200)
+
+    def test_empty_buffer_returns_none(self):
+        alert = Alert('SYN-FLOOD', Severity.CRITICAL, 'flood', 'd', src_ip='1.2.3.4')
+        self.assertIsNone(self.writer.export_for_alert(alert))
+
+    def test_filename_cannot_escape_the_output_directory(self):
+        """rule_id reaches the filename, so it must be sanitised."""
+        self._fill()
+        alert = Alert('../../etc/evil', Severity.CRITICAL, 'x', 'd',
+                      src_ip='203.0.113.9')
+        path = self.writer.export_for_alert(alert)
+        self.assertIsNotNone(path)
+        self.assertEqual(os.path.dirname(os.path.abspath(path)),
+                         os.path.abspath(self.tmp))
+
+    def test_old_alert_captures_are_pruned(self):
+        c = cfg()
+        c.set('capture', 'pcap_max_alert_files', 3)
+        from src.pcap_writer import PcapWriter
+        writer = PcapWriter(c, output_dir=self.tmp)
+        self.writer = writer
+        self._fill()
+        for i in range(8):
+            writer.export_for_alert(
+                Alert(f'RULE{i}', Severity.CRITICAL, 'x', 'd', src_ip='203.0.113.9'))
+        saved = [f for f in os.listdir(self.tmp) if f.startswith('alert_')]
+        self.assertLessEqual(len(saved), 3)
+
+
+class TestFrameEndpointMatching(unittest.TestCase):
+    """The byte-level endpoint check used to narrow an alert capture."""
+
+    def test_ipv4_endpoints_are_matched(self):
+        if not SCAPY_REAL:
+            self.skipTest('real scapy unavailable')
+        from scapy.all import Ether, IP, TCP
+        from src.pcap_writer import _frame_involves
+        frame = bytes(Ether() / IP(src='10.0.0.1', dst='10.0.0.2') / TCP())
+        self.assertTrue(_frame_involves(frame, {'10.0.0.1'}))
+        self.assertTrue(_frame_involves(frame, {'10.0.0.2'}))
+        self.assertFalse(_frame_involves(frame, {'10.0.0.3'}))
+
+    def test_ipv6_endpoints_are_matched(self):
+        if not SCAPY_REAL:
+            self.skipTest('real scapy unavailable')
+        from scapy.all import Ether, IPv6, TCP
+        from src.pcap_writer import _frame_involves
+        frame = bytes(Ether() / IPv6(src='2001:db8::1', dst='2001:db8::2') / TCP())
+        self.assertTrue(_frame_involves(frame, {'2001:db8::1'}))
+        self.assertFalse(_frame_involves(frame, {'2001:db8::9'}))
+
+    def test_truncated_and_non_ip_frames_are_safe(self):
+        from src.pcap_writer import _frame_involves
+        for frame in (b'', b'\x00' * 10, b'\x00' * 40, os.urandom(60)):
+            self.assertIsInstance(_frame_involves(frame, {'10.0.0.1'}), bool)

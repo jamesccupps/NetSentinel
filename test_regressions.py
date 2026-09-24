@@ -825,3 +825,61 @@ class TestDeadStateRemoved(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main(verbosity=2)
+
+
+# ══════════════════════════════════════════════════════════════════════
+# Capture thread must not re-serialise packets
+# ══════════════════════════════════════════════════════════════════════
+class TestNoPacketRebuild(unittest.TestCase):
+    """
+    len(packet) and bytes(packet) both run Scapy's build(), re-serialising every
+    layer. A packet dissected from the wire already carries its bytes in .original,
+    and each build costs ~11 us on a fresh object — paid twice per packet, on the
+    capture thread, which is the one that must never stall.
+    """
+
+    def setUp(self):
+        if not SCAPY_REAL:
+            self.skipTest('real scapy unavailable')
+        from src.capture import CaptureEngine
+        self.engine = CaptureEngine(fresh_config())
+
+    def _dissected(self):
+        from scapy.all import Ether, IP, TCP, Raw
+        wire = bytes(Ether() / IP(src='1.2.3.4', dst='5.6.7.8') /
+                     TCP(sport=1, dport=8000, flags='PA') / Raw(load=b'hello' * 50))
+        return Ether(wire), wire
+
+    def test_raw_bytes_uses_the_original_buffer(self):
+        packet, wire = self._dissected()
+        self.assertIs(self.engine._raw_bytes(packet), packet.original)
+        self.assertEqual(self.engine._raw_bytes(packet), wire)
+
+    def test_raw_bytes_falls_back_for_constructed_packets(self):
+        """A packet built in memory has no .original, so it must still work."""
+        from scapy.all import Ether, IP, TCP
+        built = Ether() / IP(src='1.2.3.4', dst='5.6.7.8') / TCP()
+        self.assertEqual(self.engine._raw_bytes(built), bytes(built))
+
+    def test_length_still_matches_scapy(self):
+        packet, wire = self._dissected()
+        info = self.engine._extract_packet_info(packet)
+        self.assertEqual(info.length, len(packet))
+        self.assertEqual(info.length, len(wire))
+
+    def test_extraction_does_not_call_build(self):
+        """The direct guard: if build() runs, this fails."""
+        packet, _ = self._dissected()
+        calls = []
+        original_build = type(packet).build
+
+        def counting_build(self, *a, **kw):
+            calls.append(1)
+            return original_build(self, *a, **kw)
+
+        type(packet).build = counting_build
+        try:
+            self.engine._extract_packet_info(packet)
+        finally:
+            type(packet).build = original_build
+        self.assertEqual(calls, [], "capture path must not re-serialise the packet")

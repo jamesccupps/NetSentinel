@@ -14,6 +14,8 @@ from tkinter import ttk, messagebox, filedialog
 from collections import deque
 from datetime import datetime
 
+from src import presentation
+
 logger = logging.getLogger("NetSentinel.GUI")
 
 # ─── Color Palette ─────────────────────────────────────────────────────────────
@@ -2515,9 +2517,9 @@ class NetSentinelGUI:
             w.destroy()
         self._alert_widgets.clear()
 
-        # Reload from alert manager with filter
-        severity = None if sev_filter == 'ALL' else sev_filter
-        alerts = self.app.alert_manager.get_alerts(limit=200, severity=severity)
+        # Reload from alert manager, then apply the display filter
+        alerts = presentation.filter_alerts(
+            self.app.alert_manager.get_alerts(limit=500), severity=sev_filter)[:200]
 
         for alert in reversed(alerts):  # oldest first so newest on top
             item = AlertListItem(self._alerts_scroll_frame, alert.to_dict())
@@ -2574,16 +2576,9 @@ class NetSentinelGUI:
                                      else COLORS['yellow'])
 
             # Threat level
-            score = ml_result.get('anomaly_score', 0)
-            if score > 0.7:
-                threat, color = "CRITICAL", COLORS['red']
-            elif score > 0.4:
-                threat, color = "ELEVATED", COLORS['orange']
-            elif score > 0.2:
-                threat, color = "GUARDED", COLORS['yellow']
-            else:
-                threat, color = "SAFE", COLORS['green']
-            self._m_threat.set_value(threat, color=color)
+            threat, colour_key = presentation.threat_level(
+                ml_result.get('anomaly_score', 0))
+            self._m_threat.set_value(threat, color=COLORS[colour_key])
 
             # Charts
             self._chart_traffic.add_point(cap.get('packets_per_sec', 0))
@@ -2606,11 +2601,12 @@ class NetSentinelGUI:
 
             # Status bar
             uptime = time.time() - cap.get('start_time', time.time())
+            uptime_str = presentation.format_duration(uptime)
             dev_count = data.get('device_learner', {}).get('total_devices', 0)
             inc_count = data.get('correlator', {}).get('active_incidents', 0)
             pcap_buf = data.get('pcap_writer', {}).get('buffer_packets', 0)
             self._statusbar_right.config(
-                text=f"Uptime: {int(uptime//3600)}h {int((uptime%3600)//60)}m  |  "
+                text=f"Uptime: {uptime_str}  |  "
                      f"PPS: {cap.get('packets_per_sec', 0):.0f}  |  "
                      f"Flows: {cap.get('flows_active', 0)}  |  "
                      f"Devices: {dev_count}  |  "
@@ -2631,18 +2627,18 @@ class NetSentinelGUI:
         w = canvas.winfo_width() or 300
         h = canvas.winfo_height() or 150
 
-        total = sum(protocols.values()) or 1
-        sorted_protos = sorted(protocols.items(), key=lambda x: -x[1])[:8]
+        breakdown = presentation.protocol_breakdown(protocols, limit=8)
+        if not breakdown:
+            return
 
         colors = [COLORS['accent'], COLORS['purple'], COLORS['cyan'],
                   COLORS['green'], COLORS['yellow'], COLORS['orange'],
                   COLORS['red'], COLORS['text_dim']]
 
-        bar_h = max(14, (h - 20) // max(len(sorted_protos), 1))
+        bar_h = max(14, (h - 20) // max(len(breakdown), 1))
         y = 10
 
-        for i, (proto, count) in enumerate(sorted_protos):
-            pct = count / total
+        for i, (proto, _count, pct) in enumerate(breakdown):
             bar_w = max(4, (w - 120) * pct)
             color = colors[i % len(colors)]
 
@@ -3187,21 +3183,9 @@ class NetSentinelGUI:
     # Helpers
     # ──────────────────────────────────────────────────────────────────────────
 
-    @staticmethod
-    def _format_bytes(b):
-        for unit in ['B', 'KB', 'MB', 'GB', 'TB']:
-            if abs(b) < 1024:
-                return f"{b:.1f} {unit}"
-            b /= 1024
-        return f"{b:.1f} PB"
+    _format_bytes = staticmethod(presentation.format_bytes)
 
-    @staticmethod
-    def _format_number(n):
-        if n >= 1_000_000:
-            return f"{n/1_000_000:.1f}M"
-        if n >= 1_000:
-            return f"{n/1_000:.1f}K"
-        return str(n)
+    _format_number = staticmethod(presentation.format_number)
 
     def run(self):
         """Start the GUI main loop."""

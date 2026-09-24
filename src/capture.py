@@ -344,11 +344,24 @@ class CaptureEngine:
             logger.error("Could not auto-detect interface: %s", e)
             return None
 
+    @staticmethod
+    def _raw_bytes(packet):
+        """
+        The packet's wire bytes, without asking Scapy to rebuild it.
+
+        A packet dissected from the wire keeps its original buffer in `.original`.
+        `len(packet)` and `bytes(packet)` both go through build(), which re-serialises
+        every layer — the dominant cost in this function, and it runs per packet.
+        """
+        original = getattr(packet, 'original', None)
+        return original if original else bytes(packet)
+
     def _extract_packet_info(self, packet) -> PacketInfo:
         """Extract structured metadata from a Scapy packet."""
         info = PacketInfo()
         info.timestamp = time.time()
-        info.length = len(packet)
+        raw = self._raw_bytes(packet)
+        info.length = len(raw)
 
         # Ethernet layer
         if packet.haslayer(Ether):
