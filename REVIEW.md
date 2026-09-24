@@ -1,5 +1,11 @@
 # NetSentinel — Second-Pass Review
 
+> **Status: the "Suggested next three" at the bottom are all implemented.**
+> TLS ClientHello inspection (SNI + JA3/JA4) with the BPF filter fixed,
+> PCAP-on-alert, and the presentation logic extracted out of `gui.py`.
+> See `CHANGELOG.md` for v1.6.0. The analysis below is kept as written; the
+> **Outcome** notes record what the measurements looked like afterwards.
+
 Written after the v1.5.0 audit remediation. `AUDIT.md` covers *what was broken*;
 this covers *where the project can go*: what is left to optimise, how accurate it
 can realistically get, what is worth building next, and what else this codebase
@@ -50,12 +56,16 @@ Ordered by value, with honest effort estimates.
 
 **Worth doing**
 
-- **`_extract_packet_info` calls `bytes(packet)` for the PCAP ring buffer on every
-  packet, in the capture thread, before the pps cap** (`capture.py:_capture_callback`).
-  That is a full serialisation per packet regardless of whether anyone ever exports.
-  Scapy already holds the original bytes; using `packet.original` where available
-  avoids the re-build. Worth measuring against a live interface, which this
-  container cannot do.
+- ~~**`_extract_packet_info` calls `bytes(packet)` for the PCAP ring buffer on every
+  packet**~~ — **done in v1.6.0**, and it was worse than described: `info.length =
+  len(packet)` rebuilds too, so the cost was paid twice per packet. Measured on
+  fresh packet objects, `len(packet)` costs 11.6 µs against 0.2 µs for
+  `len(packet.original)`.
+
+  A note on measuring it: the first benchmark reported no difference at all,
+  because reusing one packet object in a loop lets Scapy cache the built bytes
+  after the first call. Only fresh objects — which is what the capture thread
+  actually receives — show the cost.
 - **The PCAP ring buffer defaults to 150,000 packets ≈ 225 MB resident**, allocated
   whether or not the feature is used. Either lower the default to ~30 s of traffic
   or allocate lazily on first export/record.
@@ -117,9 +127,11 @@ were affected. That is the argument for coverage in one example.
 
 ### The remaining gaps, and what to do about them
 
-**`gui.py` — 1,772 statements, 0%.** This is the single largest untested surface and
-it cannot be tested as written: presentation and logic are interleaved in the same
-methods. The fix is not "write GUI tests", it is to extract the logic. `_draw_protocols`
+**`gui.py` — 1,772 statements, 0%.** *(Partly addressed in v1.6.0: the pure logic
+now lives in `src/presentation.py` with 42 tests. `gui.py` still reports 0% because
+what remains is genuinely widget construction.)* This is the single largest untested
+surface and it cannot be tested as written: presentation and logic are interleaved in
+the same methods. The fix is not "write GUI tests", it is to extract the logic. `_draw_protocols`
 computing percentages, `_format_bytes`, the alert filtering in `_refresh_alerts_display`,
 the threat-level thresholds in `_update_dashboard` — all pure functions wearing a
 widget costume. Pulling them into a `src/presentation.py` would make them testable
@@ -179,6 +191,13 @@ Two self-inflicted limits on top of that:
   most Google/YouTube/Cloudflare traffic — is not recognised at all.
 
 ### The single highest-value change: read the TLS ClientHello
+
+> **Outcome — implemented in v1.6.0** (`src/tls_inspect.py`). On a synthetic
+> session of 40 TLS connections, 12 DNS lookups and 20 QUIC flows, connections
+> carrying a destination name went from 12/72 (17%) to 52/72 (72%). The
+> prefilter costs 90 ns on non-handshake packets; the full parse costs 18.5 µs
+> and runs only on the first packet of a connection. QUIC on UDP/443 is now
+> recognised rather than being classified as generic UDP.
 
 The ClientHello is **plaintext**, even in TLS 1.3. It carries:
 
@@ -267,11 +286,10 @@ Grouped by how much of the existing codebase they reuse.
 
 ### Already 80% built — small additions
 
-- **PCAP-on-alert.** The ring buffer, the export function and the alert gateway all
-  exist. Wiring "on CRITICAL, call `pcap_writer.export_buffer()` and attach the path
-  to the alert evidence" is perhaps 20 lines, and it turns every serious alert into
-  something you can open in Wireshark. This is the highest value-to-effort feature
-  available.
+- ~~**PCAP-on-alert.**~~ **Done in v1.6.0.** It grew past 20 lines: the capture is
+  narrowed to the hosts named in the alert (a flood is unreadable with the rest of
+  the network mixed in), rate-limited per rule+source, pruned on disk, and the
+  filename is sanitised because `rule_id` reaches it.
 - **MITRE ATT&CK mapping.** Every rule already has a `category`. Adding a
   `technique` field (`PORT-SCAN` → T1046, `DATA-EXFIL` → T1041, `ARP-SPOOF` →
   T1557.002, `BRUTE-FORCE` → T1110) costs a dict and makes the output legible to
@@ -343,13 +361,23 @@ Most security education tooling is far worse than this at explaining itself.
 
 ---
 
-## Suggested next three
+## Suggested next three — all implemented in v1.6.0
 
-If only three things get done:
+1. ~~Parse the TLS ClientHello for SNI and JA3, and fix the BPF filter.~~ Done.
+   Named destinations on encrypted connections went 17% → 72%.
+2. ~~PCAP-on-alert.~~ Done.
+3. ~~Extract the logic out of `gui.py`.~~ Done — `src/presentation.py`.
 
-1. **Parse the TLS ClientHello for SNI and JA3**, and fix the BPF filter so the
-   handshake is actually visible. This is the difference between seeing 4% of
-   traffic meaningfully and seeing most of it.
-2. **PCAP-on-alert.** ~20 lines, and it makes every CRITICAL alert investigable.
-3. **Extract the logic out of `gui.py`.** It removes the last 0%-coverage module and
-   is the prerequisite for headless mode.
+### What the next three would be now
+
+1. **Headless mode.** `presentation.py` removed the last reason the core needed a
+   GUI at all. `NetSentinelApp` already imports tkinter only inside `run()`, so a
+   `--headless` flag plus a small HTTP API is now a genuinely small change, and it
+   is what turns this from a desktop app into a sensor you can leave on a Pi.
+2. **DNS response analysis.** Still the largest detection gap: only queries are
+   inspected, and responses carry the strongest DGA and fast-flux signals
+   (NXDOMAIN bursts, very low TTLs, one name resolving to many IPs).
+3. **Jitter-tolerant beaconing.** `_check_beaconing` requires a coefficient of
+   variation below 0.05, so any C2 with the ±10% jitter every modern framework
+   ships by default walks past it. Autocorrelation over the interval series would
+   catch what the CV test cannot — and it now has SNI and JA4 to correlate with.

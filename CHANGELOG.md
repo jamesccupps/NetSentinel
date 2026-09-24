@@ -1,5 +1,94 @@
 # NetSentinel Changelog
 
+## v1.6.0 — Seeing encrypted traffic
+
+v1.5.0 fixed what was broken. This adds what the review identified as missing: the
+ability to say anything useful about the ~85% of traffic that is encrypted.
+
+**273 unit tests** (up from 190) plus 14 integration checks. Coverage 43% → 45%.
+
+### TLS ClientHello inspection
+
+The ClientHello is plaintext even under TLS 1.3, so a monitor that reads it gets
+two things the encrypted payload will never give up:
+
+- **SNI** — the destination hostname, as a direct IP → name mapping that does not
+  depend on observing a DNS lookup. It survives DNS-over-HTTPS, which otherwise
+  silently disables five of the fifteen detection rules.
+- **JA3 / JA4 fingerprints** — hashes over the offered ciphers, extensions and
+  curves. These identify the client *stack* rather than the site, so malware using
+  its own TLS library is distinguishable even when everything it sends is opaque.
+
+JA3 is retained because public threat intel is still keyed on it, but it hashes
+unsorted lists and Chrome deliberately shuffles extension order, so it changes per
+connection. JA4 sorts first and stays stable; a test pins exactly that difference.
+
+Parsing goes through a bounds-checked reader that raises rather than slicing short,
+strips GREASE values, and rejects an SNI that is not plausibly a hostname so a
+crafted one cannot carry control characters into alerts. Truncation at every offset
+of a real ClientHello and 600 random payloads are covered.
+
+Wired through: threat-intel domain matching, the DNS heuristics and the domain
+blacklist now run on SNI, so they can fire on HTTPS at all for the first time.
+A new `TLS-FINGERPRINT` rule matches `ids.blocked_ja3` / `ids.blocked_ja4`.
+DeviceLearner and the baseline whitelist learn SNI names. QUIC on UDP/443 is
+recognised instead of being classified as generic UDP with no flags.
+
+**The default BPF filter had to be fixed first.** It matched "ACK set, SYN clear",
+which also catches PSH+ACK data segments — so it discarded the very packet this
+feature reads. The replacement drops only pure ACKs. Verified with tcpdump against
+synthetic packets.
+
+Measured on a synthetic session of 40 TLS connections, 12 DNS lookups and 20 QUIC
+flows: connections carrying a destination name went from **12/72 (17%) to 52/72
+(72%)**. The prefilter costs 90 ns on non-handshake packets; the full parse costs
+18.5 µs and runs only on the first packet of a connection.
+
+### PCAP-on-alert
+
+A CRITICAL alert used to leave you with a rule name and an IP. The ring buffer
+already holds the traffic, so it is now written out when a serious alert fires and
+the path attached to the alert evidence — narrowed to the hosts involved, because a
+scan or flood is unreadable with the rest of the network mixed in. Gated on
+severity, rate-limited per rule+source, pruned on disk, and the filename is
+sanitised because `rule_id` reaches it.
+
+### Presentation logic extracted from the GUI
+
+`gui.py` was the one module no test could reach: 1,772 statements at 0%, because
+formatting, thresholds and filtering were interleaved with widget calls. Those are
+pure functions, and they now live in `src/presentation.py`, which imports no
+toolkit. 42 tests cover them.
+
+Two behaviours the extraction fixed on the way: protocol bar fractions are computed
+against the full total rather than the truncated top-N, so a chart of the top 8 no
+longer overstates each slice; and equal counts now sort deterministically.
+
+### Capture thread no longer re-serialises packets
+
+`info.length = len(packet)` and `bytes(packet)` for the ring buffer both run
+Scapy's `build()`, re-serialising every layer. A packet dissected from the wire
+already carries its bytes in `.original`. Measured on fresh packet objects:
+`len(packet)` 11.6 µs against `len(packet.original)` 0.2 µs, paid twice per packet,
+on the thread that must not stall.
+
+Worth recording how this was measured, because the first attempt reported no
+difference: benchmarking one packet object in a loop lets Scapy cache the built
+bytes after the first call. Only fresh objects — what the capture thread actually
+receives — show the cost. A test hooks `build()` and fails if the capture path calls
+it at all.
+
+### Test isolation
+
+Every test module installed its own Scapy stub, which left `src.capture` holding
+`IP = TCP = UDP = Raw = None` while `SCAPY_AVAILABLE` still read `True`. Whichever
+module imported first decided what the rest of the suite got, so the TLS tests
+passed alone and failed under discovery. `_test_support.py` now owns the shared
+temp HOME and tries the real library first, stubbing only if it genuinely cannot
+import. Verified in isolation, in order, and in reverse order.
+
+---
+
 ## v1.5.0 — Audit remediation
 
 A full review of the codebase (see `AUDIT.md`) found one exploitable security bug,
