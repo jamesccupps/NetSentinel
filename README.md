@@ -4,7 +4,7 @@
 
 NetSentinel is a desktop network security application that monitors all traffic on your machine, detects anomalies using machine learning, and alerts you to suspicious activity in real time. It learns your network automatically — no configuration required.
 
-![Python](https://img.shields.io/badge/python-3.10+-blue) ![Platform](https://img.shields.io/badge/platform-Windows-lightgrey) ![License](https://img.shields.io/badge/license-MIT-green) ![Tests](https://img.shields.io/badge/tests-280%20unit%20%2B%2014%20integration-brightgreen)
+![Python](https://img.shields.io/badge/python-3.10+-blue) ![Platform](https://img.shields.io/badge/platform-Windows-lightgrey) ![License](https://img.shields.io/badge/license-MIT-green) ![Tests](https://img.shields.io/badge/tests-311%20unit%20%2B%2014%20integration-brightgreen)
 
 ## Key Features
 
@@ -16,7 +16,9 @@ works even when the host uses DNS-over-HTTPS, because it comes from the handshak
 rather than a DNS query. JA4 identifies the client software, so malware using its own
 TLS stack stands out even when everything it sends is encrypted.
 
-**Machine Learning** — Isolation Forest anomaly detection trained on your traffic baseline, with Welford's online statistics for O(1) incremental learning. Detects beaconing, DNS tunneling, and behavioral anomalies.
+**Machine Learning** — Isolation Forest anomaly detection trained on your traffic baseline, with Welford's online statistics for O(1) incremental learning.
+
+**Beaconing Detection** — Scores how scheduled a destination's traffic is using quartile skew, median absolute deviation and payload-size consistency. Survives the jitter every C2 framework enables by default, which a coefficient-of-variation test does not.
 
 **Intrusion Detection** — 12 rule-based detectors: port scans, brute force, SYN/ICMP floods, ARP spoofing, suspicious DNS, data exfiltration, threat intelligence feeds, and more.
 
@@ -109,6 +111,7 @@ Configuration lives in `~/.netsentinel/config.json` (created on first run with d
 | `ml` | `feature_history_days` | 90 | Days of feature vectors to retain |
 | `ids` | `port_scan_threshold` | 15 | Ports in window to trigger scan alert |
 | `ids` | `brute_force_threshold` | 10 | Failed connections to trigger brute force alert |
+| `ids` | `beaconing_score_threshold` | 0.75 | Beacon score (0-1) required to report a destination |
 | `ids` | `blocked_ja3` | `[]` | JA3 client fingerprints to alert on |
 | `ids` | `blocked_ja4` | `[]` | JA4 client fingerprints to alert on |
 | `alerts` | `severity_filter` | LOW | Minimum severity to display |
@@ -191,7 +194,7 @@ Worth knowing before you rely on a detector:
 ## Testing
 
 ```bash
-# Everything (280 tests)
+# Everything (311 tests)
 python -m unittest discover -s . -p "test_*.py"
 
 # Regression tests for the v1.5.0 audit fixes
@@ -205,6 +208,9 @@ python -m unittest test_tls -v
 
 # Presentation logic (formatting, thresholds, filtering)
 python -m unittest test_presentation -v
+
+# Beaconing detection, including the jitter calibration
+python -m unittest test_beaconing -v
 
 # End-to-end integration checks (real code paths, no capture required)
 python tools/integration_check.py
@@ -241,6 +247,7 @@ NetSentinel/
 │   ├── pcap_analyzer.py      # Offline PCAP file analysis
 │   ├── feature_store.py      # Persistent ML feature vector storage
 │   ├── tls_inspect.py        # ClientHello parsing: SNI, JA3/JA4, QUIC detection
+│   ├── beaconing.py          # Jitter-tolerant periodicity scoring
 │   ├── presentation.py       # Pure formatting/threshold/filter logic (no tkinter)
 │   ├── ipcache.py            # Cached IP address classification
 │   ├── config.py             # Configuration management

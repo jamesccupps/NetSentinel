@@ -103,7 +103,10 @@ DEFAULT_CONFIG = {
         "brute_force_window_sec": 30,
         "dns_tunnel_max_subdomain_len": 50,
         "large_upload_mb": 100,
-        "beaconing_tolerance": 0.05,     # Timing regularity threshold (lower = stricter)
+        # Combined beacon score (0-1) required to report a periodic destination.
+        # Replaces beaconing_tolerance, which gated on coefficient of variation and
+        # so only caught beacons with no jitter at all.
+        "beaconing_score_threshold": 0.75,
         "known_bad_ports": [4444, 5555, 6666, 1337, 31337, 12345, 65535],
         # JA3/JA4 client fingerprints to alert on. Public threat intel publishes
         # these for C2 frameworks; they match on encrypted traffic.

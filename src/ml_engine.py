@@ -19,6 +19,9 @@ import numpy as np
 from collections import defaultdict, deque
 from datetime import datetime
 
+from src.beaconing import MIN_OBSERVATIONS, is_expected_periodic, score_beacon
+from src.ipcache import is_global
+
 logger = logging.getLogger("NetSentinel.ML")
 
 try:
@@ -441,6 +444,8 @@ class AnomalyDetector:
         if self.feature_store and not self.is_trained:
             self._bootstrap_from_history()
 
+        # Detail of the strongest beacon in the last analysed window, for alerts.
+        self.last_beacon = None
         self.baseline_whitelist = None  # Set by app after init
 
         logger.info("Anomaly Detector initialized. ML enabled: %s, Trained: %s",
@@ -520,8 +525,13 @@ class AnomalyDetector:
             results['reasons'].append(f"Statistical deviation from baseline ({baseline_score:.2f})")
         if if_score > 0.3:
             results['reasons'].append(f"Isolation Forest anomaly ({if_score:.2f})")
-        if beaconing_score > 0.5:
-            results['reasons'].append("Potential beaconing/C2 pattern detected")
+        if beaconing_score > 0:
+            detail = self.last_beacon or {}
+            results['beacon'] = detail
+            results['reasons'].append(
+                "Beaconing pattern to {} ({})".format(
+                    detail.get('destination', 'an external host'),
+                    detail.get('reason', 'regular check-ins')))
         if dns_score > 0.5:
             results['reasons'].append("Suspicious DNS activity")
 
@@ -545,74 +555,76 @@ class AnomalyDetector:
 
     def _check_beaconing(self, packets_window):
         """
-        Detect regular beaconing patterns (C2 communication).
-        Requires: many packets, very regular timing, in the C2 beacon range (5-300 sec).
-        Normal keep-alives and websockets are excluded by requiring both
-        regularity AND a minimum packet count.
+        Score the most beacon-like external destination in this window.
 
-        Key insight: C2 beacons go to EXTERNAL IPs. Local-subnet traffic
-        (IoT keepalives, Home Assistant polling, Chromecast heartbeats) is
-        exempt because it's not C2-relevant and generates massive false positives.
+        Scoring lives in src/beaconing.py; this handles which destinations are
+        eligible. The previous implementation required a coefficient of variation
+        below 0.05, which only ever caught a beacon with no jitter at all — every
+        mainstream C2 framework enables jitter by default.
         """
-        # One pass builds both maps. Previously the set of sources per destination was
-        # recomputed by rescanning the whole window inside the per-destination loop,
-        # which is O(packets x destinations) every analysis cycle.
+        # One pass builds all three maps. Previously the set of sources per
+        # destination was recomputed by rescanning the whole window inside the
+        # per-destination loop, which is O(packets x destinations) every cycle.
         dst_times = defaultdict(list)
         dst_sources = defaultdict(set)
+        dst_sizes = defaultdict(list)
+        dst_ports = {}
         for p in packets_window:
             if p.dst_ip:
                 dst_times[p.dst_ip].append(p.timestamp)
                 dst_sources[p.dst_ip].add(p.src_ip)
+                dst_sizes[p.dst_ip].append(p.payload_size or p.length)
+                if p.dst_port:
+                    dst_ports.setdefault(p.dst_ip, p.dst_port)
 
         max_score = 0.0
-        tolerance = self.config.get('ids', 'beaconing_tolerance', default=0.05)
+        self.last_beacon = None
+        threshold = self.config.get('ids', 'beaconing_score_threshold', default=0.75)
 
         for dst_ip, times in dst_times.items():
-            if len(times) < 15:  # Need enough data points for confidence
+            if len(times) < MIN_OBSERVATIONS:
                 continue
 
-            # Skip local/private IPs — IoT devices legitimately beacon to local
-            # hubs, gateways, and each other. C2 goes to external infrastructure.
-            try:
-                addr = ipaddress.ip_address(dst_ip)
-                if addr.is_private or addr.is_loopback or addr.is_link_local or addr.is_multicast:
-                    continue
-            except (ValueError, TypeError):
+            # C2 goes to external infrastructure. IoT devices legitimately beacon
+            # to local hubs, gateways and each other.
+            if not is_global(dst_ip):
+                continue
+
+            # Services whose job is to poll look exactly like a beacon, because
+            # they are one. Timing cannot separate them, so do not try.
+            if is_expected_periodic(dst_port=dst_ports.get(dst_ip, 0)):
                 continue
 
             src_ips = dst_sources[dst_ip]
 
-            # Skip IPs that were already beaconing during baseline learning
-            # — these are normal periodic services (NTP, health checks, etc.)
+            # Destinations already beaconing during baseline learning are this
+            # network's normal periodic services.
             if self.baseline_whitelist and src_ips:
                 if all(self.baseline_whitelist.is_learned_beacon(src, dst_ip)
                        for src in src_ips):
                     continue
 
-            times.sort()
-            intervals = [times[i + 1] - times[i] for i in range(len(times) - 1)]
-            if not intervals:
+            result = score_beacon(times, dst_sizes.get(dst_ip))
+            if not result['qualified']:
                 continue
-            mean_interval = np.mean(intervals)
-            # Only flag intervals in the C2 beacon range: 5-300 seconds
-            # Sub-second = normal streaming/websocket, >300 = too slow to be beaconing
-            if mean_interval < 5 or mean_interval > 300:
-                continue
-            std_interval = np.std(intervals)
-            cv = std_interval / max(mean_interval, 0.001)
 
-            # Very low CV = very regular timing = suspicious
-            if cv < tolerance:
-                # If still learning baseline, record this as a known beacon pattern
-                if self.baseline_whitelist and self.baseline_whitelist.is_learning:
+            # While learning, record the pattern instead of scoring it.
+            if self.baseline_whitelist and self.baseline_whitelist.is_learning:
+                if result['score'] >= threshold:
                     for src in src_ips:
-                        self.baseline_whitelist.observe_beacon(src, dst_ip, mean_interval)
-                    continue  # Don't score as anomalous during learning
+                        self.baseline_whitelist.observe_beacon(
+                            src, dst_ip, result['interval'])
+                continue
 
-                score = 1.0 - cv
-                max_score = max(max_score, score)
+            if result['score'] > max_score:
+                max_score = result['score']
+                self.last_beacon = dict(result, destination=dst_ip,
+                                        sources=sorted(src_ips)[:5])
 
-        return max_score
+        # Below the threshold this is periodicity, not a finding. Reporting the
+        # raw score would let a merely regular connection drift into the combined
+        # anomaly score.
+        return max_score if max_score >= threshold else 0.0
 
     def _check_dns_anomalies(self, packets_window):
         """Detect DNS tunneling and other DNS anomalies."""
