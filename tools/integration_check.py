@@ -17,21 +17,14 @@ import tempfile
 import shutil
 import traceback
 
-# ─── Mock scapy to avoid IPv6 route crash on this container ─────
-# Scapy tries to enumerate IPv6 routes at import time which fails
-# in containerized Linux. We only need PacketInfo, not actual capture.
-_mock = types.ModuleType('scapy')
-_mock_all = types.ModuleType('scapy.all')
-for _n in ['sniff','conf','get_if_list','get_if_addr','IP','IPv6','TCP',
-           'UDP','ICMP','DNS','ARP','Raw','Ether','rdpcap','PcapReader']:
-    setattr(_mock_all, _n, None)
-sys.modules['scapy'] = _mock
-sys.modules['scapy.all'] = _mock_all
 
 import numpy as np
 
 # Repo root, so `src` is importable when run from tools/
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+# Isolated HOME + real Scapy where available. Must precede any src import.
+import _test_support  # noqa: E402,F401
 
 # ─── Setup temp dirs so we don't pollute the real system ─────────
 TEMP_DIR = tempfile.mkdtemp(prefix="ns_test_")

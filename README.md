@@ -4,11 +4,17 @@
 
 NetSentinel is a desktop network security application that monitors all traffic on your machine, detects anomalies using machine learning, and alerts you to suspicious activity in real time. It learns your network automatically — no configuration required.
 
-![Python](https://img.shields.io/badge/python-3.10+-blue) ![Platform](https://img.shields.io/badge/platform-Windows-lightgrey) ![License](https://img.shields.io/badge/license-MIT-green) ![Tests](https://img.shields.io/badge/tests-190%20unit%20%2B%2014%20integration-brightgreen)
+![Python](https://img.shields.io/badge/python-3.10+-blue) ![Platform](https://img.shields.io/badge/platform-Windows-lightgrey) ![License](https://img.shields.io/badge/license-MIT-green) ![Tests](https://img.shields.io/badge/tests-218%20unit%20%2B%2014%20integration-brightgreen)
 
 ## Key Features
 
 **Traffic Monitoring** — Full packet capture with live bandwidth charts, protocol breakdown, bidirectional flow tracking, and process identification.
+
+**TLS Inspection** — Reads the plaintext ClientHello to recover the destination
+hostname (SNI) and a JA3/JA4 client fingerprint from *encrypted* connections. The SNI
+works even when the host uses DNS-over-HTTPS, because it comes from the handshake
+rather than a DNS query. JA4 identifies the client software, so malware using its own
+TLS stack stands out even when everything it sends is encrypted.
 
 **Machine Learning** — Isolation Forest anomaly detection trained on your traffic baseline, with Welford's online statistics for O(1) incremental learning. Detects beaconing, DNS tunneling, and behavioral anomalies.
 
@@ -103,6 +109,8 @@ Configuration lives in `~/.netsentinel/config.json` (created on first run with d
 | `ml` | `feature_history_days` | 90 | Days of feature vectors to retain |
 | `ids` | `port_scan_threshold` | 15 | Ports in window to trigger scan alert |
 | `ids` | `brute_force_threshold` | 10 | Failed connections to trigger brute force alert |
+| `ids` | `blocked_ja3` | `[]` | JA3 client fingerprints to alert on |
+| `ids` | `blocked_ja4` | `[]` | JA4 client fingerprints to alert on |
 | `alerts` | `severity_filter` | LOW | Minimum severity to display |
 | `alerts` | `cooldown_sec` | 30 | Min seconds between duplicate alerts |
 | `forensics` | `save_credentials` | true | Persist findings to the encrypted vault |
@@ -166,11 +174,12 @@ Data files are created `0700`/`0600` where the platform supports it. See
 
 Worth knowing before you rely on a detector:
 
-- **The default BPF filter excludes established TCP/443 traffic**
-  (`capture.bpf_filter`), and `capture.max_pps` caps processing at 2000 packets
-  per second. Both trade visibility for CPU. Byte-counting detectors — including
-  data exfiltration — therefore under-count HTTPS. Widen the filter or raise the
-  cap if you need full visibility.
+- **`capture.max_pps` caps processing at 2000 packets per second.** Raise it if you
+  need full visibility on a busy link; the pipeline measures ~72 µs/packet, so 2000
+  pps is roughly 15% of one core.
+- **TLS payload stays opaque.** NetSentinel reads the handshake, not the content.
+  It can tell you *who* a host talked to and *what software* did the talking, not
+  what was said.
 - **`DATA-EXFIL` only counts traffic leaving the local network.** Purely internal
   LAN-to-LAN transfers (a NAS backup, for example) are deliberately out of scope.
 - **Process attribution needs privileges.** Without them `psutil` cannot map
@@ -179,7 +188,7 @@ Worth knowing before you rely on a detector:
 ## Testing
 
 ```bash
-# Everything (190 tests)
+# Everything (218 tests)
 python -m unittest discover -s . -p "test_*.py"
 
 # Regression tests for the v1.5.0 audit fixes
@@ -187,6 +196,9 @@ python -m unittest test_regressions -v
 
 # Coverage for modules the original suite never reached
 python -m unittest test_coverage -v
+
+# TLS ClientHello parsing, fingerprinting and hostile input
+python -m unittest test_tls -v
 
 # End-to-end integration checks (real code paths, no capture required)
 python tools/integration_check.py
@@ -222,6 +234,8 @@ NetSentinel/
 │   ├── process_verify.py     # Deep process investigation (signatures, hashes)
 │   ├── pcap_analyzer.py      # Offline PCAP file analysis
 │   ├── feature_store.py      # Persistent ML feature vector storage
+│   ├── tls_inspect.py        # ClientHello parsing: SNI, JA3/JA4, QUIC detection
+│   ├── ipcache.py            # Cached IP address classification
 │   ├── config.py             # Configuration management
 │   └── gui.py                # tkinter dashboard (11 tabs)
 ├── test_unit.py              # Core unit tests

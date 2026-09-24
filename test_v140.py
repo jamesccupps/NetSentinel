@@ -22,6 +22,10 @@ from collections import deque
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+# Isolated HOME + real Scapy where available. Must precede any src import.
+import _test_support  # noqa: E402,F401
+from _test_support import SCAPY_REAL  # noqa: E402
+
 from src.config import Config, DEFAULT_CONFIG
 from src.ids_engine import IDSEngine, Alert, _COMMON_SERVICE_PORTS, _STANDARD_OUTBOUND_PORTS, _PORT_NAMES, _SERVICE_NAMES
 from src.ml_engine import TrafficFeatureExtractor

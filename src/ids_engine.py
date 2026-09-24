@@ -279,6 +279,8 @@ class IDSEngine:
         self.blacklist_domains = {d.lower().lstrip('.')
                                   for d in config.get('blacklists', 'domains', default=[])}
         self.known_bad_ports = set(config.get('ids', 'known_bad_ports', default=[]))
+        self.blocked_ja3 = {f.lower() for f in config.get('ids', 'blocked_ja3', default=[])}
+        self.blocked_ja4 = {f.lower() for f in config.get('ids', 'blocked_ja4', default=[])}
 
         # Thresholds
         self.port_scan_threshold = config.get('ids', 'port_scan_threshold', default=15)
@@ -304,6 +306,10 @@ class IDSEngine:
         self._ip_to_domains = defaultdict(set)  # {ip: {domain1, domain2}} - reverse mapping
         self._latest_dns_by_ip = {}  # {src_ip: (domain, timestamp)} - O(1) lookup for inference
         self._ip_to_domains_max = 20  # Max domains to track per IP
+
+        # Distinct JA4 fingerprints observed, for the dashboard and for spotting a
+        # client stack that has never been seen on this network before.
+        self._ja4_seen = {}
 
         # Statistics
         self.alerts_generated = 0
@@ -416,6 +422,24 @@ class IDSEngine:
         self._periodic_cleanup()
         alerts = []
 
+        # ─── TLS SNI: the destination name for encrypted traffic ──────
+        # The ClientHello is plaintext even under TLS 1.3, so this is a direct
+        # IP -> name mapping that does not depend on observing the DNS lookup.
+        # It is also the only one that survives DNS-over-HTTPS.
+        if pkt_info.tls_ja4:
+            entry = self._ja4_seen.get(pkt_info.tls_ja4)
+            if entry is None:
+                if len(self._ja4_seen) < 5000:
+                    self._ja4_seen[pkt_info.tls_ja4] = [time.time(), 1]
+            else:
+                entry[0] = time.time()
+                entry[1] += 1
+
+        if pkt_info.tls_sni and pkt_info.dst_ip:
+            known = self._ip_to_domains.get(pkt_info.dst_ip)
+            if known is None or len(known) < self._ip_to_domains_max:
+                self._ip_to_domains[pkt_info.dst_ip].add(pkt_info.tls_sni)
+
         # ─── DNS Resolution Tracking (always runs, lightweight) ────────
         # Track every DNS query so we can map IPs to domains later
         if pkt_info.dns_query:
@@ -452,15 +476,16 @@ class IDSEngine:
             return []
 
         # Explicitly blacklisted domain
-        if self.blacklist_domains and pkt_info.dns_query and \
-                _domain_matches(pkt_info.dns_query, self.blacklist_domains):
+        blacklist_target = pkt_info.dns_query or pkt_info.tls_sni
+        if self.blacklist_domains and blacklist_target and \
+                _domain_matches(blacklist_target, self.blacklist_domains):
             alerts.append(self._create_alert(
                 "BL-DOMAIN", Severity.HIGH,
                 "Blacklisted Domain",
-                f"DNS query for blacklisted domain: {pkt_info.dns_query}",
+                f"Connection to blacklisted domain: {blacklist_target}",
                 pkt_info,
                 evidence={
-                    'queried_domain': pkt_info.dns_query,
+                    'queried_domain': blacklist_target,
                     'requesting_ip': pkt_info.src_ip,
                     'process': pkt_info.process_name or 'Unknown',
                     'recommendation': 'This domain is on your configured blacklist. '
@@ -571,7 +596,10 @@ class IDSEngine:
                     ))
 
         # === Rule 2: Threat Intel - Domain Reputation ===
-        if self.threat_intel and pkt_info.dns_query:
+        # observed_domain is the DNS query when we saw one, otherwise the TLS SNI.
+        # Before SNI was parsed, this rule could not fire at all on HTTPS traffic.
+        observed_domain = pkt_info.dns_query or pkt_info.tls_sni
+        if self.threat_intel and observed_domain:
             # FIRST: Check if this is a first-party cloud domain (docs.google.com,
             # outlook.office365.com, etc.). These appear in feeds like URLhaus
             # because users share malware THROUGH the service, but the domain
@@ -579,13 +607,13 @@ class IDSEngine:
             is_first_party_cloud = False
             is_cloud_hosting = False
             if self.net_env:
-                if self.net_env.is_known_cloud_domain(pkt_info.dns_query):
+                if self.net_env.is_known_cloud_domain(observed_domain):
                     is_first_party_cloud = True
-                elif self.net_env.is_cloud_hosting_domain(pkt_info.dns_query):
+                elif self.net_env.is_cloud_hosting_domain(observed_domain):
                     is_cloud_hosting = True
 
             if not is_first_party_cloud:
-                result = self._cached_ti_check('domain', pkt_info.dns_query)
+                result = self._cached_ti_check('domain', observed_domain)
                 if result and result.get('confidence') in ('HIGH', 'MEDIUM'):
                     self.threat_intel_hits += 1
 
@@ -604,16 +632,19 @@ class IDSEngine:
                     alerts.append(self._create_alert(
                         "THREAT-INTEL-DOMAIN", sev,
                         f"Malicious Domain ({result['category']})",
-                        f"DNS lookup for known malicious domain: {pkt_info.dns_query}",
+                        (f"DNS lookup for known malicious domain: {observed_domain}"
+                         if pkt_info.dns_query else
+                         f"TLS connection to known malicious domain: {observed_domain}"),
                         pkt_info,
                         evidence={
-                            'queried_domain': pkt_info.dns_query,
+                            'queried_domain': observed_domain,
+                            'observed_via': 'DNS query' if pkt_info.dns_query else 'TLS SNI',
                             'threat_feed': result['feed'],
                             'threat_category': result['category'],
                             'feed_description': result['description'],
                             'confidence': result['confidence'],
                             'match_type': result.get('match_type', 'exact'),
-                            'matched_domain': result.get('matched_domain', pkt_info.dns_query),
+                            'matched_domain': result.get('matched_domain', observed_domain),
                             'hosted_on_cloud': is_cloud_hosting,
                             'connection': f"{pkt_info.src_ip}:{pkt_info.src_port} → "
                                           f"{pkt_info.dst_ip}:{pkt_info.dst_port}",
@@ -642,6 +673,42 @@ class IDSEngine:
                     self.alert_callback(alert)
             self.alerts_generated += len(valid_alerts)
             return valid_alerts
+
+        # === Rule 2b: Known-bad TLS client fingerprint ===
+        # JA3/JA4 identify the client *stack*, not the site, so this matches malware
+        # using a distinctive TLS library even when everything it sends is encrypted
+        # and the destination is one nobody has reported yet.
+        if self.blocked_ja3 or self.blocked_ja4:
+            matched = None
+            if pkt_info.tls_ja3 and pkt_info.tls_ja3.lower() in self.blocked_ja3:
+                matched = ('JA3', pkt_info.tls_ja3)
+            elif pkt_info.tls_ja4 and pkt_info.tls_ja4.lower() in self.blocked_ja4:
+                matched = ('JA4', pkt_info.tls_ja4)
+            if matched:
+                kind, value = matched
+                alerts.append(self._create_alert(
+                    "TLS-FINGERPRINT", Severity.HIGH,
+                    f"Known Malicious TLS Client ({kind})",
+                    f"TLS client fingerprint {value} is on the blocklist",
+                    pkt_info,
+                    evidence={
+                        'fingerprint_type': kind,
+                        'fingerprint': value,
+                        'server_name': pkt_info.tls_sni or 'none (direct IP)',
+                        'tls_version': pkt_info.tls_version,
+                        'process': pkt_info.process_name or 'Unknown',
+                        'description': (
+                            'This fingerprint is a hash of the TLS options the client '
+                            'offered. It identifies the software making the connection, '
+                            'not the site it is visiting, so it still works when the '
+                            'traffic itself is encrypted.'),
+                        'recommendation': (
+                            'Identify the process making this connection. A fingerprint '
+                            'that matches no browser or tool you installed is a strong '
+                            'indicator of malware using its own TLS stack.'),
+                    },
+                    category="Threat Intelligence"
+                ))
 
         # === Rule 3: Blacklisted IP ===
         if pkt_info.src_ip in self.blacklist_ips:
@@ -864,12 +931,12 @@ class IDSEngine:
                 ))
 
         # === Rule 9: Suspicious DNS (with full detail) ===
-        if pkt_info.dns_query:
-            self._dns_queries_by_ip[pkt_info.src_ip].append(
-                (time.time(), pkt_info.dns_query)
-            )
-
-            query = pkt_info.dns_query
+        # Runs on the TLS SNI as well: a connection to a high-abuse TLD is the same
+        # signal whether the name came from a DNS query or the handshake.
+        if pkt_info.dns_query or pkt_info.tls_sni:
+            query = pkt_info.dns_query or pkt_info.tls_sni
+            if pkt_info.dns_query:
+                self._dns_queries_by_ip[pkt_info.src_ip].append((time.time(), query))
             query_parts = query.split('.')
             subdomain = query_parts[0] if query_parts else ''
 
@@ -1121,6 +1188,9 @@ class IDSEngine:
             'encrypted': 'Yes (TLS/SSL)' if pkt_info.is_encrypted else 'No',
             'process': pkt_info.process_name or 'Unknown',
             'dns_query': pkt_info.dns_query if pkt_info.dns_query else None,
+            'tls_sni': pkt_info.tls_sni or None,
+            'tls_version': pkt_info.tls_version or None,
+            'tls_ja4': pkt_info.tls_ja4 or None,
         }
 
     def _cached_ti_check(self, check_type, value):
@@ -1207,6 +1277,7 @@ class IDSEngine:
             'tracked_sources': len(self._port_access),
             'arp_entries': len(self._arp_table),
             'threat_intel_hits': self.threat_intel_hits,
+            'tls_fingerprints_seen': len(self._ja4_seen),
         }
         if self.threat_intel:
             stats['threat_intel'] = self.threat_intel.get_stats()

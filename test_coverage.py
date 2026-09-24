@@ -20,18 +20,9 @@ from datetime import datetime, timedelta
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-if 'scapy' not in sys.modules:
-    _mock = types.ModuleType('scapy')
-    _mock_all = types.ModuleType('scapy.all')
-    for _n in ['sniff', 'conf', 'get_if_list', 'get_if_addr', 'IP', 'IPv6', 'TCP',
-               'UDP', 'ICMP', 'DNS', 'ARP', 'Raw', 'Ether', 'rdpcap', 'PcapReader']:
-        setattr(_mock_all, _n, None)
-    sys.modules['scapy'] = _mock
-    sys.modules['scapy.all'] = _mock_all
-
-if not os.environ.get('HOME', '').startswith('/tmp/ns_'):
-    os.environ['HOME'] = tempfile.mkdtemp(prefix='ns_coverage_')
-    os.environ['USERPROFILE'] = os.environ['HOME']
+# Isolated HOME + real Scapy where available. Must precede any src import.
+import _test_support  # noqa: E402,F401
+from _test_support import SCAPY_REAL  # noqa: E402
 
 import numpy as np  # noqa: E402
 
@@ -355,19 +346,8 @@ class TestPcapRoundTrip(unittest.TestCase):
     writes are a valid PCAP, let alone that the analyser can read them back.
     """
 
-    @classmethod
-    def setUpClass(cls):
-        # These two need the real Scapy, which the module-level mock replaces.
-        for mod in ('scapy', 'scapy.all'):
-            sys.modules.pop(mod, None)
-        try:
-            import scapy.all  # noqa: F401
-            cls.scapy_ok = True
-        except Exception:
-            cls.scapy_ok = False
-
     def setUp(self):
-        if not self.scapy_ok:
+        if not SCAPY_REAL:
             self.skipTest('real scapy unavailable')
         self.tmp = tempfile.mkdtemp(prefix='ns_pcap_')
 

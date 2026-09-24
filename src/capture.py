@@ -8,6 +8,8 @@ import time
 import logging
 from collections import defaultdict, deque
 
+from src.tls_inspect import looks_like_tls_handshake, parse_client_hello
+
 logger = logging.getLogger("NetSentinel.Capture")
 
 try:
@@ -34,6 +36,7 @@ class PacketInfo:
         'protocol', 'length', 'flags', 'payload_size', 'ttl',
         'dns_query', 'dns_response', 'is_encrypted', 'raw_summary',
         'src_mac', 'dst_mac', 'process_name', 'process_pid',
+        'tls_sni', 'tls_ja3', 'tls_ja4', 'tls_version',
         '_raw_payload',
     ]
 
@@ -56,10 +59,21 @@ class PacketInfo:
         self.dst_mac = ""
         self.process_name = ""
         self.process_pid = 0
+        # Recovered from the (plaintext) TLS ClientHello. For encrypted traffic this
+        # is the only destination name and client identity available.
+        self.tls_sni = ""
+        self.tls_ja3 = ""
+        self.tls_ja4 = ""
+        self.tls_version = ""
         self._raw_payload = None
 
     def to_dict(self):
         return {attr: getattr(self, attr) for attr in self.__slots__ if not attr.startswith('_')}
+
+    @property
+    def domain(self):
+        """Best available destination name: the TLS SNI, else the DNS query."""
+        return self.tls_sni or self.dns_query
 
     @property
     def flow_key(self):
@@ -228,6 +242,15 @@ _CREDENTIAL_PORTS = frozenset({
     6667, 6668, 6669,
     # CouchDB
     5984,
+})
+
+
+# Ports where a TLS handshake is expected. The ClientHello on these is parsed for
+# SNI and JA3/JA4 — the payload itself stays opaque, but the handshake is not.
+_TLS_PORTS = frozenset({
+    443, 465, 563, 636, 853, 989, 990, 993, 995,
+    1443, 2083, 2087, 2096, 4443, 5061, 5986,
+    8443, 8883, 9443, 10443,
 })
 
 
@@ -424,6 +447,31 @@ class CaptureEngine:
                     info._raw_payload = bytes(packet[Raw].load)
             except Exception:
                 pass
+
+        # TLS handshake inspection. Only the first packets of a connection carry a
+        # ClientHello, and looks_like_tls_handshake() rejects everything else in four
+        # byte comparisons, so this costs almost nothing on established connections.
+        elif (info.payload_size > 0 and info.protocol == 'TCP'
+                and (info.dst_port in _TLS_PORTS or info.src_port in _TLS_PORTS)):
+            try:
+                if packet.haslayer(Raw):
+                    payload = bytes(packet[Raw].load)
+                    if looks_like_tls_handshake(payload):
+                        hello = parse_client_hello(payload)
+                        if hello:
+                            info.tls_sni = hello['sni'] or ''
+                            info.tls_ja3 = hello['ja3']
+                            info.tls_ja4 = hello['ja4']
+                            info.tls_version = hello['version']
+            except Exception as e:
+                logger.debug("TLS inspection error: %s", e)
+
+        # QUIC rides UDP/443 and would otherwise be indistinguishable from any other
+        # UDP traffic — no flags, and is_encrypted left False.
+        if (info.protocol == 'UDP' and not info.is_encrypted
+                and (info.dst_port == 443 or info.src_port == 443)):
+            info.is_encrypted = True
+            info.tls_version = 'QUIC'
 
         return info
 

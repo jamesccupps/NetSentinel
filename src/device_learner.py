@@ -174,9 +174,10 @@ class DeviceLearner:
                     dev.dst_ports_used[pkt_info.dst_port] += 1
 
                 # DNS queries reveal device behavior
-                if pkt_info.dns_query:
+                observed = pkt_info.dns_query or pkt_info.tls_sni
+                if observed:
                     # Store the base domain (last 2 labels)
-                    parts = pkt_info.dns_query.split('.')
+                    parts = observed.split('.')
                     if len(parts) >= 2:
                         base = '.'.join(parts[-2:])
                         dev.dns_domains[base] += 1

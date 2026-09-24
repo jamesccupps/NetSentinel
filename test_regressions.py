@@ -20,20 +20,10 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-# Scapy enumerates IPv6 routes at import time, which fails in containers. None of
-# these tests need real capture — only the pure-Python analysis code.
-if 'scapy' not in sys.modules:
-    _mock = types.ModuleType('scapy')
-    _mock_all = types.ModuleType('scapy.all')
-    for _n in ['sniff', 'conf', 'get_if_list', 'get_if_addr', 'IP', 'IPv6', 'TCP',
-               'UDP', 'ICMP', 'DNS', 'ARP', 'Raw', 'Ether', 'rdpcap', 'PcapReader']:
-        setattr(_mock_all, _n, None)
-    sys.modules['scapy'] = _mock
-    sys.modules['scapy.all'] = _mock_all
+# Isolated HOME + real Scapy where available. Must precede any src import.
+import _test_support  # noqa: E402,F401
+from _test_support import SCAPY_REAL  # noqa: E402
 
-_TMP_HOME = tempfile.mkdtemp(prefix='ns_regressions_')
-os.environ['HOME'] = _TMP_HOME
-os.environ['USERPROFILE'] = _TMP_HOME
 
 import numpy as np  # noqa: E402
 

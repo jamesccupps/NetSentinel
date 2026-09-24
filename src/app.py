@@ -324,8 +324,10 @@ class NetSentinelApp:
         # DNS-TUNNEL, DNS-BAD-TLD, beaconing and full-severity DATA-EXFIL for it.
         try:
             if self.baseline_whitelist.is_learning:
-                if pkt_info.dns_query:
-                    self.baseline_whitelist.observe_dns(pkt_info.src_ip, pkt_info.dns_query)
+                # pkt_info.domain is the SNI when there is one, else the DNS query,
+                # so encrypted destinations are learned as normal too.
+                if pkt_info.domain:
+                    self.baseline_whitelist.observe_dns(pkt_info.src_ip, pkt_info.domain)
                 if pkt_info.dst_ip and pkt_info.dst_port:
                     self.baseline_whitelist.observe_connection(
                         pkt_info.src_ip, pkt_info.dst_ip, pkt_info.dst_port)

@@ -54,7 +54,16 @@ DEFAULT_CONFIG = {
         "interface": "auto",            # "auto" picks the default interface
         "promiscuous": True,            # Put the interface in promiscuous mode
         "snap_length": 65535,           # Bytes captured per packet
-        "bpf_filter": "not (port 443 and tcp[tcpflags] & tcp-ack != 0 and tcp[tcpflags] & tcp-syn == 0)",
+        # Drop only *pure* ACKs on 443 — packets with no payload and no control
+        # flags. The previous filter matched "ACK set, SYN clear", which also
+        # catches PSH+ACK data segments, so it discarded the entire TLS
+        # conversation including the ClientHello that carries SNI and JA3/JA4.
+        # IPv4-only (tcp[...] does not apply to IPv6), so IPv6 passes unfiltered.
+        "bpf_filter": (
+            "not (tcp port 443 "
+            "and (tcp[tcpflags] & (tcp-syn|tcp-fin|tcp-rst|tcp-push)) == 0 "
+            "and (ip[2:2] - ((ip[0]&0x0f)<<2) - ((tcp[12]&0xf0)>>2)) == 0)"
+        ),
         # Hard cap on packets/sec handed to the analysis pipeline. Measured cost is
         # ~72 us/packet after the v1.5.0 optimisations (was ~950 us), so 2000 pps is
         # roughly 15% of one core. Raise it if you need full visibility on a busy link.
@@ -92,6 +101,10 @@ DEFAULT_CONFIG = {
         "large_upload_mb": 100,
         "beaconing_tolerance": 0.05,     # Timing regularity threshold (lower = stricter)
         "known_bad_ports": [4444, 5555, 6666, 1337, 31337, 12345, 65535],
+        # JA3/JA4 client fingerprints to alert on. Public threat intel publishes
+        # these for C2 frameworks; they match on encrypted traffic.
+        "blocked_ja3": [],
+        "blocked_ja4": [],
     },
     "threat_intel": {
         "enabled": True,
