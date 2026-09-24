@@ -22,6 +22,8 @@ import logging
 import subprocess
 import ipaddress
 
+from src.ipcache import is_multicast_addr, is_link_local_addr
+
 logger = logging.getLogger("NetSentinel.NetDetect")
 
 try:
@@ -213,19 +215,15 @@ SPECIAL_ADDRESSES = {
     'ff02::1:3',        # LLMNR multicast
 }
 
-# Multicast ranges (224.0.0.0/4)
+# Multicast ranges (224.0.0.0/4). Both of these are called twice per packet from
+# should_skip_ids, so they go through the shared address cache.
 def is_multicast(ip):
-    try:
-        return ipaddress.ip_address(ip).is_multicast
-    except ValueError:
-        return False
+    return is_multicast_addr(ip)
+
 
 # Link-local (169.254.x.x)
 def is_link_local(ip):
-    try:
-        return ipaddress.ip_address(ip).is_link_local
-    except ValueError:
-        return False
+    return is_link_local_addr(ip)
 
 # Well-known noisy but benign ports
 NOISY_BENIGN_PORTS = {

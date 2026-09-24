@@ -95,7 +95,7 @@ Configuration lives in `~/.netsentinel/config.json` (created on first run with d
 
 | Section | Setting | Default | Description |
 |---------|---------|---------|-------------|
-| `capture` | `max_pps` | 500 | Max packets/sec to process |
+| `capture` | `max_pps` | 2000 | Max packets/sec handed to the analysis pipeline |
 | `capture` | `pcap_buffer_packets` | 150000 | Ring buffer size for PCAP export |
 | `ml` | `baseline_learning_hours` | 2 | Hours of initial baseline learning |
 | `ml` | `contamination` | 0.25 | Isolation Forest contamination (shapes the model) |
@@ -167,7 +167,7 @@ Data files are created `0700`/`0600` where the platform supports it. See
 Worth knowing before you rely on a detector:
 
 - **The default BPF filter excludes established TCP/443 traffic**
-  (`capture.bpf_filter`), and `capture.max_pps` caps processing at 500 packets
+  (`capture.bpf_filter`), and `capture.max_pps` caps processing at 2000 packets
   per second. Both trade visibility for CPU. Byte-counting detectors — including
   data exfiltration — therefore under-count HTTPS. Widen the filter or raise the
   cap if you need full visibility.

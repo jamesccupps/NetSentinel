@@ -55,7 +55,10 @@ DEFAULT_CONFIG = {
         "promiscuous": True,            # Put the interface in promiscuous mode
         "snap_length": 65535,           # Bytes captured per packet
         "bpf_filter": "not (port 443 and tcp[tcpflags] & tcp-ack != 0 and tcp[tcpflags] & tcp-syn == 0)",
-        "max_pps": 500,                 # Hard cap: max packets/sec to process
+        # Hard cap on packets/sec handed to the analysis pipeline. Measured cost is
+        # ~72 us/packet after the v1.5.0 optimisations (was ~950 us), so 2000 pps is
+        # roughly 15% of one core. Raise it if you need full visibility on a busy link.
+        "max_pps": 2000,
         "pcap_buffer_packets": 150000,  # Ring buffer size for PCAP export (~225 MB at 1500B avg)
         "pcap_max_file_mb": 100,        # Max PCAP recording file size before rotation
         "pcap_max_files": 20,           # Recordings kept on disk before the oldest are pruned

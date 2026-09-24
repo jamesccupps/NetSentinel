@@ -39,7 +39,7 @@ import numpy as np  # noqa: E402
 
 from src.capture import PacketInfo, CaptureEngine  # noqa: E402
 from src.config import Config  # noqa: E402
-from src.ids_engine import IDSEngine, Alert, _tld_of  # noqa: E402
+from src.ids_engine import IDSEngine, Alert, SlidingPortWindow, _tld_of  # noqa: E402
 from src.ml_engine import TrafficFeatureExtractor  # noqa: E402
 from src.baseline_whitelist import BaselineWhitelist  # noqa: E402
 from src.device_learner import DeviceLearner  # noqa: E402
@@ -646,6 +646,138 @@ class TestPrivateAddressChecks(unittest.TestCase):
         ids = IDSEngine(fresh_config())
         self.assertTrue(ids._is_local_ip('172.16.5.5'))
         self.assertFalse(ids._is_local_ip('172.15.5.5'))
+
+
+# ══════════════════════════════════════════════════════════════════════
+# Port-scan sliding window (optimised in v1.5.0 — behaviour must not drift)
+# ══════════════════════════════════════════════════════════════════════
+class TestSlidingPortWindow(unittest.TestCase):
+    """
+    The distinct-port count is needed on every packet. It used to be rebuilt from a
+    500-entry history each time (~1000 set operations per packet). The replacement
+    keeps a refcount, so these tests pin the semantics that optimisation must preserve.
+    """
+
+    def test_counts_distinct_ports(self):
+        w = SlidingPortWindow(60)
+        t = 1000.0
+        for port in (80, 443, 80, 22, 443, 8080):
+            w.add(t, port, '10.0.0.1')
+            t += 1
+        self.assertEqual(w.unique_ports, 4)
+        self.assertEqual(w.ports(), [22, 80, 443, 8080])
+
+    def test_entries_expire_with_the_window(self):
+        w = SlidingPortWindow(10)
+        w.add(100.0, 1, 'a')
+        w.add(105.0, 2, 'b')
+        w.add(112.0, 3, 'c')     # t=100 is now outside the 10s window
+        self.assertEqual(w.ports(), [2, 3])
+
+    def test_repeated_port_refcounts_correctly(self):
+        """A port stays live until its most recent sighting ages out, not its first."""
+        w = SlidingPortWindow(10)
+        w.add(100.0, 5, 'a')
+        w.add(108.0, 5, 'a')
+        w.add(109.0, 6, 'b')
+        w.add(115.0, 7, 'c')     # drops the t=100 copy of port 5, not the t=108 one
+        self.assertEqual(w.ports(), [5, 6, 7])
+        w.add(120.0, 8, 'd')     # now both copies of 5 are gone
+        self.assertNotIn(5, w.ports())
+
+    def test_hard_cap_bounds_memory(self):
+        w = SlidingPortWindow(3600, max_events=100)
+        for i in range(500):
+            w.add(1000.0 + i * 0.001, i, 'a')
+        self.assertLessEqual(len(w), 101)
+
+    def test_destinations_are_reported(self):
+        w = SlidingPortWindow(60)
+        w.add(1000.0, 80, '10.0.0.1')
+        w.add(1001.0, 81, '10.0.0.2')
+        self.assertEqual(w.destinations(), {'10.0.0.1', '10.0.0.2'})
+
+
+class TestPortScanDetection(unittest.TestCase):
+    """The optimisation must not change which traffic is treated as a scan."""
+
+    def setUp(self):
+        self.alerts = []
+        self.ids = IDSEngine(fresh_config(), alert_callback=self.alerts.append)
+
+    def _probe(self, port):
+        return pkt(src_ip='203.0.113.9', dst_ip='192.168.1.50', src_port=44444,
+                   dst_port=port, protocol='TCP', flags='S', length=60)
+
+    def _fired(self):
+        return bool([a for a in self.alerts if a.rule_id == 'PORT-SCAN'])
+
+    def test_many_low_ports_is_a_scan(self):
+        for port in range(20, 45):
+            self.ids.inspect_packet(self._probe(port))
+        self.assertTrue(self._fired())
+
+    def test_ephemeral_only_is_not_a_scan(self):
+        """A server answering many clients hits only high ports."""
+        for port in range(40000, 40030):
+            self.ids.inspect_packet(self._probe(port))
+        self.assertFalse(self._fired())
+
+    def test_high_volume_on_few_ports_is_not_a_scan(self):
+        for port in [80, 443] * 40:
+            self.ids.inspect_packet(self._probe(port))
+        self.assertFalse(self._fired())
+
+
+# ══════════════════════════════════════════════════════════════════════
+# Reverse DNS must not block the packet path
+# ══════════════════════════════════════════════════════════════════════
+class TestReverseDnsNonBlocking(unittest.TestCase):
+    """
+    socket.gethostbyaddr() has no timeout and honours the resolver's. Verification
+    runs on the packet worker for most rules, so one unresolvable address used to
+    stall the whole pipeline — measured at 12 seconds in a profile run.
+    """
+
+    def test_lookup_returns_immediately(self):
+        import src.alert_verify as av
+        from src.alert_verify import AlertVerifier
+
+        verifier = AlertVerifier(fresh_config())
+        slow_calls = []
+
+        def slow_gethostbyaddr(ip):
+            slow_calls.append(ip)
+            time.sleep(2)
+            return ('slow.example.com', [], [ip])
+
+        original = av.socket.gethostbyaddr
+        av.socket.gethostbyaddr = slow_gethostbyaddr
+        try:
+            start = time.time()
+            result = verifier._reverse_dns('198.51.100.7')
+            elapsed = time.time() - start
+        finally:
+            av.socket.gethostbyaddr = original
+
+        self.assertIsNone(result, "first lookup should return None, not block")
+        self.assertLess(elapsed, 0.5, f"call took {elapsed:.2f}s — it must not block")
+
+    def test_result_is_cached_for_next_time(self):
+        import src.alert_verify as av
+        from src.alert_verify import AlertVerifier
+
+        verifier = AlertVerifier(fresh_config())
+        original = av.socket.gethostbyaddr
+        av.socket.gethostbyaddr = lambda ip: ('host.example.com', [], [ip])
+        try:
+            verifier._reverse_dns('198.51.100.8')
+            deadline = time.time() + 3
+            while verifier._reverse_dns('198.51.100.8') is None and time.time() < deadline:
+                time.sleep(0.05)
+        finally:
+            av.socket.gethostbyaddr = original
+        self.assertEqual(verifier._reverse_dns('198.51.100.8'), 'host.example.com')
 
 
 # ══════════════════════════════════════════════════════════════════════

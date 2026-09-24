@@ -28,6 +28,7 @@ Each alert gets:
 import re
 import time
 import socket
+import threading
 import logging
 
 logger = logging.getLogger("NetSentinel.AlertVerify")
@@ -110,6 +111,8 @@ class AlertVerifier:
         # Reverse DNS cache: {ip: (hostname, timestamp)}
         self._rdns_cache = {}
         self._rdns_ttl = 600  # 10 minutes
+        self._rdns_pending = set()
+        self._rdns_lock = threading.Lock()
 
         # IP reputation cache: {ip: (score, factors, timestamp)}
         self._ip_rep_cache = {}
@@ -1107,21 +1110,52 @@ class AlertVerifier:
     # ═══════════════════════════════════════════════════════════════
 
     def _reverse_dns(self, ip):
-        """Cached reverse DNS lookup."""
+        """
+        Non-blocking reverse DNS.
+
+        Returns the cached hostname if we have one, otherwise schedules a lookup in
+        the background and returns None immediately.
+
+        socket.gethostbyaddr() has no timeout parameter and honours the resolver's,
+        which can be many seconds. Most verification runs synchronously on the packet
+        worker, so a single unresolvable address used to stall the entire capture
+        pipeline — measured at 12 seconds for one call against an unreachable
+        resolver. Enrichment is best-effort: an alert that misses a hostname on its
+        first occurrence is fine, a sensor that goes deaf is not.
+        """
         if not ip:
             return None
         now = time.time()
-        if ip in self._rdns_cache:
-            hostname, cached_at = self._rdns_cache[ip]
+        cached = self._rdns_cache.get(ip)
+        if cached is not None:
+            hostname, cached_at = cached
             if now - cached_at < self._rdns_ttl:
                 return hostname
-        try:
-            hostname = socket.gethostbyaddr(ip)[0]
-            self._rdns_cache[ip] = (hostname, now)
-            return hostname
-        except (TimeoutError, socket.herror, socket.gaierror):
-            self._rdns_cache[ip] = (None, now)
-            return None
+
+        self._schedule_rdns(ip)
+        return cached[0] if cached else None
+
+    def _schedule_rdns(self, ip):
+        """Queue a background reverse lookup, at most one in flight per address."""
+        with self._rdns_lock:
+            if ip in self._rdns_pending or len(self._rdns_pending) >= 32:
+                return
+            self._rdns_pending.add(ip)
+
+        def _lookup():
+            try:
+                hostname = socket.gethostbyaddr(ip)[0]
+            except (TimeoutError, OSError):
+                hostname = None
+            self._rdns_cache[ip] = (hostname, time.time())
+            if len(self._rdns_cache) > 4096:
+                for stale in list(self._rdns_cache)[:1024]:
+                    self._rdns_cache.pop(stale, None)
+            with self._rdns_lock:
+                self._rdns_pending.discard(ip)
+
+        threading.Thread(target=_lookup, daemon=True,
+                         name=f"rdns-{ip}").start()
 
     def _is_local_ip(self, ip):
         """Check if IP is on local network."""

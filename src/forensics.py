@@ -18,11 +18,12 @@ Designed for PCAP analysis but can also run on live traffic.
 """
 
 import re
-import ipaddress
 import logging
 import base64
 from collections import defaultdict, Counter
 from datetime import datetime
+
+from src.ipcache import is_private as _is_private
 
 logger = logging.getLogger("NetSentinel.Forensics")
 
@@ -72,13 +73,7 @@ def is_private_address(ip):
     Not str.startswith('172.') — that covers 172.0.0.0/8, so it wrongly treats the
     public ranges 172.0-15.x and 172.32-255.x as internal. Only 172.16.0.0/12 is private.
     """
-    if not ip:
-        return False
-    try:
-        addr = ipaddress.ip_address(ip)
-    except ValueError:
-        return False
-    return addr.is_private or addr.is_loopback or addr.is_link_local
+    return _is_private(ip)
 
 
 FTP_USER_RE = re.compile(rb'USER\s+(\S+)', re.IGNORECASE)

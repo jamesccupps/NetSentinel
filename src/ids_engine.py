@@ -10,10 +10,11 @@ import sys
 import json
 import time
 import logging
-import ipaddress
 import itertools
-from collections import defaultdict, deque
+from collections import Counter, defaultdict, deque
 from datetime import datetime
+
+from src.ipcache import is_private
 
 logger = logging.getLogger("NetSentinel.IDS")
 
@@ -135,6 +136,64 @@ _SERVICE_NAMES = {
 }
 
 
+class SlidingPortWindow:
+    """
+    Distinct destination ports seen from one source within a time window.
+
+    The port-scan rule needs the distinct-port count on *every* packet. Rebuilding
+    a set from the history each time is O(window) per packet — the profiler recorded
+    ~1000 set operations per packet against a 500-entry history.
+
+    Instead, keep the history in arrival order alongside a Counter of live ports.
+    Each entry is appended once and evicted once, so maintaining the count is
+    amortised O(1) and `unique_ports` is a plain len().
+    """
+
+    __slots__ = ('_events', '_port_counts', '_window', '_max_events')
+
+    def __init__(self, window_sec, max_events=2000):
+        self._events = deque()          # (timestamp, port, dst_ip), oldest first
+        self._port_counts = Counter()   # port -> occurrences still inside the window
+        self._window = window_sec
+        self._max_events = max_events
+
+    def add(self, timestamp, port, dst_ip):
+        self._events.append((timestamp, port, dst_ip))
+        self._port_counts[port] += 1
+        self._evict(timestamp)
+
+    def _evict(self, now):
+        cutoff = now - self._window
+        events = self._events
+        # Time-based eviction, then a hard cap so a burst cannot grow this without
+        # bound before the window advances.
+        while events and (events[0][0] < cutoff or len(events) > self._max_events):
+            _, port, _ = events.popleft()
+            if self._port_counts[port] <= 1:
+                del self._port_counts[port]
+            else:
+                self._port_counts[port] -= 1
+
+    @property
+    def unique_ports(self):
+        return len(self._port_counts)
+
+    def ports(self):
+        """Sorted distinct ports. Only called when an alert actually fires."""
+        return sorted(self._port_counts)
+
+    def destinations(self):
+        """Distinct destinations in the window. Only called when an alert fires."""
+        return {dst for _, _, dst in self._events if dst}
+
+    @property
+    def last_seen(self):
+        return self._events[-1][0] if self._events else 0
+
+    def __len__(self):
+        return len(self._events)
+
+
 class Alert:
     """Represents a security alert."""
     _id_gen = itertools.count(1)
@@ -229,7 +288,8 @@ class IDSEngine:
         self.large_upload_mb = config.get('ids', 'large_upload_mb', default=100)
 
         # State tracking
-        self._port_access = defaultdict(lambda: deque(maxlen=500))  # {src_ip: [(time, port)]}
+        self._port_access = defaultdict(
+            lambda: SlidingPortWindow(self.port_scan_window))  # {src_ip: SlidingPortWindow}
         self._conn_failures = defaultdict(lambda: deque(maxlen=500))  # {src_ip: [time]}
         self._arp_table = {}  # {ip: mac}
         self._data_transfer = defaultdict(float)  # {dst_ip: bytes}
@@ -316,8 +376,13 @@ class IDSEngine:
 
         # Prune port_access / conn_failures / dns_queries / icmp trackers
         # — remove IPs not seen in 5 minutes
-        for tracker in (self._port_access, self._conn_failures,
-                        self._dns_queries_by_ip, self._icmp_flood_tracker):
+        stale_sources = [ip for ip, w in self._port_access.items()
+                         if len(w) and now - w.last_seen > 300]
+        for ip in stale_sources:
+            del self._port_access[ip]
+
+        for tracker in (self._conn_failures, self._dns_queries_by_ip,
+                        self._icmp_flood_tracker):
             stale = [k for k, dq in tracker.items()
                      if dq and (now - (dq[-1][0] if isinstance(dq[-1], tuple) else dq[-1])) > 300]
             for k in stale:
@@ -648,19 +713,19 @@ class IDSEngine:
             src_is_service_response = pkt_info.src_port in _COMMON_SERVICE_PORTS
 
             if not src_is_service_response:
-                self._port_access[pkt_info.src_ip].append((now, pkt_info.dst_port, pkt_info.dst_ip))
-                recent = [(t, p, dst) for t, p, dst in self._port_access[pkt_info.src_ip]
-                           if now - t < self.port_scan_window]
-                scanned_ports = sorted(set(p for _, p, _ in recent))
-                unique_ports = len(scanned_ports)
+                window = self._port_access[pkt_info.src_ip]
+                window.add(now, pkt_info.dst_port, pkt_info.dst_ip)
+                unique_ports = window.unique_ports
 
                 if unique_ports >= self.port_scan_threshold:
+                    # Only materialised when an alert fires, not on every packet.
+                    scanned_ports = window.ports()
+                    dst_ips_hit = window.destinations()
                     # Check if ALL scanned ports are ephemeral (>= 1024)
                     # If so, this is a server responding to many clients, not a scan
-                    has_low_ports = any(p < 1024 for p in scanned_ports)
+                    has_low_ports = scanned_ports[0] < 1024
 
                     if has_low_ports:
-                        dst_ips_hit = set(dst for _, _, dst in recent if dst)
                         alerts.append(self._create_alert(
                             "PORT-SCAN", Severity.HIGH,
                             "Port Scan Detected",
@@ -1030,11 +1095,7 @@ class IDSEngine:
             if ip in getattr(self.net_env, 'local_ips', ()) or \
                ip in getattr(self.net_env, 'auto_whitelist_ips', ()):
                 return True
-        try:
-            addr = ipaddress.ip_address(ip)
-        except ValueError:
-            return False
-        return addr.is_private or addr.is_loopback or addr.is_link_local
+        return is_private(ip)
 
     def _is_outbound(self, pkt_info):
         """True when traffic leaves a local host for an external destination."""

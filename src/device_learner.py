@@ -29,10 +29,11 @@ import os
 import json
 import time
 import logging
-import ipaddress
 import threading
 from collections import defaultdict, Counter
 from datetime import datetime
+
+from src.ipcache import classify
 
 logger = logging.getLogger("NetSentinel.DeviceLearner")
 
@@ -223,17 +224,12 @@ class DeviceLearner:
         """
         if not ip:
             return False
-        try:
-            addr = ipaddress.ip_address(ip)
-        except ValueError:
+        valid, private, multicast, link_local, loopback = classify(ip)
+        if not valid or multicast or loopback:
             return False
-        if addr.is_multicast or addr.is_unspecified or addr.is_reserved:
+        if ip == '255.255.255.255':
             return False
-        if addr.version == 4 and str(addr) == '255.255.255.255':
-            return False
-        if addr.is_loopback:
-            return False
-        if addr.is_private or addr.is_link_local:
+        if private or link_local:
             return True
         # A public address can still be local (some networks route public space), so
         # honour explicitly detected local subnets when the environment knows them.
