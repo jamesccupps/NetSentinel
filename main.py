@@ -168,7 +168,43 @@ def show_splash():
     return root, splash, update_progress
 
 
-def main():
+def parse_args(argv=None):
+    """Command line. Defaults reproduce the previous behaviour exactly."""
+    import argparse
+    parser = argparse.ArgumentParser(
+        prog='netsentinel',
+        description='AI-powered network monitor and intrusion detection system.',
+        epilog='With no arguments, starts the desktop interface.')
+    parser.add_argument('--headless', action='store_true',
+                        help='run without a GUI and serve a read-only HTTP API '
+                             '(for a Pi on a SPAN port, a container, or a server)')
+    parser.add_argument('--host', default='127.0.0.1',
+                        help='API bind address (default: 127.0.0.1). Binding '
+                             'publicly exposes captured credentials and alert '
+                             'history — put it behind a firewall.')
+    parser.add_argument('--port', type=int, default=8787,
+                        help='API port (default: 8787; 0 asks the OS to choose)')
+    parser.add_argument('--no-api', action='store_true',
+                        help='headless with no HTTP listener at all')
+    parser.add_argument('--version', action='version',
+                        version=f'NetSentinel {APP_VERSION}')
+    return parser.parse_args(argv)
+
+
+def run_headless_mode(args):
+    """Start the engine with no GUI. Returns a process exit code."""
+    logger.info("Starting in headless mode.")
+    from src.app import NetSentinelApp
+    from src.headless import run_headless
+
+    app = NetSentinelApp()
+    return run_headless(app, host=args.host, port=args.port,
+                        serve_api=not args.no_api)
+
+
+def main(argv=None):
+    args = parse_args(argv)
+
     logger.info("=" * 60)
     logger.info("NetSentinel %s Starting...", APP_VERSION)
     logger.info("=" * 60)
@@ -181,6 +217,9 @@ def main():
                 logger.warning("Could not elevate (%s). Running in limited mode.", e)
         else:
             logger.warning("Not running as root — packet capture will be limited.")
+
+    if args.headless:
+        return run_headless_mode(args)
 
     # Splash screen
     splash = None
@@ -270,4 +309,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main() or 0)

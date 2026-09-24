@@ -4,7 +4,7 @@
 
 NetSentinel is a desktop network security application that monitors all traffic on your machine, detects anomalies using machine learning, and alerts you to suspicious activity in real time. It learns your network automatically — no configuration required.
 
-![Python](https://img.shields.io/badge/python-3.10+-blue) ![Platform](https://img.shields.io/badge/platform-Windows-lightgrey) ![License](https://img.shields.io/badge/license-MIT-green) ![Tests](https://img.shields.io/badge/tests-347%20unit%20%2B%2014%20integration-brightgreen)
+![Python](https://img.shields.io/badge/python-3.10+-blue) ![Platform](https://img.shields.io/badge/platform-Windows-lightgrey) ![License](https://img.shields.io/badge/license-MIT-green) ![Tests](https://img.shields.io/badge/tests-384%20unit%20%2B%2014%20integration-brightgreen)
 
 ## Key Features
 
@@ -60,8 +60,31 @@ setup.bat
 ### Run
 
 ```bash
-python main.py
+python main.py                 # desktop interface
+python main.py --headless      # no GUI, read-only HTTP API on 127.0.0.1:8787
+python main.py --help
 ```
+
+### Headless mode
+
+The detection engine never needed a display, so it can run as a sensor — on a
+Raspberry Pi hanging off a SPAN port, in a container, or on a server — and be
+read over HTTP:
+
+| Endpoint | Returns |
+|---|---|
+| `GET /` | human-readable status summary |
+| `GET /health` | liveness, for a supervisor or container probe |
+| `GET /api/status` | capture, IDS, ML and alert counters |
+| `GET /api/alerts` | recent alerts (`?limit=`, `?severity=`) |
+| `GET /api/incidents` | correlated incidents |
+| `GET /api/devices` | discovered devices on the local network |
+| `GET /api/metrics` | Prometheus text exposition |
+
+The API is **read-only and binds to localhost by default**. It serves captured
+credentials, device inventory and alert history, so `--host 0.0.0.0` logs a
+warning and should sit behind a firewall or an authenticating reverse proxy.
+`--no-api` runs headless with no listener at all.
 
 Or build a standalone executable:
 
@@ -198,7 +221,7 @@ Worth knowing before you rely on a detector:
 ## Testing
 
 ```bash
-# Everything (347 tests)
+# Everything (384 tests)
 python -m unittest discover -s . -p "test_*.py"
 
 # Regression tests for the v1.5.0 audit fixes
@@ -218,6 +241,9 @@ python -m unittest test_beaconing -v
 
 # DNS response analysis and its false-positive calibration
 python -m unittest test_dns_analysis -v
+
+# Headless mode and the HTTP API
+python -m unittest test_headless -v
 
 # End-to-end integration checks (real code paths, no capture required)
 python tools/integration_check.py
@@ -256,6 +282,7 @@ NetSentinel/
 │   ├── tls_inspect.py        # ClientHello parsing: SNI, JA3/JA4, QUIC detection
 │   ├── beaconing.py          # Jitter-tolerant periodicity scoring
 │   ├── dns_analysis.py       # NXDOMAIN bursts, fast-flux, DGA heuristics
+│   ├── headless.py           # Read-only HTTP API for GUI-less operation
 │   ├── presentation.py       # Pure formatting/threshold/filter logic (no tkinter)
 │   ├── ipcache.py            # Cached IP address classification
 │   ├── config.py             # Configuration management

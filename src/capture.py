@@ -3,6 +3,7 @@ Network packet capture engine using Scapy.
 Captures packets, extracts metadata, and feeds them to the analysis pipeline.
 """
 
+import inspect
 import threading
 import time
 import logging
@@ -359,6 +360,9 @@ class CaptureEngine:
         # Watchdog: auto-restart capture if it dies
         self._restart_count = 0
         self._max_restarts = 10
+
+        # Set when capture failed for a reason restarting cannot fix.
+        self._fatal_capture_error = False
 
         # Declared up front so the watchdog can never touch an undefined attribute.
         self._worker_thread = None
@@ -738,6 +742,10 @@ class CaptureEngine:
             time.sleep(5)
 
             # Check capture thread
+            if self._fatal_capture_error:
+                logger.error("Capture cannot start with the current configuration. "
+                             "Watchdog standing down.")
+                return
             if self._thread and not self._thread.is_alive():
                 if self._restart_count < self._max_restarts:
                     self._restart_count += 1
@@ -757,10 +765,43 @@ class CaptureEngine:
                     target=self._worker_loop, daemon=True, name="PacketWorker")
                 self._worker_thread.start()
 
+    def _supported_sniff_kwargs(self, desired):
+        """
+        Keep only the options this Scapy build's listen socket accepts.
+
+        sniff() takes **kwargs and forwards anything it does not recognise
+        straight to the socket constructor, where an unsupported name raises
+        TypeError and kills the capture thread. The accepted set varies by Scapy
+        version and by platform — Linux PF_PACKET takes `promisc`, and no Linux
+        socket takes `snaplen` at all — so ask rather than assume.
+        """
+        try:
+            listener = getattr(conf, 'L2listen', None)
+            accepted = set(inspect.signature(listener.__init__).parameters)
+        except (AttributeError, TypeError, ValueError) as e:
+            logger.debug("Could not introspect the listen socket (%s); "
+                         "passing no extra options.", e)
+            return {}
+
+        supported, skipped = {}, []
+        for name, value in desired.items():
+            if name in accepted:
+                supported[name] = value
+            else:
+                skipped.append(name)
+        if skipped:
+            logger.info("Capture options not supported by this Scapy build, "
+                        "ignoring: %s", ', '.join(sorted(skipped)))
+        return supported
+
     def _start_capture_thread(self):
         """Start (or restart) the Scapy capture thread."""
         iface = self._select_interface()
         bpf = self.config.get('capture', 'bpf_filter', default='')
+        sniff_options = self._supported_sniff_kwargs({
+            'promisc': self.config.get('capture', 'promiscuous', default=True),
+            'snaplen': self.config.get('capture', 'snap_length', default=65535),
+        })
 
         def _capture_loop():
             logger.info("Capture started on interface: %s", iface)
@@ -771,12 +812,16 @@ class CaptureEngine:
                     store=False,
                     stop_filter=lambda _: not self._running,
                     filter=bpf if bpf else None,
-                    promisc=self.config.get('capture', 'promiscuous', default=True),
-                    # Bytes captured per packet; the default keeps whole frames.
-                    snaplen=self.config.get('capture', 'snap_length', default=65535),
+                    **sniff_options,
                 )
             except PermissionError:
-                logger.error("Permission denied. Run as Administrator for full capture.")
+                logger.error("Permission denied. Run as Administrator (Windows) or "
+                             "as root / with CAP_NET_RAW (Linux) for packet capture.")
+            except TypeError as e:
+                # An option this Scapy build rejects. Restarting cannot help, and
+                # the watchdog would otherwise retry it ten times.
+                logger.error("Capture rejected an option (%s). Not retrying.", e)
+                self._fatal_capture_error = True
             except Exception as e:
                 logger.error("Capture error: %s", e)
             finally:

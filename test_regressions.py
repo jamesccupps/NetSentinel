@@ -975,3 +975,73 @@ class TestPayloadExtraction(unittest.TestCase):
         for built in (Ether() / IP() / ICMP(), Ether() / ARP()):
             info = self.engine._extract_packet_info(self._dissect(built))
             self.assertEqual(info.payload_size, 0)
+
+
+# ══════════════════════════════════════════════════════════════════════
+# sniff() options must be ones the socket actually accepts
+# ══════════════════════════════════════════════════════════════════════
+class TestSniffOptionsAreSupported(unittest.TestCase):
+    """
+    Wiring up capture.snap_length passed `snaplen=` to sniff(). sniff() takes
+    **kwargs and forwards anything it does not recognise straight to the socket
+    constructor, where Linux's L2ListenSocket raised:
+
+        TypeError: L2Socket.__init__() got an unexpected keyword argument 'snaplen'
+
+    That killed the capture thread on every start, and the watchdog then retried
+    it ten times. Packet capture — the entire point of the program — was broken,
+    and no test caught it because none of them call sniff(): that needs a live
+    interface. A real headless launch found it in one line of log output.
+    """
+
+    def setUp(self):
+        if not SCAPY_REAL:
+            self.skipTest('real scapy unavailable')
+        from src.capture import CaptureEngine
+        self.engine = CaptureEngine(fresh_config())
+
+    def test_unsupported_options_are_dropped(self):
+        supported = self.engine._supported_sniff_kwargs(
+            {'promisc': True, 'snaplen': 65535, 'not_a_real_option': 1})
+        self.assertNotIn('not_a_real_option', supported)
+
+    def test_supported_options_survive(self):
+        import inspect
+        from scapy.all import conf
+        accepted = set(inspect.signature(conf.L2listen.__init__).parameters)
+        supported = self.engine._supported_sniff_kwargs({'promisc': True})
+        if 'promisc' in accepted:
+            self.assertEqual(supported, {'promisc': True})
+        else:
+            self.assertEqual(supported, {})
+
+    def test_every_option_we_would_pass_is_accepted_by_the_socket(self):
+        """The direct guard: whatever the engine builds must be constructible."""
+        import inspect
+        from scapy.all import conf
+        accepted = set(inspect.signature(conf.L2listen.__init__).parameters)
+        options = self.engine._supported_sniff_kwargs({
+            'promisc': fresh_config().get('capture', 'promiscuous', default=True),
+            'snaplen': fresh_config().get('capture', 'snap_length', default=65535),
+        })
+        for name in options:
+            self.assertIn(name, accepted,
+                          f"{name} would be forwarded to the socket and rejected")
+
+    def test_introspection_failure_degrades_to_no_options(self):
+        """A Scapy build we cannot introspect must not take capture down."""
+        import src.capture as capture_module
+        original = capture_module.conf
+        try:
+            capture_module.conf = object()      # no L2listen attribute
+            self.assertEqual(
+                self.engine._supported_sniff_kwargs({'promisc': True}), {})
+        finally:
+            capture_module.conf = original
+
+    def test_a_rejected_option_stops_the_watchdog_retrying(self):
+        """Restarting cannot fix a TypeError, so it must not be retried."""
+        self.assertFalse(self.engine._fatal_capture_error)
+        import inspect
+        source = inspect.getsource(type(self.engine)._watchdog_loop)
+        self.assertIn('_fatal_capture_error', source)
