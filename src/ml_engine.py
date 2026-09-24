@@ -6,15 +6,18 @@ to detect anomalous network behavior.
 """
 
 import os
+import hmac
+import stat
 import time
 import json
 import math
 import pickle
+import hashlib
 import logging
-import threading
+import ipaddress
 import numpy as np
 from collections import defaultdict, deque
-from datetime import datetime, timedelta
+from datetime import datetime
 
 logger = logging.getLogger("NetSentinel.ML")
 
@@ -25,6 +28,17 @@ try:
 except ImportError:
     SKLEARN_AVAILABLE = False
     logger.warning("scikit-learn not available. ML features disabled.")
+
+
+def _is_private_ip(ip):
+    """RFC1918/loopback/link-local check that is correct for 172.16/12."""
+    if not ip:
+        return False
+    try:
+        addr = ipaddress.ip_address(ip)
+    except ValueError:
+        return False
+    return addr.is_private or addr.is_loopback or addr.is_link_local
 
 
 class TrafficFeatureExtractor:
@@ -55,20 +69,31 @@ class TrafficFeatureExtractor:
             'encrypted_ratio',
         ]
 
-    def extract_from_window(self, flows, packets_window, window_sec=60):
+    def extract_from_window(self, flows, packets_window, window_sec=60, local_ips=None):
         """
         Extract a feature vector from a time window of traffic.
 
         Args:
             flows: dict of NetworkFlow objects
             packets_window: list of PacketInfo from the window
-            window_sec: window duration in seconds
+            window_sec: nominal window duration in seconds. The real span of the
+                packets is used instead when it is larger, so rate features stay
+                truthful even if the caller passes a stale window.
+            local_ips: set of this host's addresses, used for direction features
 
         Returns:
             numpy array of features
         """
         if not packets_window:
             return np.zeros(len(self.feature_names))
+
+        local_ips = local_ips or set()
+
+        # Rates must be divided by the period the packets actually cover. Dividing a
+        # rolling buffer by a fixed nominal window pins packets_per_sec at
+        # len(buffer)/window_sec regardless of real traffic.
+        observed_span = packets_window[-1].timestamp - packets_window[0].timestamp
+        window_sec = max(window_sec, observed_span, 1e-3)
 
         total_bytes = sum(p.length for p in packets_window)
         total_packets = len(packets_window)
@@ -85,8 +110,11 @@ class TrafficFeatureExtractor:
         small_packets = 0  # < 100 bytes
         large_packets = 0  # > 1400 bytes
         inter_arrivals = []
-        src_count = defaultdict(int)
-        dst_count = defaultdict(int)
+        # Bytes sent by vs. received by the hosts we consider local. Counting packets
+        # per src_ip and per dst_ip (as this used to) always yields the same total on
+        # both sides, so the asymmetry was identically zero.
+        bytes_out = 0
+        bytes_in = 0
 
         prev_time = None
         for p in packets_window:
@@ -110,8 +138,18 @@ class TrafficFeatureExtractor:
             if p.length > 1400:
                 large_packets += 1
 
-            src_count[p.src_ip] += 1
-            dst_count[p.dst_ip] += 1
+            if local_ips:
+                if p.src_ip in local_ips:
+                    bytes_out += p.length
+                elif p.dst_ip in local_ips:
+                    bytes_in += p.length
+            else:
+                # No local-IP hint available: fall back to RFC1918 heuristics so the
+                # feature still carries signal instead of silently flatlining.
+                if _is_private_ip(p.src_ip) and not _is_private_ip(p.dst_ip):
+                    bytes_out += p.length
+                elif _is_private_ip(p.dst_ip) and not _is_private_ip(p.src_ip):
+                    bytes_in += p.length
 
             if prev_time is not None:
                 iat = p.timestamp - prev_time
@@ -138,9 +176,9 @@ class TrafficFeatureExtractor:
         unique_protos = len(protocols)
         encrypted_ratio = encrypted_count / max(total_packets, 1)
 
-        # Direction asymmetry: how unbalanced is src vs dst traffic
-        total_dir = sum(src_count.values()) + sum(dst_count.values())
-        direction_asymmetry = abs(sum(src_count.values()) - sum(dst_count.values())) / max(total_dir, 1)
+        # Direction asymmetry: 0 = balanced up/down, 1 = entirely one direction.
+        # Sustained high asymmetry with high volume is the shape of bulk exfiltration.
+        direction_asymmetry = abs(bytes_out - bytes_in) / max(bytes_out + bytes_in, 1)
 
         features = np.array([
             bytes_per_sec,
@@ -198,7 +236,6 @@ class BaselineProfile:
         self.global_std = None
         self.samples_count = 0
         self.day_of_week_factor = {}  # {dow: scaling_factor}
-        self._history = deque(maxlen=10000)  # Rolling feature vectors
         self._learning = True
         self.learning_start = time.time()
 
@@ -220,9 +257,7 @@ class BaselineProfile:
             timestamp = time.time()
         dt = datetime.fromtimestamp(timestamp)
         hour = dt.hour
-        dow = dt.weekday()
 
-        self._history.append((hour, dow, features))
         self.samples_count += 1
 
         # ─── Welford update: global stats ─────────────────────
@@ -313,8 +348,8 @@ class BaselineProfile:
                 'hourly_welford_mean': {str(k): v.tolist() for k, v in self._hourly_welford_mean.items()},
                 'hourly_welford_m2': {str(k): v.tolist() for k, v in self._hourly_welford_m2.items()},
             }
-            with open(self.db_path, 'w') as f:
-                json.dump(data, f)
+            from src.config import atomic_write_json
+            atomic_write_json(self.db_path, data)
         except Exception as e:
             logger.error("Failed to save baseline: %s", e)
 
@@ -322,7 +357,7 @@ class BaselineProfile:
         """Load baseline from disk (including Welford online stats)."""
         if os.path.exists(self.db_path):
             try:
-                with open(self.db_path, 'r') as f:
+                with open(self.db_path) as f:
                     data = json.load(f)
                 self.samples_count = data.get('samples_count', 0)
                 if data.get('global_mean'):
@@ -366,21 +401,28 @@ class AnomalyDetector:
     def __init__(self, config, feature_store=None):
         self.config = config
         self.enabled = config.get('ml', 'enabled', default=True) and SKLEARN_AVAILABLE
-        self.threshold = config.get('ml', 'anomaly_threshold', default=0.15)
+        # Two distinct knobs. contamination shapes the Isolation Forest (what fraction
+        # of TRAINING data it should treat as outliers); alert_threshold gates the
+        # combined 0-1 score. Raising one used to silently move the other the wrong way.
+        # anomaly_threshold is the pre-1.5 name, still honoured as a fallback.
+        legacy = config.get('ml', 'anomaly_threshold', default=None)
+        self.contamination = config.get('ml', 'contamination', default=legacy or 0.25)
+        self.threshold = config.get('ml', 'alert_threshold', default=legacy or 0.25)
         self.min_samples = config.get('ml', 'min_samples_for_training', default=200)
         self.retrain_interval = config.get('ml', 'retrain_interval_min', default=60) * 60
 
         # Feature history store (persistent feature vectors)
         self.feature_store = feature_store
 
+        # Feature extraction (must exist before _load_model validates model shape)
+        self.feature_extractor = TrafficFeatureExtractor()
+
         # Models
+        self._hmac_key = None
         self.isolation_forest = None
         self.scaler = StandardScaler() if SKLEARN_AVAILABLE else None
         self.is_trained = False
         self._last_train_time = 0
-
-        # Feature extraction
-        self.feature_extractor = TrafficFeatureExtractor()
 
         # Baseline
         from src.config import BASELINE_DB
@@ -399,14 +441,12 @@ class AnomalyDetector:
         if self.feature_store and not self.is_trained:
             self._bootstrap_from_history()
 
-        # Beaconing detection state
-        self._connection_timings = defaultdict(list)  # {dst_ip: [timestamps]}
         self.baseline_whitelist = None  # Set by app after init
 
         logger.info("Anomaly Detector initialized. ML enabled: %s, Trained: %s",
                      self.enabled, self.is_trained)
 
-    def analyze_window(self, flows, packets_window, window_sec=60):
+    def analyze_window(self, flows, packets_window, window_sec=60, local_ips=None):
         """
         Analyze a time window of traffic for anomalies.
 
@@ -416,7 +456,8 @@ class AnomalyDetector:
         if not self.enabled:
             return {'anomaly_score': 0, 'is_anomalous': False, 'reasons': [], 'features': None}
 
-        features = self.feature_extractor.extract_from_window(flows, packets_window, window_sec)
+        features = self.feature_extractor.extract_from_window(
+            flows, packets_window, window_sec, local_ips=local_ips)
 
         # Add to training buffer and baseline
         self._training_buffer.append(features)
@@ -432,7 +473,11 @@ class AnomalyDetector:
             'anomaly_score': 0.0,
             'is_anomalous': False,
             'reasons': [],
-            'features': dict(zip(self.feature_extractor.feature_names, features.tolist())),
+            # strict=True on purpose: app._build_ml_evidence walks this dict positionally
+            # against the baseline mean/std vectors, so a length mismatch must be loud
+            # rather than silently misattributing z-scores to the wrong feature.
+            'features': dict(zip(self.feature_extractor.feature_names,
+                                 features.tolist(), strict=True)),
             'baseline_deviation': 0.0,
             'isolation_score': 0.0,
         }
@@ -509,10 +554,15 @@ class AnomalyDetector:
         (IoT keepalives, Home Assistant polling, Chromecast heartbeats) is
         exempt because it's not C2-relevant and generates massive false positives.
         """
+        # One pass builds both maps. Previously the set of sources per destination was
+        # recomputed by rescanning the whole window inside the per-destination loop,
+        # which is O(packets x destinations) every analysis cycle.
         dst_times = defaultdict(list)
+        dst_sources = defaultdict(set)
         for p in packets_window:
             if p.dst_ip:
                 dst_times[p.dst_ip].append(p.timestamp)
+                dst_sources[p.dst_ip].add(p.src_ip)
 
         max_score = 0.0
         tolerance = self.config.get('ids', 'beaconing_tolerance', default=0.05)
@@ -524,27 +574,23 @@ class AnomalyDetector:
             # Skip local/private IPs — IoT devices legitimately beacon to local
             # hubs, gateways, and each other. C2 goes to external infrastructure.
             try:
-                import ipaddress
                 addr = ipaddress.ip_address(dst_ip)
                 if addr.is_private or addr.is_loopback or addr.is_link_local or addr.is_multicast:
                     continue
             except (ValueError, TypeError):
                 continue
 
+            src_ips = dst_sources[dst_ip]
+
             # Skip IPs that were already beaconing during baseline learning
             # — these are normal periodic services (NTP, health checks, etc.)
-            if self.baseline_whitelist:
-                # Check if ANY source in this window has a learned beacon to this dst
-                src_ips_to_dst = set(p.src_ip for p in packets_window if p.dst_ip == dst_ip)
-                all_learned = all(
-                    self.baseline_whitelist.is_learned_beacon(src, dst_ip)
-                    for src in src_ips_to_dst
-                ) if src_ips_to_dst else False
-                if all_learned:
+            if self.baseline_whitelist and src_ips:
+                if all(self.baseline_whitelist.is_learned_beacon(src, dst_ip)
+                       for src in src_ips):
                     continue
 
             times.sort()
-            intervals = [times[i+1] - times[i] for i in range(len(times)-1)]
+            intervals = [times[i + 1] - times[i] for i in range(len(times) - 1)]
             if not intervals:
                 continue
             mean_interval = np.mean(intervals)
@@ -559,7 +605,6 @@ class AnomalyDetector:
             if cv < tolerance:
                 # If still learning baseline, record this as a known beacon pattern
                 if self.baseline_whitelist and self.baseline_whitelist.is_learning:
-                    src_ips = set(p.src_ip for p in packets_window if p.dst_ip == dst_ip)
                     for src in src_ips:
                         self.baseline_whitelist.observe_beacon(src, dst_ip, mean_interval)
                     continue  # Don't score as anomalous during learning
@@ -691,7 +736,7 @@ class AnomalyDetector:
             # Train Isolation Forest
             self.isolation_forest = IsolationForest(
                 n_estimators=200,
-                contamination=self.threshold,
+                contamination=self.contamination,
                 max_samples='auto',
                 random_state=42,
                 n_jobs=-1,
@@ -711,30 +756,102 @@ class AnomalyDetector:
         except Exception as e:
             logger.error("Model training failed: %s", e)
 
-    def _save_model(self):
-        """Persist trained model to disk."""
+    def _model_hmac_key(self):
+        """
+        Key for authenticating model files.
+
+        pickle.load() executes arbitrary code. NetSentinel runs elevated and the model
+        directory is user-writable, so an unauthenticated pickle there is a privilege
+        escalation primitive. The key lives outside the data directory and is created
+        0600, so an attacker who can only write into models/ cannot forge a valid tag.
+        """
+        if self._hmac_key is not None:
+            return self._hmac_key
+        from src.config import APP_DIR
+        key_path = os.path.join(APP_DIR, ".model_key")
         try:
-            if self.isolation_forest:
-                with open(self.model_path, 'wb') as f:
-                    pickle.dump(self.isolation_forest, f)
-            if self.scaler:
-                with open(self.scaler_path, 'wb') as f:
-                    pickle.dump(self.scaler, f)
+            if os.path.exists(key_path):
+                with open(key_path, 'rb') as f:
+                    key = f.read()
+                if len(key) == 32:
+                    self._hmac_key = key
+                    return key
+            key = os.urandom(32)
+            with open(key_path, 'wb') as f:
+                f.write(key)
+            try:
+                os.chmod(key_path, stat.S_IRUSR | stat.S_IWUSR)
+            except OSError:
+                pass
+            self._hmac_key = key
+            return key
+        except OSError as e:
+            logger.warning("Could not establish model signing key: %s", e)
+            return None
+
+    def _save_model(self):
+        """Persist trained model to disk with an authentication tag."""
+        key = self._model_hmac_key()
+        if key is None:
+            logger.warning("No signing key available — not persisting model.")
+            return
+        try:
+            for obj, path in ((self.isolation_forest, self.model_path),
+                              (self.scaler, self.scaler_path)):
+                if obj is None:
+                    continue
+                blob = pickle.dumps(obj, protocol=pickle.HIGHEST_PROTOCOL)
+                tag = hmac.new(key, blob, hashlib.sha256).digest()
+                tmp = f"{path}.tmp"
+                with open(tmp, 'wb') as f:
+                    f.write(tag + blob)
+                    f.flush()
+                    os.fsync(f.fileno())
+                os.replace(tmp, path)
         except Exception as e:
             logger.error("Failed to save model: %s", e)
 
+    def _load_one_model(self, path, key):
+        """Verify and load a single signed pickle. Returns None if it fails."""
+        with open(path, 'rb') as f:
+            data = f.read()
+        if len(data) <= 32:
+            raise ValueError(f"{os.path.basename(path)} is truncated")
+        tag, blob = data[:32], data[32:]
+        if not hmac.compare_digest(tag, hmac.new(key, blob, hashlib.sha256).digest()):
+            raise ValueError(
+                f"{os.path.basename(path)} failed integrity check — refusing to unpickle"
+            )
+        return pickle.loads(blob)
+
     def _load_model(self):
-        """Load previously trained model."""
+        """Load a previously trained model, if it is intact and still compatible."""
+        if not (os.path.exists(self.model_path) and os.path.exists(self.scaler_path)):
+            return
+        key = self._model_hmac_key()
+        if key is None:
+            return
         try:
-            if os.path.exists(self.model_path) and os.path.exists(self.scaler_path):
-                with open(self.model_path, 'rb') as f:
-                    self.isolation_forest = pickle.load(f)
-                with open(self.scaler_path, 'rb') as f:
-                    self.scaler = pickle.load(f)
-                self.is_trained = True
-                logger.info("Loaded pre-trained model from disk.")
+            forest = self._load_one_model(self.model_path, key)
+            scaler = self._load_one_model(self.scaler_path, key)
+
+            # A model trained on a different feature vector silently produces garbage
+            # (or throws inside analyze_window, where the error is swallowed), so the
+            # shape is checked here rather than discovered later.
+            expected = len(self.feature_extractor.feature_names)
+            actual = getattr(scaler, 'n_features_in_', expected)
+            if actual != expected:
+                logger.warning(
+                    "Stored model expects %d features but this build produces %d. "
+                    "Discarding it; a new model will be trained.", actual, expected)
+                return
+
+            self.isolation_forest = forest
+            self.scaler = scaler
+            self.is_trained = True
+            logger.info("Loaded pre-trained model from disk.")
         except Exception as e:
-            logger.warning("Could not load model: %s", e)
+            logger.warning("Could not load model (%s). A new one will be trained.", e)
 
     def get_status(self):
         """Return current ML engine status."""
@@ -746,6 +863,7 @@ class AnomalyDetector:
             'min_samples_needed': self.min_samples,
             'baseline_samples': self.baseline.samples_count,
             'threshold': self.threshold,
+            'contamination': self.contamination,
         }
         if self.feature_store:
             fs_stats = self.feature_store.get_storage_stats()

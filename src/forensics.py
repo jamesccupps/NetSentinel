@@ -18,11 +18,10 @@ Designed for PCAP analysis but can also run on live traffic.
 """
 
 import re
-import time
-import math
+import ipaddress
 import logging
 import base64
-from collections import defaultdict, Counter, OrderedDict
+from collections import defaultdict, Counter
 from datetime import datetime
 
 logger = logging.getLogger("NetSentinel.Forensics")
@@ -33,6 +32,55 @@ logger = logging.getLogger("NetSentinel.Forensics")
 # ═══════════════════════════════════════════════════════════════════════════════
 
 # FTP commands that carry credentials
+# BACnet service numbering is per-APDU-type: confirmed and unconfirmed services
+# are separate namespaces that both start at 0. Merging them into one dict made
+# Time-Synchronization(6) and Who-Has(7) resolve to CreateObject/DeleteObject.
+BACNET_APDU_TYPES = {
+    0: 'Confirmed-Request', 1: 'Unconfirmed-Request', 2: 'Simple-ACK',
+    3: 'Complex-ACK', 4: 'Segment-ACK', 5: 'Error', 6: 'Reject', 7: 'Abort',
+}
+
+BACNET_UNCONFIRMED_SERVICES = {
+    0: 'I-Am (device discovery response)',
+    1: 'I-Have',
+    2: 'Unconfirmed-COV-Notification',
+    3: 'Unconfirmed-Event-Notification',
+    4: 'Unconfirmed-Private-Transfer',
+    5: 'Unconfirmed-Text-Message',
+    6: 'Time-Synchronization',
+    7: 'Who-Has',
+    8: 'Who-Is (device discovery)',
+    9: 'UTC-Time-Synchronization',
+}
+
+BACNET_CONFIRMED_SERVICES = {
+    6: 'CreateObject',
+    7: 'DeleteObject',
+    12: 'ReadProperty',
+    14: 'ReadPropertyMultiple',
+    15: 'WriteProperty — CONTROL COMMAND',
+    16: 'WritePropertyMultiple — CONTROL COMMAND',
+    17: 'DeviceCommunicationControl',
+    20: 'ReinitializeDevice — DEVICE RESET',
+}
+
+
+def is_private_address(ip):
+    """
+    RFC1918 / loopback / link-local check.
+
+    Not str.startswith('172.') — that covers 172.0.0.0/8, so it wrongly treats the
+    public ranges 172.0-15.x and 172.32-255.x as internal. Only 172.16.0.0/12 is private.
+    """
+    if not ip:
+        return False
+    try:
+        addr = ipaddress.ip_address(ip)
+    except ValueError:
+        return False
+    return addr.is_private or addr.is_loopback or addr.is_link_local
+
+
 FTP_USER_RE = re.compile(rb'USER\s+(\S+)', re.IGNORECASE)
 FTP_PASS_RE = re.compile(rb'PASS\s+(\S+)', re.IGNORECASE)
 
@@ -1041,10 +1089,7 @@ class NetworkForensics:
 
             # Session cookies — only flag on external connections
             # Internal web UIs (UniFi, Pi-hole, HA) legitimately use session cookies
-            is_internal_dst = (
-                dst.startswith('192.168.') or dst.startswith('10.') or
-                dst.startswith('172.') or dst == '127.0.0.1'
-            )
+            is_internal_dst = is_private_address(dst)
             if not is_internal_dst:
                 for regex in (HTTP_COOKIE_RE, HTTP_SET_COOKIE_RE):
                     match = regex.search(payload)
@@ -1269,17 +1314,7 @@ class NetworkForensics:
                         if len(payload) > apdu_start:
                             apdu_type = (payload[apdu_start] >> 4) & 0x0F
 
-                            APDU_TYPES = {
-                                0: 'Confirmed-Request',
-                                1: 'Unconfirmed-Request',
-                                2: 'Simple-ACK',
-                                3: 'Complex-ACK',
-                                4: 'Segment-ACK',
-                                5: 'Error',
-                                6: 'Reject',
-                                7: 'Abort',
-                            }
-                            apdu_name = APDU_TYPES.get(apdu_type, f'Type {apdu_type}')
+                            apdu_name = BACNET_APDU_TYPES.get(apdu_type, f'Type {apdu_type}')
 
                             # Check for specific BACnet services
                             if apdu_type in (0, 1) and len(payload) > apdu_start + 2:
@@ -1289,40 +1324,20 @@ class NetworkForensics:
                                 else:  # Confirmed
                                     service = payload[apdu_start + 2] if len(payload) > apdu_start + 2 else 0
 
-                                BACNET_SERVICES = {
-                                    # Unconfirmed services
-                                    0: 'I-Am (device discovery response)',
-                                    1: 'I-Have',
-                                    2: 'Unconfirmed-COV-Notification',
-                                    3: 'Unconfirmed-Event-Notification',
-                                    4: 'Unconfirmed-Private-Transfer',
-                                    5: 'Unconfirmed-Text-Message',
-                                    6: 'Time-Synchronization',
-                                    7: 'Who-Has',
-                                    8: 'Who-Is (device discovery)',
-                                    9: 'UTC-Time-Synchronization',
-                                    # Confirmed services
-                                    12: 'ReadProperty',
-                                    14: 'ReadPropertyMultiple',
-                                    15: 'WriteProperty — CONTROL COMMAND',
-                                    16: 'WritePropertyMultiple — CONTROL COMMAND',
-                                    6: 'CreateObject',
-                                    7: 'DeleteObject',
-                                    17: 'DeviceCommunicationControl',
-                                    20: 'ReinitializeDevice — DEVICE RESET',
-                                }
-
-                                svc_name = BACNET_SERVICES.get(service, f'Service {service}')
+                                services = (BACNET_UNCONFIRMED_SERVICES if apdu_type == 1
+                                            else BACNET_CONFIRMED_SERVICES)
+                                svc_name = services.get(service, f'Service {service}')
+                                is_unconfirmed = apdu_type == 1
 
                                 # Discovery — someone scanning for BACnet devices
-                                if service == 8:  # Who-Is
+                                if is_unconfirmed and service == 8:  # Who-Is
                                     self._add_timeline_event(ts, 'bacnet',
                                         f"BACnet Who-Is discovery: {src} scanning for devices")
                                     self._add_sensitive_data('BACnet Discovery',
                                         f'BACnet device discovery scan from {src}',
                                         src, dst, port, ts, risk='MEDIUM')
 
-                                elif service == 0:  # I-Am response
+                                elif is_unconfirmed and service == 0:  # I-Am response
                                     self._add_timeline_event(ts, 'bacnet',
                                         f"BACnet I-Am: device at {src} responded to discovery")
                                     self._add_credential('BACnet', 'device_identity',
@@ -1331,7 +1346,7 @@ class NetworkForensics:
                                         raw_value=f"BACnet device at {src}, BVLC: {bvlc_name}")
 
                                 # Write commands — someone controlling the building
-                                elif service in (15, 16):
+                                elif not is_unconfirmed and service in (15, 16):
                                     self._add_sensitive_data('BACnet WRITE',
                                         f'BACnet write command: {svc_name} — '
                                         f'building equipment being controlled by {src}',
@@ -1342,14 +1357,14 @@ class NetworkForensics:
                                         raw_value=f'{svc_name}, payload: {payload[apdu_start:apdu_start+50].hex()}')
 
                                 # Device reset — very dangerous
-                                elif service == 20:
+                                elif not is_unconfirmed and service == 20:
                                     self._add_sensitive_data('BACnet RESET',
                                         f'BACnet ReinitializeDevice command from {src} — '
                                         f'attempting to reset building automation device!',
                                         src, dst, port, ts, risk='CRITICAL')
 
                                 # Read property — monitoring/surveillance
-                                elif service in (12, 14):
+                                elif not is_unconfirmed and service in (12, 14):
                                     self._add_timeline_event(ts, 'bacnet',
                                         f"BACnet ReadProperty: {src} reading from {dst}")
 
@@ -1359,7 +1374,7 @@ class NetworkForensics:
                 else:
                     # Non-standard BACnet packet
                     self._add_sensitive_data('BACnet',
-                        f'BACnet/IP traffic detected — building automation protocol, no encryption',
+                        'BACnet/IP traffic detected — building automation protocol, no encryption',
                         src, dst, port, ts, risk='HIGH')
 
         # ─── Parking System Protocol Detection ─────────
@@ -2129,7 +2144,7 @@ class NetworkForensics:
             'type': 'http_info_leak',
             'risk': risk,
             'title': f'HTTP Server Info Disclosure: {src}:{sport}',
-            'description': f'Server reveals software details that help attackers target specific vulnerabilities.',
+            'description': 'Server reveals software details that help attackers target specific vulnerabilities.',
             'details': findings,
             'recommendation': ('Remove or minimize server headers. '
                 'Apache: ServerTokens Prod, ServerSignature Off. '
@@ -2441,7 +2456,7 @@ class NetworkForensics:
         # ─── Check 3: Is this a known CDN/cloud IP? ──────────────────
         if dst_ip in self._cdn_ips:
             score -= 3
-            reasons.append(f"Known CDN/cloud IP — serves legitimate websites")
+            reasons.append("Known CDN/cloud IP — serves legitimate websites")
 
         # ─── Check 4: Does a known domain resolve to this IP? ────────
         domains = self._ip_to_domains.get(dst_ip, set())
@@ -2470,8 +2485,7 @@ class NetworkForensics:
                 reasons.append("Only GET requests seen — card number likely in URL/cookie, not form")
 
         # ─── Check 6: Is this to a private/internal IP? ──────────────
-        if (dst_ip.startswith('192.168.') or dst_ip.startswith('10.') or
-            dst_ip.startswith('172.') or dst_ip == '127.0.0.1'):
+        if is_private_address(dst_ip):
             score -= 2
             reasons.append("Destination is internal/private IP")
 

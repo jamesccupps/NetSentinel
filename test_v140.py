@@ -17,20 +17,19 @@ import tempfile
 import shutil
 import unittest
 import threading
-import numpy as np
 from unittest.mock import MagicMock, patch
-from collections import defaultdict, deque, Counter
+from collections import deque
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from src.config import Config, DEFAULT_CONFIG
-from src.ids_engine import IDSEngine, Alert, Severity, _COMMON_SERVICE_PORTS, _STANDARD_OUTBOUND_PORTS, _PORT_NAMES, _SERVICE_NAMES
-from src.ml_engine import BaselineProfile, TrafficFeatureExtractor, AnomalyDetector
-from src.capture import PacketInfo, NetworkFlow, CaptureEngine, _CREDENTIAL_PORTS
+from src.ids_engine import IDSEngine, Alert, _COMMON_SERVICE_PORTS, _STANDARD_OUTBOUND_PORTS, _PORT_NAMES, _SERVICE_NAMES
+from src.ml_engine import TrafficFeatureExtractor
+from src.capture import PacketInfo, NetworkFlow, _CREDENTIAL_PORTS
 from src.alerts import AlertManager
 from src.device_learner import DeviceLearner, DeviceProfile
 from src.baseline_whitelist import BaselineWhitelist
-from src.alert_correlator import AlertCorrelator, Incident
+from src.alert_correlator import AlertCorrelator
 from src.pcap_writer import PcapWriter
 
 
@@ -758,8 +757,6 @@ class TestEdgeCases(unittest.TestCase):
 
     def test_config_deep_merge_isolation(self):
         """Deep merge should not share references between merged dicts."""
-        import copy
-        from src.config import Config
         base = {'a': {'b': [1, 2, 3]}}
         override = {'a': {'b': [4, 5]}}
         result = Config._deep_merge(base, override)

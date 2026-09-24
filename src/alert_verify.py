@@ -25,15 +25,10 @@ Each alert gets:
 - severity may be upgraded or downgraded based on verification
 """
 
-import os
 import re
 import time
 import socket
 import logging
-import hashlib
-import threading
-from collections import defaultdict
-from datetime import datetime
 
 logger = logging.getLogger("NetSentinel.AlertVerify")
 
@@ -108,6 +103,9 @@ class AlertVerifier:
         self.net_env = net_env
         self.threat_intel = threat_intel
         self.process_verifier = process_verifier
+
+        legacy = config.get('ml', 'anomaly_threshold', default=None)
+        self.alert_threshold = config.get('ml', 'alert_threshold', default=legacy or 0.25)
 
         # Reverse DNS cache: {ip: (hostname, timestamp)}
         self._rdns_cache = {}
@@ -241,7 +239,6 @@ class AlertVerifier:
         score = 0  # Positive = more likely threat
 
         ip = evidence.get('matched_ip', '')
-        feed = evidence.get('threat_feed', '')
         category = evidence.get('threat_category', '')
 
         # Check if IP is in multiple feeds (stronger signal)
@@ -593,10 +590,8 @@ class AlertVerifier:
         # Check if it matches known CDN patterns
         parts = query.split('.')
         subdomain = parts[0] if parts else ''
-        is_cdn_pattern = False
         for pattern in CDN_SUBDOMAIN_PATTERNS:
             if re.search(pattern, subdomain, re.IGNORECASE):
-                is_cdn_pattern = True
                 reasoning.append(f"Subdomain matches CDN/cache pattern: {pattern}")
                 score -= 2
                 break
@@ -735,15 +730,15 @@ class AlertVerifier:
             anomaly_score = 0
 
         unusual = evidence.get('what_is_unusual', [])
-        compared_against = evidence.get('compared_against', '')
 
         # Check if baseline is still learning
         if any('still learning' in str(item).lower() for item in unusual):
             reasoning.append("Baseline is still learning — low confidence in anomaly detection")
             score -= 2
 
-        # Barely over threshold = low confidence
-        threshold = 0.25
+        # Barely over threshold = low confidence. Read from config so this tracks
+        # ml.alert_threshold instead of silently disagreeing with the ML engine.
+        threshold = self.alert_threshold
         if anomaly_score < threshold * 1.5:
             reasoning.append(f"Score barely above threshold ({anomaly_score:.3f}) — marginal anomaly")
             score -= 1
@@ -921,7 +916,6 @@ class AlertVerifier:
         score = 0
 
         service = evidence.get('service', '')
-        server = evidence.get('server', '')
         port = evidence.get('port', alert.dst_port) or alert.dst_port or 0
         packets = evidence.get('packets_observed', 0)
         bytes_xfer = evidence.get('bytes_transferred', 0)
@@ -941,7 +935,7 @@ class AlertVerifier:
                                 f"likely an HTTP→HTTPS redirect, not active HTTP usage")
                 score -= 3
             elif bytes_xfer < 10000 and has_https:
-                reasoning.append(f"Minimal HTTP alongside HTTPS — redirect traffic")
+                reasoning.append("Minimal HTTP alongside HTTPS — redirect traffic")
                 score -= 2
             else:
                 reasoning.append(f"Sustained HTTP traffic: {bytes_xfer:,} bytes, {packets} packets")
@@ -990,7 +984,7 @@ class AlertVerifier:
             summary = f"Minimal {service} traffic — may be benign"
         else:
             verdict = AlertVerdict.LIKELY_FALSE_POSITIVE
-            summary = f"Likely HTTP→HTTPS redirect, not active insecure usage"
+            summary = "Likely HTTP→HTTPS redirect, not active insecure usage"
 
         return {'verdict': verdict, 'confidence': min(abs(score)/4, 1.0),
                 'reasoning': reasoning, 'summary': summary}
@@ -1125,7 +1119,7 @@ class AlertVerifier:
             hostname = socket.gethostbyaddr(ip)[0]
             self._rdns_cache[ip] = (hostname, now)
             return hostname
-        except (socket.herror, socket.gaierror, socket.timeout):
+        except (TimeoutError, socket.herror, socket.gaierror):
             self._rdns_cache[ip] = (None, now)
             return None
 

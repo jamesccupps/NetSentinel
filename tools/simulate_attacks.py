@@ -13,13 +13,14 @@ IMPORTANT: Run this from a SECOND terminal while NetSentinel is monitoring.
            Some tests require Administrator privileges.
 """
 
+import os
 import sys
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import time
 import socket
-import struct
 import argparse
 import threading
-from datetime import datetime
 
 try:
     from scapy.all import (
@@ -45,7 +46,7 @@ def banner(test_num, name, description):
 def wait_for_alert(seconds=2):
     print(f"  [*] Waiting {seconds}s for NetSentinel to process...")
     time.sleep(seconds)
-    print(f"  [+] Check NetSentinel Alerts tab for results\n")
+    print("  [+] Check NetSentinel Alerts tab for results\n")
 
 
 class Tests:
@@ -69,7 +70,7 @@ class Tests:
                 pass
             time.sleep(0.05)
         print(f"\n  [*] Scanned {connected} ports")
-        print(f"  [!] Expected: [HIGH] Port Scan Detected")
+        print("  [!] Expected: [HIGH] Port Scan Detected")
         print(f"      Evidence: list of all {len(ports)} ports, scan rate, targets")
         wait_for_alert()
 
@@ -89,8 +90,8 @@ class Tests:
                 failures += 1
             time.sleep(0.1)
         print(f"  [*] Sent {failures} rapid connection attempts to port 22")
-        print(f"  [!] Expected: [HIGH] Potential Brute Force (SSH)")
-        print(f"      Evidence: attempt count, rate, target service name")
+        print("  [!] Expected: [HIGH] Potential Brute Force (SSH)")
+        print("      Evidence: attempt count, rate, target service name")
         wait_for_alert()
 
     @staticmethod
@@ -107,15 +108,16 @@ class Tests:
                 print(f"  [*] Attempted connection to port {port} ({name})")
             except Exception:
                 print(f"  [*] Attempted port {port} ({name}) - connection failed (expected)")
-        print(f"  [!] Expected: [HIGH] Known Malicious Port (for each port)")
-        print(f"      Evidence: port number, known usage, process name")
+        print("  [!] Expected: [HIGH] Known Malicious Port (for each port)")
+        print("      Evidence: port number, known usage, process name")
         wait_for_alert()
 
     @staticmethod
     def test_4_dns_tunneling():
         """DNS-TUNNEL: DNS query with subdomain > 60 chars or high entropy"""
         banner(4, "DNS TUNNELING", "Sending DNS queries with long encoded subdomains")
-        import random, string
+        import random
+        import string
         long_sub = ''.join(random.choices(string.ascii_lowercase + string.digits, k=80))
         tunnel_domain = f"{long_sub}.evil-tunnel-test.example.com"
         try:
@@ -130,8 +132,8 @@ class Tests:
         except socket.gaierror:
             pass
         print(f"  [*] Sent DNS query: {medium_domain[:60]}...")
-        print(f"  [!] Expected: [HIGH] Possible DNS Tunneling")
-        print(f"      Evidence: full query, subdomain length, entropy score")
+        print("  [!] Expected: [HIGH] Possible DNS Tunneling")
+        print("      Evidence: full query, subdomain length, entropy score")
         wait_for_alert()
 
     @staticmethod
@@ -151,15 +153,16 @@ class Tests:
                 pass
             print(f"  [*] DNS query: {domain}")
             time.sleep(0.2)
-        print(f"  [!] Expected: [MEDIUM] Suspicious TLD Query (for each)")
-        print(f"      Evidence: TLD name, recent queries to same TLD")
+        print("  [!] Expected: [MEDIUM] Suspicious TLD Query (for each)")
+        print("      Evidence: TLD name, recent queries to same TLD")
         wait_for_alert()
 
     @staticmethod
     def test_6_dns_flood():
         """DNS-FLOOD: >50 DNS queries in 10 seconds"""
         banner(6, "DNS FLOOD", "Sending 65 DNS queries in rapid succession")
-        import random, string
+        import random
+        import string
         count = 0
         for i in range(65):
             rand_sub = ''.join(random.choices(string.ascii_lowercase, k=8))
@@ -172,8 +175,8 @@ class Tests:
                 sys.stdout.write(f"\r  [*] Sent {count}/65 queries...")
                 sys.stdout.flush()
         print(f"\n  [*] Sent {count} DNS queries rapidly")
-        print(f"  [!] Expected: [MEDIUM] Excessive DNS Queries")
-        print(f"      Evidence: query count, unique domains, sample list, rate")
+        print("  [!] Expected: [MEDIUM] Excessive DNS Queries")
+        print("      Evidence: query count, unique domains, sample list, rate")
         wait_for_alert()
 
     @staticmethod
@@ -190,8 +193,8 @@ class Tests:
                 send(pkt, verbose=False)
                 count += 1
             print(f"  [*] Sent {count} SYN packets to port 80")
-            print(f"  [!] Expected: [CRITICAL] SYN Flood Attack")
-            print(f"      Evidence: SYN count, rate, target IP")
+            print("  [!] Expected: [CRITICAL] SYN Flood Attack")
+            print("      Evidence: SYN count, rate, target IP")
         except PermissionError:
             print("  [SKIP] Requires Administrator privileges")
         except Exception as e:
@@ -212,7 +215,7 @@ class Tests:
                 send(pkt, verbose=False)
                 count += 1
             print(f"  [*] Sent {count} ICMP packets")
-            print(f"  [!] Expected: [HIGH] ICMP Flood Detected")
+            print("  [!] Expected: [HIGH] ICMP Flood Detected")
         except PermissionError:
             print("  [SKIP] Requires Administrator privileges")
         except Exception as e:
@@ -256,8 +259,8 @@ class Tests:
                     sys.stdout.flush()
             sender.close()
             print(f"\n  [*] Sent {total_mb:.0f} MB to localhost")
-            print(f"  [!] Expected: [HIGH] Large Data Transfer")
-            print(f"      Evidence: MB transferred, destination, threshold, process")
+            print("  [!] Expected: [HIGH] Large Data Transfer")
+            print("      Evidence: MB transferred, destination, threshold, process")
         except Exception as e:
             print(f"  [SKIP] Error: {e}")
         finally:
@@ -285,11 +288,11 @@ class Tests:
                     socket.getaddrinfo(f"{rand}.anomaly-test-{i}.example.com", None)
                 except Exception:
                     pass
-        print(f"  [*] Generated 100 connections + 20 DNS queries")
-        print(f"  [!] Expected: [MEDIUM] ML Anomaly Detected")
-        print(f"      Evidence: which features deviated, z-scores vs baseline,")
-        print(f"                human-readable comparison, recommendations")
-        print(f"  [*] Note: Requires trained model (200+ samples = ~17 min of monitoring)")
+        print("  [*] Generated 100 connections + 20 DNS queries")
+        print("  [!] Expected: [MEDIUM] ML Anomaly Detected")
+        print("      Evidence: which features deviated, z-scores vs baseline,")
+        print("                human-readable comparison, recommendations")
+        print("  [*] Note: Requires trained model (200+ samples = ~17 min of monitoring)")
         wait_for_alert(8)
 
     @staticmethod
@@ -336,8 +339,8 @@ class Tests:
             s.close()
         except Exception:
             pass
-        print(f"  [!] Expected: [HIGH] Blacklisted Destination IP")
-        print(f"      Evidence: blacklisted IP, direction, protocol, process")
+        print("  [!] Expected: [HIGH] Blacklisted Destination IP")
+        print("      Evidence: blacklisted IP, direction, protocol, process")
         wait_for_alert()
 
     @staticmethod
@@ -410,7 +413,7 @@ def main():
     TARGET_IP = args.target
     PAUSE_BETWEEN_TESTS = args.pause
 
-    print("""
+    print(f"""
  ===================================================================
    NETSENTINEL - Detection Test Suite
  ===================================================================
@@ -418,10 +421,10 @@ def main():
    Make sure NetSentinel is RUNNING and MONITORING before starting.
    Watch the Alerts tab in real time as each test fires.
 
-   Target: {}
+   Target: {TARGET_IP}
    Tests marked * require Administrator + Scapy for raw packets.
  ===================================================================
-    """.format(TARGET_IP))
+    """)
 
     if args.test:
         if '-' in args.test:
@@ -451,10 +454,10 @@ def main():
     print(f"\n{'='*70}")
     print(f"  SUMMARY: {passed} tests run, {skipped} skipped")
     print(f"{'='*70}")
-    print(f"  Check NetSentinel Alerts tab to verify each test generated")
-    print(f"  the expected alert(s) with detailed evidence.")
-    print(f"")
-    print(f"  If ML Anomaly (test 10) didn't fire, let NetSentinel build")
+    print("  Check NetSentinel Alerts tab to verify each test generated")
+    print("  the expected alert(s) with detailed evidence.")
+    print("")
+    print("  If ML Anomaly (test 10) didn't fire, let NetSentinel build")
     print(f"  a baseline first (~17 min), then re-run: python {sys.argv[0]} --test 10")
     print(f"{'='*70}\n")
 

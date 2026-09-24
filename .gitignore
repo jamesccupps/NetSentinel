@@ -28,6 +28,16 @@ env/
 # Users should NOT commit their local data
 *.pkl
 *.log
+*.enc
+vault_salt.bin
+.model_key
+*.pcap
+
+# Tooling
+.ruff_cache/
+.pytest_cache/
+.coverage
+htmlcov/
 
 # OS
 .DS_Store

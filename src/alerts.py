@@ -11,7 +11,6 @@ import time
 import logging
 import threading
 from collections import deque
-from datetime import datetime
 
 logger = logging.getLogger("NetSentinel.Alerts")
 
@@ -50,8 +49,13 @@ class AlertManager:
         self._notify_batch = []
         self._notify_batch_start = 0
         self._notify_batch_interval = 15  # Batch notifications over 15 seconds
+        self._notify_timer = None
+        self._notify_lock = threading.Lock()
         self._last_sound_time = 0
         self._sound_cooldown = 10  # Min seconds between alert sounds
+
+        self._last_save = time.time()
+        self._autosave_interval = 60  # Flush alert history at most once a minute
 
     def add_alert(self, alert):
         """Add a new alert to the store."""
@@ -147,20 +151,36 @@ class AlertManager:
             }
 
     def save_alerts(self):
-        """Persist alerts to disk."""
+        """
+        Persist alerts to disk atomically.
+
+        Previously capped at 500 while max_stored defaults to 5000, so 90% of history
+        was silently dropped at shutdown.
+        """
         try:
+            from src.config import atomic_write_json
             with self._lock:
-                data = [a.to_dict() for a in list(self._alerts)[:500]]
-            with open(self.db_path, 'w') as f:
-                json.dump(data, f, indent=1)
+                data = [a.to_dict() for a in self._alerts]
+            atomic_write_json(self.db_path, data, indent=1)
+            self._last_save = time.time()
         except Exception as e:
             logger.error("Failed to save alerts: %s", e)
+
+    def maybe_autosave(self):
+        """
+        Flush to disk if enough time has passed.
+
+        save_alerts() used to be called only from stop_monitoring(), so a crash or a
+        kill lost every alert raised since startup.
+        """
+        if time.time() - self._last_save >= self._autosave_interval:
+            self.save_alerts()
 
     def _load_alerts(self):
         """Load alerts from disk and reconstruct Alert objects."""
         if os.path.exists(self.db_path):
             try:
-                with open(self.db_path, 'r') as f:
+                with open(self.db_path) as f:
                     data = json.load(f)
                 from src.ids_engine import Alert
                 for item in data:
@@ -179,7 +199,9 @@ class AlertManager:
                     )
                     alert.timestamp = item.get('timestamp', time.time())
                     alert.acknowledged = item.get('acknowledged', False)
-                    self._alerts.appendleft(alert)
+                    # The file is written newest-first and _alerts is newest-first, so
+                    # append (not appendleft) preserves the order. appendleft reversed it.
+                    self._alerts.append(alert)
                     self.stats['total'] += 1
                     self.stats['by_severity'][alert.severity] = \
                         self.stats['by_severity'].get(alert.severity, 0) + 1
@@ -251,19 +273,34 @@ class AlertManager:
                     if ts >= cutoff]
 
     def _batch_notification(self, alert):
-        """Batch desktop notifications to avoid spam."""
-        now = time.time()
-        self._notify_batch.append(alert)
+        """
+        Batch desktop notifications to avoid spam.
 
-        if not self._notify_batch_start:
-            self._notify_batch_start = now
+        A timer does the flushing. Flushing only when the *next* alert arrives meant a
+        burst followed by silence — exactly what an incident looks like — was never
+        delivered at all.
+        """
+        with self._notify_lock:
+            self._notify_batch.append(alert)
+            if not self._notify_batch_start:
+                self._notify_batch_start = time.time()
+            if self._notify_timer is None or not self._notify_timer.is_alive():
+                self._notify_timer = threading.Timer(
+                    self._notify_batch_interval, self._flush_notifications)
+                self._notify_timer.daemon = True
+                self._notify_timer.start()
 
-        # Flush batch after the interval
-        if now - self._notify_batch_start >= self._notify_batch_interval:
+    def _flush_notifications(self):
+        """Send the pending notification batch. Runs on a timer thread."""
+        with self._notify_lock:
             batch = self._notify_batch
             self._notify_batch = []
             self._notify_batch_start = 0
+            self._notify_timer = None
 
+        if not batch:
+            return
+        try:
             if len(batch) == 1:
                 self._desktop_notify(batch[0])
             elif len(batch) > 1:
@@ -279,6 +316,8 @@ class AlertManager:
                 if parts:
                     summary += f" ({', '.join(parts)})"
                 self._desktop_notify_text("NetSentinel Alert Batch", summary)
+        except Exception as e:
+            logger.debug("Notification flush error: %s", e)
 
     def _desktop_notify_text(self, title, message):
         """Send a desktop notification with custom text."""
@@ -294,7 +333,7 @@ class AlertManager:
             pass
 
     def _desktop_notify(self, alert):
-        """Send a desktop notification (Windows)."""
+        """Send a desktop notification."""
         try:
             from plyer import notification
             notification.notify(
@@ -303,27 +342,11 @@ class AlertManager:
                 app_name="NetSentinel",
                 timeout=10,
             )
-        except ImportError:
-            # Fallback: Windows toast via PowerShell
-            try:
-                if os.name == 'nt':
-                    import subprocess
-                    ps_cmd = (
-                        f'[Windows.UI.Notifications.ToastNotificationManager, '
-                        f'Windows.UI.Notifications, ContentType = WindowsRuntime] | Out-Null; '
-                        f'$template = [Windows.UI.Notifications.ToastNotificationManager]::'
-                        f'GetTemplateContent([Windows.UI.Notifications.ToastTemplateType]::'
-                        f'ToastText02); '
-                        f'$textNodes = $template.GetElementsByTagName("text"); '
-                        f'$textNodes.Item(0).AppendChild($template.CreateTextNode('
-                        f'"NetSentinel: {alert.severity}")) | Out-Null; '
-                        f'$textNodes.Item(1).AppendChild($template.CreateTextNode('
-                        f'"{alert.title}")) | Out-Null; '
-                    )
-                    # Simple fallback - just log it
-                    pass
-            except Exception:
-                pass
+        except Exception as e:
+            # plyer raises ImportError when absent and NotImplementedError on
+            # unsupported platforms; neither should reach the caller, which is on
+            # the packet path.
+            logger.debug("Desktop notification unavailable: %s", e)
 
     def _play_sound(self):
         """Play an alert sound."""
@@ -344,7 +367,8 @@ class AlertManager:
             now = time.time()
             recent = sum(1 for a in self._alerts if now - a.timestamp < 60)
         return {
-            **{k: v for k, v in self.stats.items() if k != 'rate_history'},
+            **{k: (dict(v) if isinstance(v, dict) else v)
+               for k, v in self.stats.items() if k != 'rate_history'},
             'unacknowledged': unack,
             'stored': len(self._alerts),
             'alerts_per_minute': recent,

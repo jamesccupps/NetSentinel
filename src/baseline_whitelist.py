@@ -26,8 +26,7 @@ import json
 import time
 import logging
 import threading
-from collections import Counter, defaultdict
-from datetime import datetime
+from collections import Counter
 
 logger = logging.getLogger("NetSentinel.BaselineWL")
 
@@ -53,7 +52,6 @@ class BaselineWhitelist:
         self._domains = {}          # {domain: {first_seen, last_seen, count, source_ips}}
         self._ips = {}              # {ip: {first_seen, last_seen, count, ports, domains}}
         self._port_patterns = Counter()  # {port: count during baseline}
-        self._dns_pairs = set()     # {(src_ip, domain)} - known DNS query pairs
         self._periodic_ips = {}     # {(src, dst): avg_interval} - learned beacons
 
         # Config-driven exclusions (user can add via config, but starts empty)
@@ -105,12 +103,6 @@ class BaselineWhitelist:
             entry['source_ips'].add(src_ip)
             if len(entry['full_domains']) < 50:
                 entry['full_domains'].add(domain)
-
-            self._dns_pairs.add((src_ip, base))
-            # Cap to prevent unbounded memory growth
-            if len(self._dns_pairs) > 50000:
-                # Evict oldest half (sets aren't ordered, but this is a pragmatic cap)
-                self._dns_pairs = set(list(self._dns_pairs)[-25000:])
 
     def observe_connection(self, src_ip, dst_ip, dst_port, timestamp=None):
         """Record a connection observed on the network."""
@@ -276,8 +268,8 @@ class BaselineWhitelist:
                 },
             }
         try:
-            with open(self._db_path, 'w') as f:
-                json.dump(data, f, indent=1, default=str)
+            from src.config import atomic_write_json
+            atomic_write_json(self._db_path, data, indent=1, default=str)
             logger.info("Saved baseline whitelist (%d domains, %d IPs)",
                        len(data['domains']), len(data['ips']))
         except Exception as e:
@@ -288,7 +280,7 @@ class BaselineWhitelist:
         if not os.path.exists(self._db_path):
             return
         try:
-            with open(self._db_path, 'r') as f:
+            with open(self._db_path) as f:
                 data = json.load(f)
 
             self.learning_start = data.get('learning_start', time.time())

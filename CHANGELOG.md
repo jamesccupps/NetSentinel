@@ -1,4 +1,138 @@
-# NetSentinel v1.4.0 Changelog
+# NetSentinel Changelog
+
+## v1.5.0 — Audit remediation
+
+A full review of the codebase (see `AUDIT.md`) found one exploitable security bug,
+several defects that silently defeated the detection logic, and a set of documented
+features that were not actually wired up. This release fixes all of them and adds
+regression tests so they stay fixed.
+
+**144 unit tests** (up from 100) plus 14 integration checks. CI runs the suite on
+Python 3.10, 3.11 and 3.12.
+
+### Security
+
+- **Command injection in the Authenticode check (critical).**
+  `process_verify._check_signature` interpolated an executable path into a PowerShell
+  `-Command` string. The path comes from `psutil.Process(pid).exe()`, PowerShell expands
+  `$(...)` inside double-quoted strings, and `$`, `(` and `)` are legal in Windows
+  filenames — so an unprivileged user could get code execution in a process that ships
+  with `--uac-admin`. The path is now passed in an environment variable and read with
+  `-LiteralPath`; the PowerShell program is a module constant.
+- **Credential vault storage policy.** Full plaintext secrets were written to disk for
+  20+ protocols. Only **masked** values are stored now; raw storage is opt-in via
+  `forensics.store_raw_credentials`.
+- **Vault key derivation.** The key is still hostname+username by default (documented
+  clearly as obfuscation, not confidentiality), but setting `forensics.vault_passphrase`
+  now switches to scrypt over a random salt. The home-grown XOR fallback is gone —
+  `cryptography` is required and the vault fails closed.
+- **The README claimed AES-256.** Fernet is AES-128-CBC + HMAC-SHA256. Corrected
+  everywhere, including in the GUI.
+- **File permissions.** `~/.netsentinel/` is created `0700` and sensitive files `0600`
+  where the platform supports it. Previously `0644`.
+- **`forensics_log.json` no longer contains credential material.** It stored
+  `value_masked` despite documenting "metadata only"; `_mask()` reveals the leading
+  characters of short secrets.
+- **Model files are authenticated.** `pickle.load()` from a user-writable directory in
+  an elevated process was a privilege-escalation primitive. Models now carry an HMAC
+  keyed outside the data directory, and a feature-count mismatch is detected on load
+  instead of silently disabling scoring.
+- **Threat feed downloads are bounded** (64 MB) and refuse to follow a redirect off HTTPS.
+
+### Detection correctness
+
+- **The baseline whitelist never stopped learning.** `app._on_packet` fed it
+  unconditionally, so any domain or IP seen three times marked itself "normal" and
+  permanently suppressed DNS tunnelling, bad-TLD, beaconing and full-severity exfil
+  alerts for it — an attacker's own infrastructure whitelisted itself after four packets.
+  Observation is now gated on `is_learning`.
+- **ML rate features were pinned to constants.** The analysis loop passed a rolling
+  5000-packet buffer while claiming a 5-second window, so `packets_per_sec` was
+  `5000/5 = 1000.0` regardless of real traffic. The window is now time-bounded and the
+  extractor divides by the span the packets actually cover.
+- **`direction_asymmetry` was always 0.** It computed `abs(N - N)` by counting packets
+  per source and per destination. It now measures byte imbalance relative to local hosts.
+- **`DATA-EXFIL` fired on downloads.** Bytes were accumulated against `dst_ip` with no
+  direction check, so a large download raised a HIGH "data sent to *your own IP*". Only
+  traffic leaving the local network is counted now.
+- **TLD checks matched substrings.** `query.endswith(tld.lstrip('.'))` flagged `laptop`,
+  `desktop`, `rooftop`, `network`, `forest`, `webcam`, `uplink` and `homework` — all of
+  which occur as single-label LLMNR/NetBIOS lookups. Matching is now label-based in both
+  the IDS and the threat-intel engine.
+- **`ODD-HOURS` hourly suppression lasted 150 seconds.** Its marker lived in
+  `_alert_cooldowns`, which the pruner clears at `cooldown_sec * 5`, so the rule fired
+  roughly 24x/hour instead of once. Long-lived suppressions have their own store.
+- **`rules/default_rules.json` was never loaded.** Shipped, bundled by PyInstaller and
+  documented, but nothing read it. It is now loaded at import, with a user copy in
+  `~/.netsentinel/rules/` taking precedence. `.info` and `.biz` were removed from its
+  TLD list as too noisy.
+- **`ml.anomaly_threshold` controlled two unrelated things** — Isolation Forest
+  `contamination` and the alert gate — in opposite directions. Split into
+  `ml.contamination` and `ml.alert_threshold`; the old key is still honoured.
+- **Process attribution was blank for almost every packet.** The throttle gated the
+  lookup rather than the refresh, so roughly one packet per 5 seconds got a process name.
+  The psutil enumeration now runs on a background thread and every packet reads the cache.
+- **`startswith('172.')` covers 172.0.0.0/8**, not 172.16.0.0/12, so public addresses in
+  172.0-15 and 172.32-255 were treated as private. Replaced with proper `ipaddress` checks.
+- **BACnet service names were wrong.** Confirmed and unconfirmed services are separate
+  namespaces that both start at 0; a single dict meant `Time-Synchronization` and
+  `Who-Has` resolved to `CreateObject` and `DeleteObject`.
+
+### Reliability and performance
+
+- **Slow verification moved off the packet thread.** IOC alerts triggered file hashing,
+  a PowerShell call and a VirusTotal lookup — each with a 10-second timeout — inline on
+  the packet worker, so detecting something suspicious stalled the whole pipeline.
+  Alerts now publish immediately and deepen asynchronously.
+- **Forensics alert scanning is incremental.** It re-scanned every finding on every
+  packet; it now reads from a cursor. Duplicate credentials no longer re-encrypt and
+  rewrite the entire vault on each repeat packet.
+- **Beaconing detection is a single pass.** It rebuilt the source set per destination by
+  rescanning the whole window — O(packets x destinations) every cycle.
+- **`DeviceLearner` only profiles local devices.** Every remote internet IP used to
+  become a "device on your network": one browsing session produced 3000+ profiles and a
+  1.2 MB JSON file. Per-device sets are now trimmed as well.
+- **Alert history.** `save_alerts()` hardcoded `[:500]` while `max_stored` defaults to
+  5000, and `_load_alerts` inverted the order on restore. Both fixed, plus periodic
+  autosave so a crash no longer discards the session.
+- **Desktop notifications flush on a timer.** The batch only flushed when the *next*
+  alert arrived, so a burst followed by silence — what an incident looks like — was
+  never delivered.
+- **All persistence is atomic** (temp file + fsync + rename). Every save path was a
+  full rewrite, so an interruption truncated the file and the loader silently started
+  from empty.
+- **`get_stats()` returns a real snapshot.** `dict()` is shallow, so callers received
+  the live containers the worker keeps mutating.
+- **PCAP writer.** A failed rotation left recording permanently dead against a closed
+  handle; file I/O no longer happens under the buffer lock; the link type is
+  configurable instead of hardcoded to Ethernet; and old recordings are pruned
+  (`capture.pcap_max_files`) so continuous capture cannot fill the disk.
+- **Dead state removed:** `_recent_connections`, `_recent_dns`, `_dhcp_devices`,
+  `_smb_versions`, the IDS's never-written mDNS/LLMNR trackers, `_connection_timings`,
+  `BaselineProfile._history` and `_dns_pairs`. The ARP table and the escalating exfil
+  thresholds are now pruned.
+
+### Configuration
+
+All 56 keys in `DEFAULT_CONFIG` are now read by the code. Sixteen were dead, including
+`forensics.enabled`, `forensics.save_credentials`, `forensics.retention_days`,
+`verification.check_signatures`, `whitelists.domains`, `whitelists.processes` and
+`blacklists.domains` — setting any of them appeared to work and did nothing. Retention
+is now enforced at startup, and a new `BL-DOMAIN` rule backs the domain blacklist.
+
+### Tests and project
+
+- New `test_regressions.py`: 42 tests, one per audit finding.
+- `test_live.py` had a failing assertion and called `sys.exit()` at import, which broke
+  `unittest discover` and pytest collection. Fixed and moved to
+  `tools/integration_check.py`; `test_detections.py` (which contributed 0 tests) moved
+  to `tools/simulate_attacks.py`.
+- Added GitHub Actions CI, `pyproject.toml`, `SECURITY.md` and a ruff configuration.
+- Version strings reconciled (`main.py`, `src/__init__.py`, `setup.bat` disagreed).
+
+---
+
+## v1.4.0
 
 ## New: Passive Network Learning (Zero-Config)
 

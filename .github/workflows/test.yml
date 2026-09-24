@@ -1,0 +1,47 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.10', '3.11', '3.12']
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          # pyinstaller is a build-time tool, not needed to run the tests
+          pip install scapy psutil scikit-learn numpy cryptography
+
+      - name: Unit and regression tests
+        run: python -m unittest discover -s . -p "test_*.py" -v
+
+      - name: Integration check
+        run: python tools/integration_check.py
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install ruff
+      # Syntax errors and undefined names fail the build; style is advisory.
+      - run: ruff check --select E9,F63,F7,F82 .
+      - run: ruff check . || true

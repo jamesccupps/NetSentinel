@@ -16,16 +16,12 @@ Sources (all free, no API key needed):
 """
 
 import os
-import re
-import csv
 import time
 import json
 import logging
 import threading
 import ipaddress
-from io import StringIO
-from collections import defaultdict
-from datetime import datetime, timedelta
+from datetime import datetime
 
 logger = logging.getLogger("NetSentinel.ThreatIntel")
 
@@ -34,6 +30,9 @@ try:
     URLLIB_AVAILABLE = True
 except ImportError:
     URLLIB_AVAILABLE = False
+
+# Hard ceiling on a single feed download. The largest real feed here is a few MB.
+MAX_FEED_BYTES = 64 * 1024 * 1024
 
 # ─── Feed Definitions ───────────────────────────────────────────────────────
 
@@ -98,11 +97,23 @@ BUILTIN_SUSPICIOUS_DOMAINS = {
     # (checked by suffix, not exact match)
 }
 
+# Stored WITHOUT a leading dot and matched against the final DNS label only.
+# Suffix-matching the raw string instead (`domain.endswith('rest')`) also matches
+# 'forest', 'webcam', 'network', 'uplink' and 'homework' — all of which appear as
+# single-label LLMNR/NetBIOS lookups on Windows networks.
 SUSPICIOUS_TLDS = {
-    ".xyz", ".top", ".buzz", ".tk", ".ml", ".ga", ".cf", ".gq",
-    ".work", ".click", ".link", ".icu", ".monster", ".rest",
-    ".cam", ".surf", ".ooo", ".sbs", ".cyou",
+    "xyz", "top", "buzz", "tk", "ml", "ga", "cf", "gq",
+    "work", "click", "link", "icu", "monster", "rest",
+    "cam", "surf", "ooo", "sbs", "cyou",
 }
+
+
+def tld_of(domain):
+    """Return the final DNS label, lowercased. Empty for single-label names."""
+    if not domain:
+        return ''
+    domain = domain.rstrip('.').lower()
+    return domain.rsplit('.', 1)[-1] if '.' in domain else ''
 
 # Suspicious user-agent patterns
 SUSPICIOUS_USER_AGENTS = [
@@ -192,14 +203,12 @@ class ThreatIntelEngine:
                 self.stats['threats_found'] += 1
                 return self._malicious_ips[ip].copy()
 
-            # CIDR network match
+            # CIDR network match. `addr` is already parsed above — re-parsing it
+            # inside the loop cost one ip_address() construction per network.
             for network, feed_info in self._ip_networks:
-                try:
-                    if ipaddress.ip_address(ip) in network:
-                        self.stats['threats_found'] += 1
-                        return feed_info.copy()
-                except ValueError:
-                    continue
+                if addr.version == network.version and addr in network:
+                    self.stats['threats_found'] += 1
+                    return feed_info.copy()
 
         return None
 
@@ -249,15 +258,15 @@ class ThreatIntelEngine:
                 }
 
         # Suspicious TLD check
-        for tld in SUSPICIOUS_TLDS:
-            if domain.endswith(tld.lstrip('.')):
-                return {
-                    'feed': 'builtin',
-                    'category': 'Suspicious TLD',
-                    'description': f'Domain uses high-abuse TLD ({tld})',
-                    'confidence': 'LOW',
-                    'match_type': 'suspicious_tld',
-                }
+        tld = tld_of(domain)
+        if tld in SUSPICIOUS_TLDS:
+            return {
+                'feed': 'builtin',
+                'category': 'Suspicious TLD',
+                'description': f'Domain uses high-abuse TLD (.{tld})',
+                'confidence': 'LOW',
+                'match_type': 'suspicious_tld',
+            }
 
         return None
 
@@ -290,7 +299,14 @@ class ThreatIntelEngine:
                 'User-Agent': 'NetSentinel/1.0 ThreatIntel'
             })
             with urllib.request.urlopen(req, timeout=30) as response:
-                data = response.read().decode('utf-8', errors='ignore')
+                if not response.geturl().lower().startswith('https://'):
+                    raise ValueError(f"feed redirected off HTTPS: {response.geturl()}")
+                # Bounded read: response.read() with no limit lets a compromised or
+                # misconfigured feed return an arbitrarily large body.
+                raw = response.read(MAX_FEED_BYTES + 1)
+            if len(raw) > MAX_FEED_BYTES:
+                raise ValueError(f"feed exceeded {MAX_FEED_BYTES // (1024 * 1024)} MB limit")
+            data = raw.decode('utf-8', errors='ignore')
 
             # Cache to disk
             with open(cache_file, 'w', encoding='utf-8') as f:
@@ -312,7 +328,7 @@ class ThreatIntelEngine:
             # Try loading from cache
             if os.path.exists(cache_file):
                 logger.info("Using cached version of %s", feed_name)
-                with open(cache_file, 'r', encoding='utf-8') as f:
+                with open(cache_file, encoding='utf-8') as f:
                     return f.read()
             return None
 
@@ -398,7 +414,7 @@ class ThreatIntelEngine:
                 if needs_refresh and URLLIB_AVAILABLE:
                     data = self._download_feed(feed_name, feed_config)
                 elif os.path.exists(cache_file):
-                    with open(cache_file, 'r', encoding='utf-8') as f:
+                    with open(cache_file, encoding='utf-8') as f:
                         data = f.read()
 
                 if data:
@@ -456,7 +472,7 @@ class ThreatIntelEngine:
         """Load feed metadata from disk."""
         if os.path.exists(self._meta_path):
             try:
-                with open(self._meta_path, 'r') as f:
+                with open(self._meta_path) as f:
                     return json.load(f)
             except Exception:
                 pass

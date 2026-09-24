@@ -18,16 +18,15 @@ import unittest
 import tempfile
 import shutil
 import numpy as np
-from unittest.mock import MagicMock, patch
-from collections import defaultdict, deque
+from unittest.mock import patch
 
 # Add src to path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from src.config import Config, DEFAULT_CONFIG
 from src.ids_engine import IDSEngine, Alert, Severity
-from src.ml_engine import BaselineProfile, TrafficFeatureExtractor, AnomalyDetector
-from src.net_detect import NetworkEnvironment, KNOWN_CLOUD_DOMAINS, CLOUD_HOSTING_DOMAINS
+from src.ml_engine import BaselineProfile, TrafficFeatureExtractor
+from src.net_detect import NetworkEnvironment
 from src.ioc_scanner import IOCScanner, DGA_WHITELIST_SUFFIXES
 from src.alerts import AlertManager
 from src.capture import PacketInfo
@@ -528,11 +527,35 @@ class TestIDSRules(unittest.TestCase):
         self.assertEqual(count_1, count_2,
                          "Duplicate alert within cooldown should be suppressed")
 
-    def test_data_exfil_tracks_active_ips(self):
-        """Data exfil rule should mark active transfer IPs."""
-        pkt = make_packet(dst_ip="10.0.0.5", payload_size=1000)
+    def test_data_exfil_tracks_outbound_destinations(self):
+        """Data exfil tracking follows traffic leaving the network."""
+        pkt = make_packet(src_ip="192.168.1.10", dst_ip="93.184.216.34",
+                          payload_size=1000)
         self.ids.inspect_packet(pkt)
-        self.assertIn("10.0.0.5", self.ids._active_transfer_ips)
+        self.assertIn("93.184.216.34", self.ids._active_transfer_ips)
+
+    def test_data_exfil_ignores_inbound_traffic(self):
+        """
+        Downloads must not be counted as exfiltration.
+
+        The rule used to do `self._data_transfer[dst_ip] += payload_size` with no
+        direction check, so bytes arriving from the internet accumulated against the
+        local machine and a large download raised a HIGH "data sent to <your own IP>".
+        """
+        for _ in range(50):
+            self.ids.inspect_packet(make_packet(
+                src_ip="93.184.216.34", dst_ip="192.168.1.10",
+                src_port=80, dst_port=51000, payload_size=1460))
+        self.assertNotIn("192.168.1.10", self.ids._active_transfer_ips)
+        self.assertEqual(self.ids._data_transfer.get("192.168.1.10", 0), 0)
+        self.assertFalse([a for a in self.alerts if a.rule_id == "DATA-EXFIL"],
+                         "A pure download must not raise DATA-EXFIL")
+
+    def test_data_exfil_ignores_purely_internal_transfer(self):
+        """LAN-to-LAN transfers (NAS backups) are out of scope for this rule."""
+        self.ids.inspect_packet(make_packet(
+            src_ip="192.168.1.10", dst_ip="192.168.1.50", payload_size=1000))
+        self.assertNotIn("192.168.1.50", self.ids._active_transfer_ips)
 
     def test_dns_resolution_tracking(self):
         """DNS queries should create IP-to-domain mappings."""

@@ -6,10 +6,7 @@ Captures packets, extracts metadata, and feeds them to the analysis pipeline.
 import threading
 import time
 import logging
-import socket
-import struct
 from collections import defaultdict, deque
-from datetime import datetime
 
 logger = logging.getLogger("NetSentinel.Capture")
 
@@ -153,15 +150,16 @@ class NetworkFlow:
 # Map port numbers to process (Windows)
 _port_process_cache = {}
 _port_cache_time = 0
+_PORT_CACHE_TTL = 2  # seconds between full psutil enumerations
 
 
-def _refresh_port_process_map():
+def _refresh_port_process_map(force=False):
     """Build a map of local ports to process names using psutil."""
     global _port_process_cache, _port_cache_time
     if not PSUTIL_AVAILABLE:
         return
     now = time.time()
-    if now - _port_cache_time < 2:  # Cache for 2 seconds
+    if not force and now - _port_cache_time < _PORT_CACHE_TTL:
         return
     try:
         new_map = {}
@@ -179,9 +177,23 @@ def _refresh_port_process_map():
 
 
 def _get_process_for_port(port):
-    """Look up which process owns a given local port."""
-    _refresh_port_process_map()
+    """Look up which process owns a given local port. Pure dict read — no syscalls."""
     return _port_process_cache.get(port, ("", 0))
+
+
+def _process_map_refresher(should_run):
+    """
+    Keep the port->process map warm from a background thread.
+
+    psutil.net_connections() takes tens of milliseconds and used to run inline in the
+    capture callback, stalling packet capture every couple of seconds.
+    """
+    while should_run():
+        try:
+            _refresh_port_process_map(force=True)
+        except Exception as e:
+            logger.debug("Process map refresh error: %s", e)
+        time.sleep(_PORT_CACHE_TTL)
 
 
 # Ports where raw payloads are extracted for credential scanning.
@@ -250,10 +262,6 @@ class CaptureEngine:
         self._load_check_interval = 2  # seconds
         self._last_load_check = 0
 
-        # Process lookup throttling (psutil is expensive)
-        self._process_lookup_interval = 5  # Only look up processes every N seconds
-        self._last_process_lookup = 0
-
         # Flow tracking
         self.flows = {}
         self.flow_timeout = config.get('analysis', 'flow_timeout_sec', default=120)
@@ -292,6 +300,12 @@ class CaptureEngine:
         # Watchdog: auto-restart capture if it dies
         self._restart_count = 0
         self._max_restarts = 10
+
+        # Declared up front so the watchdog can never touch an undefined attribute.
+        self._worker_thread = None
+        self._cleanup_thread = None
+        self._watchdog_thread = None
+        self._procmap_thread = None
 
     def _select_interface(self):
         """Auto-detect the best network interface."""
@@ -392,15 +406,14 @@ class CaptureEngine:
             except Exception:
                 pass
 
-        # Process lookup (throttled — only every N seconds to save CPU)
-        now = time.time()
-        if now - self._last_process_lookup >= self._process_lookup_interval:
-            self._last_process_lookup = now
-            proc_name, proc_pid = _get_process_for_port(info.src_port)
-            if not proc_name:
-                proc_name, proc_pid = _get_process_for_port(info.dst_port)
-            info.process_name = proc_name
-            info.process_pid = proc_pid
+        # Process attribution. The expensive part (enumerating sockets) happens on a
+        # background thread; this is a dict lookup, so every packet can be attributed
+        # instead of roughly one per refresh interval.
+        proc_name, proc_pid = _get_process_for_port(info.src_port)
+        if not proc_name:
+            proc_name, proc_pid = _get_process_for_port(info.dst_port)
+        info.process_name = proc_name
+        info.process_pid = proc_pid
 
         # Extract raw payload ONLY for unencrypted protocols where we need
         # to scan for credentials. This is a tiny fraction of traffic.
@@ -617,6 +630,9 @@ class CaptureEngine:
                     store=False,
                     stop_filter=lambda _: not self._running,
                     filter=bpf if bpf else None,
+                    promisc=self.config.get('capture', 'promiscuous', default=True),
+                    # Bytes captured per packet; the default keeps whole frames.
+                    snaplen=self.config.get('capture', 'snap_length', default=65535),
                 )
             except PermissionError:
                 logger.error("Permission denied. Run as Administrator for full capture.")
@@ -661,14 +677,25 @@ class CaptureEngine:
             target=self._watchdog_loop, daemon=True, name="Watchdog")
         self._watchdog_thread.start()
 
+        # Keep the port->process map warm without blocking the capture thread
+        if PSUTIL_AVAILABLE:
+            self._procmap_thread = threading.Thread(
+                target=_process_map_refresher, args=(lambda: self._running,),
+                daemon=True, name="ProcMapRefresh")
+            self._procmap_thread.start()
+
         logger.info("Capture engine started with queue-based processing.")
         return True
 
     def stop(self):
-        """Stop the capture engine."""
+        """Stop the capture engine and wait for its threads to wind down."""
         self._running = False
-        if self._thread:
-            self._thread.join(timeout=5)
+        # The capture thread is the one that can outlive this: Scapy only evaluates
+        # stop_filter when a packet arrives, so on a quiet interface it stays blocked.
+        # It is a daemon thread, so that does not prevent process exit.
+        for t in (self._worker_thread, self._thread):
+            if t is not None and t.is_alive():
+                t.join(timeout=5)
         logger.info("Capture engine stopped. Dropped packets: %d", self._dropped_packets)
 
     def get_flows_snapshot(self):
@@ -677,10 +704,21 @@ class CaptureEngine:
             return {k: v for k, v in self.flows.items()}
 
     def get_stats(self):
-        """Return current statistics (thread-safe snapshot)."""
+        """
+        Return a real snapshot of current statistics.
+
+        dict(self.stats) is shallow, so callers used to receive the live protocols and
+        top_talkers dicts and the dns_queries deque, which the worker thread keeps
+        mutating — iterating the deque raises RuntimeError, and nothing was actually
+        isolated despite the lock.
+        """
         with self._stats_lock:
             with self._lock:
-                return dict(self.stats)
+                snap = dict(self.stats)
+                snap['protocols'] = dict(self.stats['protocols'])
+                snap['top_talkers'] = dict(self.stats['top_talkers'])
+                snap['dns_queries'] = list(self.stats['dns_queries'])
+                return snap
 
     @property
     def is_running(self):

@@ -18,13 +18,13 @@ so the user doesn't have to manually investigate each one.
 """
 
 import os
+import re
 import time
 import hashlib
 import logging
 import subprocess
 import json
 from datetime import datetime
-from collections import defaultdict
 
 logger = logging.getLogger("NetSentinel.Verify")
 
@@ -137,6 +137,10 @@ class ProcessVerifier:
         self._vt_last_request = 0
         self._vt_min_interval = 15  # seconds between VT requests
 
+        # User-facing switches (previously declared in config but never consulted)
+        self.auto_verify = config.get('verification', 'auto_verify', default=True)
+        self.check_signatures = config.get('verification', 'check_signatures', default=True)
+
         logger.info("Process Verifier initialized. Known-good hashes: %d",
                      len(self._known_good))
 
@@ -192,10 +196,16 @@ class ProcessVerifier:
             result['checks'] = checks
             return result
 
-        # 2. Digital signature verification
-        sig_result = self._check_signature(exe_path)
+        # 2. Digital signature verification (config-gated)
+        if self.check_signatures:
+            sig_result = self._check_signature(exe_path)
+        else:
+            sig_result = {'signed': False, 'publisher': '', 'valid': False,
+                          'skipped': 'disabled by verification.check_signatures'}
         checks['digital_signature'] = sig_result
-        if sig_result.get('signed'):
+        if sig_result.get('skipped'):
+            pass  # No signal either way — don't score it
+        elif sig_result.get('signed'):
             publisher = sig_result.get('publisher', '').lower()
             if any(trusted in publisher for trusted in TRUSTED_PUBLISHERS):
                 score += 3  # Strong safe signal
@@ -353,19 +363,36 @@ class ProcessVerifier:
 
     # ─── Check Methods ────────────────────────────────────────────
 
+    # Fixed PowerShell program. The path is NOT interpolated into this string —
+    # it is handed over in an environment variable and read back with $env:.
+    #
+    # Interpolating exe_path here would be a command-injection sink: the path comes
+    # from psutil.Process(pid).exe(), i.e. from whatever binary an unprivileged user
+    # chose to run, PowerShell expands $(...) inside double-quoted strings, and '$',
+    # '(' and ')' are all legal in Windows filenames. NetSentinel runs elevated, so
+    # that would be a local privilege escalation. Do not turn this back into an f-string.
+    #
+    # -LiteralPath (not -FilePath) also stops wildcards in the name being globbed.
+    _SIGNATURE_PS = (
+        '$ErrorActionPreference = "Stop"; '
+        '$sig = Get-AuthenticodeSignature -LiteralPath $env:NETSENTINEL_TARGET_PATH; '
+        '$sig | Select-Object Status, '
+        '@{N="Publisher";E={$_.SignerCertificate.Subject}} | '
+        'ConvertTo-Json -Compress'
+    )
+
     def _check_signature(self, exe_path):
         """Check Authenticode digital signature using PowerShell."""
         result = {'signed': False, 'publisher': '', 'valid': False}
+        if os.name != 'nt':
+            return result
         try:
-            ps_cmd = (
-                f'$sig = Get-AuthenticodeSignature -FilePath "{exe_path}"; '
-                f'$sig | Select-Object Status, '
-                f'@{{N="Publisher";E={{$_.SignerCertificate.Subject}}}} | '
-                f'ConvertTo-Json'
-            )
+            env = dict(os.environ)
+            env['NETSENTINEL_TARGET_PATH'] = exe_path
             proc = subprocess.run(
-                ['powershell', '-NoProfile', '-Command', ps_cmd],
-                capture_output=True, text=True, timeout=10,
+                ['powershell', '-NoProfile', '-NonInteractive',
+                 '-Command', self._SIGNATURE_PS],
+                capture_output=True, text=True, timeout=10, env=env,
                 creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0)
             )
             if proc.returncode == 0 and proc.stdout.strip():
@@ -383,7 +410,6 @@ class ProcessVerifier:
 
                 # Extract CN from publisher subject
                 if publisher_raw:
-                    import re
                     cn_match = re.search(r'CN=([^,]+)', publisher_raw)
                     if cn_match:
                         result['publisher'] = cn_match.group(1).strip('"')
@@ -546,7 +572,7 @@ class ProcessVerifier:
         """Load known-good file hashes."""
         if os.path.exists(self._known_good_path):
             try:
-                with open(self._known_good_path, 'r') as f:
+                with open(self._known_good_path) as f:
                     return json.load(f)
             except Exception:
                 pass
@@ -631,7 +657,7 @@ class ProcessVerifier:
             if not sig.get('signed'):
                 parts.append("No digital signature")
             if loc.get('is_suspicious_dir'):
-                parts.append(f"Running from suspicious location")
+                parts.append("Running from suspicious location")
             return ". ".join(parts) + "." if parts else "Strong malware indicators detected."
 
         return "Unable to determine safety."

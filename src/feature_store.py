@@ -230,7 +230,7 @@ class FeatureStore:
 
         for filepath in files:
             try:
-                with open(filepath, 'r', newline='') as f:
+                with open(filepath, newline='') as f:
                     reader = csv.DictReader(f)
                     for row in reader:
                         ts = float(row.get('timestamp', 0))
@@ -295,7 +295,7 @@ class FeatureStore:
             scores = []
             anomaly_count = 0
             try:
-                with open(filepath, 'r', newline='') as f:
+                with open(filepath, newline='') as f:
                     reader = csv.DictReader(f)
                     for row in reader:
                         s = float(row.get('anomaly_score', 0))

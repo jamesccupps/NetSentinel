@@ -20,7 +20,7 @@ import json
 import csv
 import logging
 import threading
-from collections import defaultdict, Counter
+from collections import Counter
 from datetime import datetime
 
 logger = logging.getLogger("NetSentinel.PCAP")

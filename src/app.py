@@ -74,6 +74,13 @@ class NetSentinelApp:
             process_verifier=self.process_verifier,
         )
 
+        # Rules whose verification does file hashing, PowerShell and VirusTotal lookups.
+        # Those run with 10-second timeouts, so doing them inline on the packet worker
+        # stalls the whole capture pipeline exactly when something interesting happens.
+        _SLOW_VERIFY_RULES = frozenset({
+            'IOC-SUSPICIOUS-PROC', 'IOC-PROC-NAME', 'IOC-LISTEN-PORT', 'IOC-ACTIVE-THREAT',
+        })
+
         def _verified_alert_gateway(alert):
             """Universal alert gateway — enriches and verifies ALL alerts before emitting."""
             # Enrich with domain resolution from IDS engine's DNS tracker
@@ -99,19 +106,35 @@ class NetSentinelApp:
             except Exception:
                 pass
 
+            if alert.rule_id in _SLOW_VERIFY_RULES:
+                # Publish now, deepen later: the user sees the alert immediately and the
+                # verification verdict is merged into its evidence when it completes.
+                alert.evidence.setdefault('alert_verification', {
+                    'verdict': 'PENDING',
+                    'confidence': '—',
+                    'reasoning': ['Deep process verification queued'],
+                })
+                self._emit_alert(alert)
+                try:
+                    self._verify_queue.put_nowait(alert)
+                except Exception:
+                    logger.debug("Verification queue full; skipping deep verify for %s",
+                                 alert.rule_id)
+                return
+
             try:
                 self.alert_verifier.verify_alert(alert, ids_engine=self.ids_engine)
             except Exception as e:
                 logger.debug("Alert verification error: %s", e)
-            self.alert_manager.add_alert(alert)
-
-            # Feed the correlator to group related alerts into incidents
-            try:
-                self.alert_correlator.process_alert(alert)
-            except Exception as e:
-                logger.debug("Alert correlation error: %s", e)
+            self._emit_alert(alert)
 
         self._alert_gateway = _verified_alert_gateway
+
+        # Bounded so a burst cannot grow without limit; dropping deep verification is
+        # survivable because the alert itself has already been delivered.
+        import queue
+        self._verify_queue = queue.Queue(maxsize=500)
+        self._verify_thread = None
 
         # IDS Engine — uses the verified gateway
         from src.ids_engine import IDSEngine
@@ -187,10 +210,17 @@ class NetSentinelApp:
         # Pass baseline whitelist to ML engine for learned-beacon suppression
         self.ml_engine.baseline_whitelist = self.baseline_whitelist
 
+        self.forensics_enabled = self.config.get('forensics', 'enabled', default=True)
+
         # Track which insecure services we've already alerted on (avoid spam)
         self._forensics_alerted_services = set()
-        self._forensics_alerted_creds = set()
         self._forensics_alerted_sensitive = set()
+
+        # High-water marks into the forensics result lists. _check_forensics_alerts runs
+        # once per packet; rescanning every finding each time was O(findings) per packet
+        # and grew for the whole session.
+        self._forensics_cred_cursor = 0
+        self._forensics_sensitive_cursor = 0
 
         # Packet window for ML analysis
         self._packet_window = deque(maxlen=5000)
@@ -201,6 +231,32 @@ class NetSentinelApp:
         self.last_ml_result = {}
 
         logger.info("NetSentinel App initialized.")
+
+    def _emit_alert(self, alert):
+        """Deliver a finished alert to storage, the GUI and the correlator."""
+        self.alert_manager.add_alert(alert)
+        try:
+            self.alert_correlator.process_alert(alert)
+        except Exception as e:
+            logger.debug("Alert correlation error: %s", e)
+
+    def _verification_loop(self):
+        """Run slow verification off the packet path and update alerts in place."""
+        import queue
+        while self._running:
+            try:
+                alert = self._verify_queue.get(timeout=0.5)
+            except queue.Empty:
+                continue
+            try:
+                self.alert_verifier.verify_alert(alert, ids_engine=self.ids_engine)
+            except Exception as e:
+                logger.debug("Deferred verification error: %s", e)
+                alert.evidence['alert_verification'] = {
+                    'verdict': 'INCONCLUSIVE',
+                    'confidence': '0%',
+                    'reasoning': [f'Verification error: {e}'],
+                }
 
     def _on_raw_packet(self, raw_bytes):
         """Called for each raw packet (from capture thread). Feeds PCAP writer."""
@@ -242,17 +298,18 @@ class NetSentinelApp:
             logger.debug("IOC check error: %s", e)
 
         # Live forensics: credential and insecure protocol scanning
-        try:
-            raw_payload = pkt_info._raw_payload
-            if raw_payload:
-                self.forensics.analyze_packet_with_payload(pkt_info, raw_payload)
-            else:
-                self.forensics.analyze_packet(pkt_info)
+        if self.forensics_enabled:
+            try:
+                raw_payload = pkt_info._raw_payload
+                if raw_payload:
+                    self.forensics.analyze_packet_with_payload(pkt_info, raw_payload)
+                else:
+                    self.forensics.analyze_packet(pkt_info)
 
-            # Generate alerts for new credential findings
-            self._check_forensics_alerts()
-        except Exception as e:
-            logger.debug("Forensics error: %s", e)
+                # Generate alerts for new credential findings
+                self._check_forensics_alerts()
+            except Exception as e:
+                logger.debug("Forensics error: %s", e)
 
         # ─── Learning systems (lightweight, always run) ────────────
         # Device learner: profile all devices from traffic patterns
@@ -261,14 +318,18 @@ class NetSentinelApp:
         except Exception as e:
             logger.debug("Device learner error: %s", e)
 
-        # Baseline whitelist: learn normal domains/IPs during baseline period
+        # Baseline whitelist: learn normal domains/IPs during the baseline period ONLY.
+        # Without this gate the whitelist keeps learning forever, so any domain or IP an
+        # attacker touches three times marks itself "normal" and permanently suppresses
+        # DNS-TUNNEL, DNS-BAD-TLD, beaconing and full-severity DATA-EXFIL for it.
         try:
-            if pkt_info.dns_query:
-                self.baseline_whitelist.observe_dns(pkt_info.src_ip, pkt_info.dns_query)
-            if pkt_info.dst_ip and pkt_info.dst_port:
-                self.baseline_whitelist.observe_connection(
-                    pkt_info.src_ip, pkt_info.dst_ip, pkt_info.dst_port)
-            self.baseline_whitelist.check_learning_complete()
+            if self.baseline_whitelist.is_learning:
+                if pkt_info.dns_query:
+                    self.baseline_whitelist.observe_dns(pkt_info.src_ip, pkt_info.dns_query)
+                if pkt_info.dst_ip and pkt_info.dst_port:
+                    self.baseline_whitelist.observe_connection(
+                        pkt_info.src_ip, pkt_info.dst_ip, pkt_info.dst_port)
+                self.baseline_whitelist.check_learning_complete()
         except Exception as e:
             logger.debug("Baseline whitelist error: %s", e)
 
@@ -279,88 +340,100 @@ class NetSentinelApp:
         """Generate alerts for new forensics findings (credentials, insecure services)."""
         from src.ids_engine import Alert
 
-        # Check for new credentials
-        for cred in self.forensics.credentials_found:
-            cred_key = (cred['protocol'], cred['source_ip'],
-                       cred['destination_ip'], cred['port'])
-            if cred_key not in self._forensics_alerted_creds:
-                self._forensics_alerted_creds.add(cred_key)
-                # Use risk from the finding (LOW for known update services, CRITICAL otherwise)
-                severity = cred.get('risk', 'CRITICAL')
-                is_digest = 'digest' in cred.get('credential_type', '').lower()
-                title_prefix = "Hashed Credential" if is_digest else "Plaintext Credential"
-                desc_suffix = (" (hashed response, not plaintext password)" if is_digest
-                               else ". Anyone on the same network can capture this credential.")
+        # Check for new credentials — only entries appended since the last call.
+        creds = self.forensics.credentials_found
+        if self._forensics_cred_cursor < len(creds):
+            new_creds = creds[self._forensics_cred_cursor:]
+            self._forensics_cred_cursor = len(creds)
+        else:
+            new_creds = ()
+        for cred in new_creds:
+            # Use risk from the finding (LOW for known update services, CRITICAL otherwise)
+            severity = cred.get('risk', 'CRITICAL')
+            is_digest = 'digest' in cred.get('credential_type', '').lower()
+            title_prefix = "Hashed Credential" if is_digest else "Plaintext Credential"
+            desc_suffix = (" (hashed response, not plaintext password)" if is_digest
+                           else ". Anyone on the same network can capture this credential.")
+            alert = Alert(
+                rule_id='FORENSICS-CREDENTIAL',
+                severity=severity,
+                title=f"{title_prefix} ({cred['protocol']})",
+                description=(f"{cred['protocol']} {cred['credential_type']} "
+                             f"transmitted over unencrypted HTTP{desc_suffix}"),
+                src_ip=cred.get('source_ip', ''),
+                dst_ip=cred.get('destination_ip', ''),
+                dst_port=cred.get('port', 0),
+                category="Credential Exposure",
+                evidence={
+                    'protocol': cred['protocol'],
+                    'credential_type': cred['credential_type'],
+                    'value': cred['value'],
+                    'connection': f"{cred['source_ip']} → "
+                                  f"{cred['destination_ip']}:{cred['port']}",
+                    'extra': cred.get('extra', {}),
+                    'description': (
+                        f"A {cred['credential_type']} for {cred['protocol']} "
+                        f"was found in network traffic{desc_suffix}"
+                    ),
+                    'recommendation': (
+                        'Switch to the encrypted version of this protocol.'
+                        if is_digest else
+                        'Change this password immediately. Switch to the '
+                        'encrypted version of this protocol.'
+                    ),
+                },
+            )
+            self._alert_gateway(alert)
+
+        # Check for new insecure services. Small and bounded by (ip, port) pairs on
+        # the LAN, so a full pass is fine — but skip it entirely when nothing is new.
+        pending_services = [
+            (k, v) for k, v in self.forensics.insecure_services.items()
+            if k not in self._forensics_alerted_services
+        ]
+        for key, svc in pending_services:
+            # Only alert after seeing some traffic (not a single SYN)
+            if svc['packet_count'] >= 5:
+                self._forensics_alerted_services.add(key)
+                from src.forensics import SECURE_EQUIVALENTS, PROTOCOL_EXPLOITATION, DEFAULT_EXPLOITATION
+                exploit_info = PROTOCOL_EXPLOITATION.get(svc['port'], DEFAULT_EXPLOITATION)
                 alert = Alert(
-                    rule_id='FORENSICS-CREDENTIAL',
-                    severity=severity,
-                    title=f"{title_prefix} ({cred['protocol']})",
-                    description=(f"{cred['protocol']} {cred['credential_type']} "
-                                 f"transmitted over unencrypted HTTP{desc_suffix}"),
-                    src_ip=cred.get('source_ip', ''),
-                    dst_ip=cred.get('destination_ip', ''),
-                    dst_port=cred.get('port', 0),
-                    category="Credential Exposure",
+                    rule_id='FORENSICS-INSECURE-SVC',
+                    severity=svc['risk'],
+                    title=f"Unencrypted {svc['service']} Service",
+                    description=svc['description'],
+                    dst_ip=svc['ip'],
+                    dst_port=svc['port'],
+                    category="Insecure Service",
                     evidence={
-                        'protocol': cred['protocol'],
-                        'credential_type': cred['credential_type'],
-                        'value': cred['value'],
-                        'connection': f"{cred['source_ip']} → "
-                                      f"{cred['destination_ip']}:{cred['port']}",
-                        'extra': cred.get('extra', {}),
-                        'description': (
-                            f"A {cred['credential_type']} for {cred['protocol']} "
-                            f"was found in network traffic{desc_suffix}"
-                        ),
+                        'service': svc['service'],
+                        'server': f"{svc['ip']}:{svc['port']}",
+                        'port': svc['port'],
+                        'packets_observed': svc['packet_count'],
+                        'bytes_transferred': svc['bytes'],
+                        'clients': list(svc['src_ips'])[:10],
+                        'description': svc['description'],
+                        'has_https': svc.get('has_https', False),
+                        'how_this_is_exploited': exploit_info['how_exploited'],
+                        'how_to_fix': exploit_info['how_to_fix'],
+                        'is_this_malicious': exploit_info['currently_malicious'],
                         'recommendation': (
-                            'Switch to the encrypted version of this protocol.'
-                            if is_digest else
-                            'Change this password immediately. Switch to the '
-                            'encrypted version of this protocol.'
+                            f"Replace {svc['service']} with "
+                            f"{SECURE_EQUIVALENTS.get(svc['port'], 'encrypted alternative')}. "
+                            f"All data on this service is visible to anyone on the network."
                         ),
                     },
                 )
                 self._alert_gateway(alert)
 
-        # Check for new insecure services
-        for key, svc in self.forensics.insecure_services.items():
-            if key not in self._forensics_alerted_services:
-                # Only alert after seeing some traffic (not a single SYN)
-                if svc['packet_count'] >= 5:
-                    self._forensics_alerted_services.add(key)
-                    from src.forensics import SECURE_EQUIVALENTS, PROTOCOL_EXPLOITATION, DEFAULT_EXPLOITATION
-                    exploit_info = PROTOCOL_EXPLOITATION.get(svc['port'], DEFAULT_EXPLOITATION)
-                    alert = Alert(
-                        rule_id='FORENSICS-INSECURE-SVC',
-                        severity=svc['risk'],
-                        title=f"Unencrypted {svc['service']} Service",
-                        description=svc['description'],
-                        dst_ip=svc['ip'],
-                        dst_port=svc['port'],
-                        category="Insecure Service",
-                        evidence={
-                            'service': svc['service'],
-                            'server': f"{svc['ip']}:{svc['port']}",
-                            'port': svc['port'],
-                            'packets_observed': svc['packet_count'],
-                            'bytes_transferred': svc['bytes'],
-                            'clients': list(svc['src_ips'])[:10],
-                            'description': svc['description'],
-                            'has_https': svc.get('has_https', False),
-                            'how_this_is_exploited': exploit_info['how_exploited'],
-                            'how_to_fix': exploit_info['how_to_fix'],
-                            'is_this_malicious': exploit_info['currently_malicious'],
-                            'recommendation': (
-                                f"Replace {svc['service']} with "
-                                f"{SECURE_EQUIVALENTS.get(svc['port'], 'encrypted alternative')}. "
-                                f"All data on this service is visible to anyone on the network."
-                            ),
-                        },
-                    )
-                    self._alert_gateway(alert)
-
-        # Check for new sensitive data
-        for i, item in enumerate(self.forensics.sensitive_data):
+        # Check for new sensitive data — likewise cursor-based.
+        sens = self.forensics.sensitive_data
+        if self._forensics_sensitive_cursor < len(sens):
+            new_sensitive = sens[self._forensics_sensitive_cursor:]
+            self._forensics_sensitive_cursor = len(sens)
+        else:
+            new_sensitive = ()
+        for item in new_sensitive:
             item_key = (item['data_type'], item.get('source_ip', ''),
                        item.get('destination_ip', ''), item.get('port', 0))
             if item_key not in self._forensics_alerted_sensitive:
@@ -388,11 +461,16 @@ class NetSentinelApp:
         while self._running:
             time.sleep(self._analysis_interval)
             try:
-                packets = list(self._packet_window)
+                # Only packets from the interval just elapsed. _packet_window is a
+                # rolling buffer that is never cleared, so passing all of it while
+                # claiming a 5-second window pinned packets_per_sec at maxlen/5.
+                cutoff = time.time() - self._analysis_interval
+                packets = [p for p in list(self._packet_window) if p.timestamp >= cutoff]
                 flows = self.capture_engine.get_flows_snapshot()
                 if packets:
                     result = self.ml_engine.analyze_window(
-                        flows, packets, self._analysis_interval
+                        flows, packets, self._analysis_interval,
+                        local_ips=getattr(self.net_env, 'local_ips', None),
                     )
                     self.last_ml_result = result
 
@@ -451,7 +529,6 @@ class NetSentinelApp:
         deviations = []
 
         if baseline.global_mean is not None and features:
-            import numpy as np
             from datetime import datetime
             hour = datetime.now().hour
 
@@ -575,6 +652,11 @@ class NetSentinelApp:
                 target=self._analysis_loop, daemon=True, name="AnalysisThread"
             )
             self._analysis_thread.start()
+
+            self._verify_thread = threading.Thread(
+                target=self._verification_loop, daemon=True, name="VerifyThread"
+            )
+            self._verify_thread.start()
             logger.info("Monitoring started.")
         else:
             logger.warning("Capture engine failed to start. Running in demo mode.")
@@ -604,6 +686,10 @@ class NetSentinelApp:
             self.pcap_writer.cleanup()
         except Exception as e:
             logger.debug("PCAP writer cleanup error: %s", e)
+        try:
+            self.forensics_db.flush()
+        except Exception as e:
+            logger.debug("Forensics DB flush error: %s", e)
         logger.info("Monitoring stopped. Data saved.")
 
     def get_dashboard_data(self):

@@ -5,6 +5,7 @@ Configuration management for NetSentinel.
 import os
 import json
 import copy
+import stat
 import logging
 
 logger = logging.getLogger("NetSentinel.Config")
@@ -17,20 +18,48 @@ MODELS_DIR = os.path.join(APP_DIR, "models")
 ALERTS_DB = os.path.join(DB_DIR, "alerts.json")
 BASELINE_DB = os.path.join(DB_DIR, "baseline.json")
 
-# Ensure directories exist
+# Ensure directories exist. These hold captured credentials, alert history and the
+# VirusTotal API key, so restrict them to the owner where the platform supports it.
 for d in [APP_DIR, DB_DIR, RULES_DIR, MODELS_DIR]:
     os.makedirs(d, exist_ok=True)
+    try:
+        os.chmod(d, stat.S_IRWXU)  # 0700
+    except OSError:
+        pass  # Windows/ACL filesystems — nothing portable to do here
+
+
+def atomic_write_json(path, data, secure=True, **dump_kwargs):
+    """
+    Write JSON atomically: full write to a temp file, fsync, then rename.
+
+    Every persistence path in NetSentinel used to be a bare open(path, 'w') full
+    rewrite, so an interruption mid-write truncated the file and the loader then
+    silently started from empty.
+    """
+    os.makedirs(os.path.dirname(path) or '.', exist_ok=True)
+    tmp = f"{path}.tmp"
+    with open(tmp, 'w', encoding='utf-8') as f:
+        json.dump(data, f, **dump_kwargs)
+        f.flush()
+        os.fsync(f.fileno())
+    if secure:
+        try:
+            os.chmod(tmp, stat.S_IRUSR | stat.S_IWUSR)  # 0600
+        except OSError:
+            pass
+    os.replace(tmp, path)
 
 DEFAULT_CONFIG = {
     "capture": {
         "interface": "auto",            # "auto" picks the default interface
-        "promiscuous": True,
-        "snap_length": 65535,
-        "buffer_timeout_ms": 100,
+        "promiscuous": True,            # Put the interface in promiscuous mode
+        "snap_length": 65535,           # Bytes captured per packet
         "bpf_filter": "not (port 443 and tcp[tcpflags] & tcp-ack != 0 and tcp[tcpflags] & tcp-syn == 0)",
         "max_pps": 500,                 # Hard cap: max packets/sec to process
         "pcap_buffer_packets": 150000,  # Ring buffer size for PCAP export (~225 MB at 1500B avg)
         "pcap_max_file_mb": 100,        # Max PCAP recording file size before rotation
+        "pcap_max_files": 20,           # Recordings kept on disk before the oldest are pruned
+        "pcap_link_type": 1,            # libpcap DLT: 1=Ethernet, 101=raw IP, 0=loopback
     },
     "analysis": {
         "flow_timeout_sec": 120,        # Inactive flow expiry
@@ -40,21 +69,13 @@ DEFAULT_CONFIG = {
     "ml": {
         "enabled": True,
         "baseline_learning_hours": 2,   # Hours of initial baseline learning
-        "anomaly_threshold": 0.25,      # Isolation Forest contamination
+        # Fraction of training data the Isolation Forest should treat as outliers.
+        # This shapes the model; it is NOT the alerting threshold.
+        "contamination": 0.25,
+        # Combined anomaly score (0-1) above which a window is flagged.
+        "alert_threshold": 0.25,
         "retrain_interval_min": 60,     # Retrain model periodically
         "min_samples_for_training": 200,
-        "features": [
-            "bytes_per_sec",
-            "packets_per_sec",
-            "avg_packet_size",
-            "unique_dst_ports",
-            "unique_dst_ips",
-            "syn_ratio",
-            "dns_query_rate",
-            "failed_conn_ratio",
-            "entropy_dst_port",
-            "protocol_distribution",
-        ],
         "feature_history_days": 90,              # Days of feature vectors to retain
         "feature_history_training_days": 7,      # Days of history to use for training
     },
@@ -80,22 +101,21 @@ DEFAULT_CONFIG = {
     },
     "forensics": {
         "enabled": True,                  # Credential scanning and insecure protocol detection
-        "save_credentials": True,         # Save found credentials to encrypted DB
-        "retention_days": 365,            # Keep forensics data for 1 year
+        "save_credentials": True,         # Persist findings to the encrypted vault
+        "store_raw_credentials": False,   # Keep FULL plaintext secrets (off by default)
+        "vault_passphrase": "",           # Set this for real confidentiality (scrypt KDF)
+        "retention_days": 365,            # Findings older than this are pruned at startup
     },
     "alerts": {
         "max_stored": 5000,
         "sound_enabled": True,
         "desktop_notifications": True,
         "severity_filter": "LOW",       # LOW, MEDIUM, HIGH, CRITICAL
-        "auto_block": False,            # Future: auto-block via firewall rules
         "cooldown_sec": 30,             # Min time between duplicate alerts
     },
     "gui": {
-        "theme": "dark",
         "refresh_rate_ms": 1000,
-        "max_log_lines": 500,
-        "chart_history_minutes": 30,
+        "max_log_lines": 500,           # Max rows kept in the live packet log
     },
     "whitelists": {
         "ips": [],
@@ -133,7 +153,7 @@ class Config:
         """Load config from disk, merging with defaults."""
         if os.path.exists(CONFIG_FILE):
             try:
-                with open(CONFIG_FILE, "r") as f:
+                with open(CONFIG_FILE) as f:
                     saved = json.load(f)
                 self._data = self._deep_merge(DEFAULT_CONFIG, saved)
                 logger.info("Configuration loaded from %s", CONFIG_FILE)
@@ -147,10 +167,9 @@ class Config:
         return self
 
     def save(self):
-        """Persist current config to disk."""
+        """Persist current config to disk (atomically; contains the VirusTotal key)."""
         try:
-            with open(CONFIG_FILE, "w") as f:
-                json.dump(self._data, f, indent=2)
+            atomic_write_json(CONFIG_FILE, self._data, indent=2)
         except Exception as e:
             logger.error("Failed to save config: %s", e)
 

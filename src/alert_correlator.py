@@ -23,7 +23,6 @@ brute force on SSH" instead of 50 individual entries.
 import time
 import logging
 import threading
-from collections import defaultdict
 from datetime import datetime
 
 logger = logging.getLogger("NetSentinel.Correlator")
@@ -287,7 +286,6 @@ class AlertCorrelator:
 
     def save(self):
         """Persist incident summaries to disk (last 200 incidents)."""
-        import json, os
         with self._lock:
             data = []
             for inc in list(self._all_incidents)[-200:]:
@@ -306,19 +304,20 @@ class AlertCorrelator:
                     'acknowledged': inc.acknowledged,
                 })
         try:
-            with open(self._db_path, 'w') as f:
-                json.dump(data, f, indent=1)
+            from src.config import atomic_write_json
+            atomic_write_json(self._db_path, data, indent=1)
             logger.info("Saved %d incident summaries", len(data))
         except Exception as e:
             logger.error("Failed to save incidents: %s", e)
 
     def _load(self):
         """Load incident summaries from disk (read-only history)."""
-        import json, os
+        import json
+        import os
         if not os.path.exists(self._db_path):
             return
         try:
-            with open(self._db_path, 'r') as f:
+            with open(self._db_path) as f:
                 data = json.load(f)
             for item in data:
                 inc = Incident()

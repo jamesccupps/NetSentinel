@@ -26,6 +26,8 @@ PCAP_MAGIC = 0xa1b2c3d4
 PCAP_VERSION_MAJOR = 2
 PCAP_VERSION_MINOR = 4
 PCAP_LINKTYPE_ETHERNET = 1
+PCAP_LINKTYPE_RAW = 101       # Raw IP, no link layer
+PCAP_LINKTYPE_NULL = 0        # BSD loopback
 PCAP_SNAPLEN = 65535
 
 
@@ -50,6 +52,8 @@ class PcapWriter:
         buffer_size = config.get('capture', 'pcap_buffer_packets', default=150000)
         self._buffer = deque(maxlen=buffer_size)
         self._lock = threading.Lock()
+        # Separate from _lock so recording I/O never blocks buffer readers.
+        self._record_lock = threading.RLock()
 
         # Continuous recording state
         self._recording = False
@@ -58,6 +62,8 @@ class PcapWriter:
         self._record_packets = 0
         self._record_start = 0
         self._max_file_mb = config.get('capture', 'pcap_max_file_mb', default=100)
+        self.link_type = config.get('capture', 'pcap_link_type',
+                                    default=PCAP_LINKTYPE_ETHERNET)
 
         logger.info("PCAP writer initialized. Buffer: %d pkts, Max file: %d MB, Dir: %s",
                     buffer_size, self._max_file_mb, self.output_dir)
@@ -70,21 +76,28 @@ class PcapWriter:
         Args:
             raw_packet: raw bytes of the captured packet (Ethernet frame)
         """
-        if raw_packet:
-            with self._lock:
-                self._buffer.append((time.time(), raw_packet))
+        if not raw_packet:
+            return
 
-                # If continuous recording is active, write immediately
-                if self._recording and self._record_file:
-                    try:
-                        self._write_packet_record(self._record_file, time.time(), raw_packet)
-                        self._record_packets += 1
+        ts = time.time()
+        with self._lock:
+            self._buffer.append((ts, raw_packet))
+            recording = self._recording and self._record_file is not None
 
-                        # Check file size for rotation
-                        if self._record_file.tell() > self._max_file_mb * 1024 * 1024:
-                            self._rotate_recording()
-                    except Exception as e:
-                        logger.debug("PCAP write error: %s", e)
+        # File writes deliberately happen outside the buffer lock: this runs on the
+        # capture thread, and holding the lock across disk I/O stalls every reader
+        # (and the export path, which copies 150k entries) behind the filesystem.
+        if recording:
+            with self._record_lock:
+                if not (self._recording and self._record_file):
+                    return
+                try:
+                    self._write_packet_record(self._record_file, ts, raw_packet)
+                    self._record_packets += 1
+                    if self._record_file.tell() > self._max_file_mb * 1024 * 1024:
+                        self._rotate_recording()
+                except Exception as e:
+                    logger.debug("PCAP write error: %s", e)
 
     def export_buffer(self, filename=None, last_minutes=5):
         """
@@ -155,13 +168,16 @@ class PcapWriter:
         if not self._recording:
             return None
 
-        self._recording = False
-        if self._record_file:
-            try:
-                self._record_file.close()
-            except Exception:
-                pass
-            self._record_file = None
+        with self._record_lock:
+            self._recording = False
+            if self._record_file:
+                try:
+                    self._record_file.flush()
+                    os.fsync(self._record_file.fileno())
+                    self._record_file.close()
+                except Exception:
+                    pass
+                self._record_file = None
 
         duration = time.time() - self._record_start
         stats = {
@@ -175,21 +191,62 @@ class PcapWriter:
         return stats
 
     def _rotate_recording(self):
-        """Rotate the recording file when it gets too large."""
-        if self._record_file:
-            self._record_file.close()
+        """
+        Rotate the recording file when it gets too large.
 
+        Errors are contained here. Previously a failed open() left _record_file
+        pointing at a closed handle while _recording stayed True, so every subsequent
+        packet raised into a debug-level except and recording died silently forever.
+        """
+        old = self._record_file
         ts = datetime.now().strftime('%Y%m%d_%H%M%S')
         new_path = os.path.join(self.output_dir, f"netsentinel_recording_{ts}.pcap")
-
-        self._record_file = open(new_path, 'wb')
-        self._write_pcap_header(self._record_file)
+        try:
+            new_file = open(new_path, 'wb')
+            self._write_pcap_header(new_file)
+        except OSError as e:
+            logger.error("PCAP rotation failed (%s); continuing in the current file.", e)
+            return
+        self._record_file = new_file
         self._record_path = new_path
+        if old:
+            try:
+                old.close()
+            except OSError:
+                pass
         logger.info("Rotated PCAP recording to %s", new_path)
+        self._prune_old_captures()
 
-    @staticmethod
-    def _write_pcap_header(f):
-        """Write the PCAP global header."""
+    def _prune_old_captures(self):
+        """
+        Keep the captures directory bounded.
+
+        Continuous recording rotates every pcap_max_file_mb with no ceiling, so an
+        unattended run will otherwise fill the disk.
+        """
+        keep = self.config.get('capture', 'pcap_max_files', default=20)
+        try:
+            files = [
+                os.path.join(self.output_dir, f)
+                for f in os.listdir(self.output_dir)
+                if f.startswith('netsentinel_recording_') and f.endswith('.pcap')
+            ]
+            files.sort(key=os.path.getmtime, reverse=True)
+            for path in files[keep:]:
+                if path == self._record_path:
+                    continue
+                os.remove(path)
+                logger.info("Pruned old capture %s", os.path.basename(path))
+        except OSError as e:
+            logger.debug("Capture pruning error: %s", e)
+
+    def _write_pcap_header(self, f):
+        """
+        Write the PCAP global header.
+
+        The link type must describe what was actually captured. Hardcoding Ethernet
+        makes exports from loopback or raw-IP interfaces unreadable in Wireshark.
+        """
         header = struct.pack(
             '<IHHiIII',
             PCAP_MAGIC,
@@ -198,9 +255,13 @@ class PcapWriter:
             0,                  # thiszone (GMT)
             0,                  # sigfigs
             PCAP_SNAPLEN,
-            PCAP_LINKTYPE_ETHERNET,
+            self.link_type,
         )
         f.write(header)
+
+    def set_link_type(self, link_type):
+        """Record the DLT of the interface being captured (called by the app)."""
+        self.link_type = int(link_type)
 
     @staticmethod
     def _write_packet_record(f, timestamp, raw_data):
@@ -235,9 +296,17 @@ class PcapWriter:
     def get_capture_files(self):
         """List all PCAP files in the output directory."""
         files = []
-        for f in sorted(os.listdir(self.output_dir), reverse=True):
-            if f.endswith('.pcap'):
-                path = os.path.join(self.output_dir, f)
+        try:
+            entries = sorted(os.listdir(self.output_dir), reverse=True)
+        except OSError as e:
+            logger.debug("Could not list captures: %s", e)
+            return files
+        for f in entries:
+            if not f.endswith('.pcap'):
+                continue
+            path = os.path.join(self.output_dir, f)
+            try:
+                # Rotation/pruning can delete a file between listdir and stat.
                 files.append({
                     'filename': f,
                     'path': path,
@@ -246,6 +315,8 @@ class PcapWriter:
                         os.path.getmtime(path)
                     ).strftime('%Y-%m-%d %H:%M:%S'),
                 })
+            except OSError:
+                continue
         return files
 
     def cleanup(self):

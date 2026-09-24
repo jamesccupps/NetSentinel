@@ -7,11 +7,8 @@ Built with tkinter + ttk for zero extra dependencies.
 """
 
 import os
-import sys
 import time
-import math
 import logging
-import threading
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 from collections import deque
@@ -580,7 +577,10 @@ class NetSentinelGUI:
         # State
         self._monitoring = False
         self._alert_widgets = []
-        self._packet_log_lines = deque(maxlen=200)
+        # gui.max_log_lines was declared in config but never read.
+        self._max_log_lines = max(20, int(
+            self.app.config.get('gui', 'max_log_lines', default=500)))
+        self._packet_log_lines = deque(maxlen=self._max_log_lines)
 
         # Build UI
         self._build_ui()
@@ -1228,7 +1228,6 @@ class NetSentinelGUI:
     def _pcap_show_results(self, result):
         """Display final analysis results."""
         stats = result.get('stats', {})
-        alerts = result.get('alerts', [])
 
         self._pcap_stats_text.delete('1.0', 'end')
         st = self._pcap_stats_text
@@ -1979,7 +1978,7 @@ class NetSentinelGUI:
 
             results = db.search_credentials(query=query, protocol=proto)
             self._forensics_show_credentials(results)
-        except Exception as e:
+        except Exception:
             pass
 
     def _forensics_show_credentials(self, credentials):
@@ -2144,7 +2143,7 @@ class NetSentinelGUI:
 
             alt = SECURE_EQUIVALENTS.get(port, '')
             if alt:
-                st.insert('end', f"  Fix: ", 'header')
+                st.insert('end', "  Fix: ", 'header')
                 st.insert('end', f"Use {alt}\n", 'safe')
 
             exploit = PROTOCOL_EXPLOITATION.get(port, DEFAULT_EXPLOITATION)
@@ -2410,7 +2409,9 @@ class NetSentinelGUI:
         t.insert('end', '  Captures plaintext credentials from 50+ insecure protocols:\n', 'bullet')
         t.insert('end', '  FTP, HTTP, Telnet, SMTP, POP3, SNMP, Redis, MongoDB, VNC,\n', 'bullet')
         t.insert('end', '  cameras (RTSP), IoT (MQTT), SCADA (Modbus, BACnet).\n', 'bullet')
-        t.insert('end', '  All saved to an AES-256 encrypted vault.\n\n', 'bullet')
+        t.insert('end', '  Masked values are saved to an encrypted vault\n', 'bullet')
+        t.insert('end', '  (Fernet / AES-128-CBC). Raw secrets are stored only if\n', 'bullet')
+        t.insert('end', '  forensics.store_raw_credentials is enabled.\n\n', 'bullet')
 
         t.insert('end', '  IOC Scanner', 'h2')
         t.insert('end', ' — indicators of compromise\n')
@@ -2690,7 +2691,7 @@ class NetSentinelGUI:
 
         # Get recent packets from the capture buffer
         try:
-            packets = list(self.app._packet_window)[-20:]  # Last 20
+            packets = list(self.app._packet_window)[-self._max_log_lines:]
             self._packet_text.delete('1.0', 'end')
             for p in packets:
                 ts = datetime.fromtimestamp(p.timestamp).strftime('%H:%M:%S.%f')[:-3]

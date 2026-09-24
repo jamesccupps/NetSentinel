@@ -29,10 +29,9 @@ sys.modules['scapy'] = _mock
 sys.modules['scapy.all'] = _mock_all
 
 import numpy as np
-from collections import defaultdict, Counter
-from datetime import datetime
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# Repo root, so `src` is importable when run from tools/
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 # ─── Setup temp dirs so we don't pollute the real system ─────────
 TEMP_DIR = tempfile.mkdtemp(prefix="ns_test_")
@@ -51,7 +50,7 @@ def test(name):
         try:
             func()
             passed += 1
-            print(f"  ✓ PASSED")
+            print("  ✓ PASSED")
         except Exception as e:
             failed += 1
             errors.append((name, str(e)))
@@ -66,11 +65,10 @@ def test(name):
 # ═══════════════════════════════════════════════════════════════════
 
 from src.config import Config, DEFAULT_CONFIG
-from src.ids_engine import IDSEngine, Alert, Severity
+from src.ids_engine import IDSEngine
 from src.ml_engine import AnomalyDetector, BaselineProfile, TrafficFeatureExtractor
 from src.net_detect import NetworkEnvironment
 from src.ioc_scanner import IOCScanner
-from src.alerts import AlertManager
 from src.capture import PacketInfo
 from src.forensics import NetworkForensics
 from src.threat_intel import ThreatIntelEngine
@@ -112,12 +110,12 @@ def test_threat_intel_live():
     # Test a known-clean IP
     result = ti.check_ip("8.8.8.8")
     assert result is None, "Google DNS should not be in threat feeds"
-    print(f"    8.8.8.8 clean: ✓")
+    print("    8.8.8.8 clean: ✓")
 
     # Test a known-clean domain
     result = ti.check_domain("google.com")
     assert result is None, "google.com should not be in threat feeds"
-    print(f"    google.com clean: ✓")
+    print("    google.com clean: ✓")
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -308,7 +306,7 @@ def test_dns_mdns_exclusion():
             src_ip="192.168.2.100",
             dst_ip="224.0.0.251",
             dst_port=5353, protocol="UDP",
-            dns_query=f"_shelly._tcp.local" if i % 2 == 0 else f"_homekit._tcp.local",
+            dns_query="_shelly._tcp.local" if i % 2 == 0 else "_homekit._tcp.local",
         )
         packets.append(pkt)
 
@@ -365,7 +363,7 @@ def test_eset_digest_auth():
         print(f"      Risk: {c['risk']}")
         print(f"      Value: {c['value'][:80]}")
         assert c['risk'] == 'LOW', f"ESET Digest Auth should be LOW risk, got {c['risk']}"
-        assert 'Update Service' in c['protocol'], f"Should be labeled as Update Service"
+        assert 'Update Service' in c['protocol'], "Should be labeled as Update Service"
 
     # Also check that the auth token is downgraded
     token_creds = [c for c in forensics.credentials_found if 'Token' in c['protocol']]
@@ -393,7 +391,7 @@ def test_unifi_not_bacnet():
 
     bacnet_data = [s for s in forensics.sensitive_data if 'BACnet' in s.get('data_type', '')]
     print(f"    BACnet sensitive data findings: {len(bacnet_data)}")
-    assert len(bacnet_data) == 0, f"UniFi port 10001 should NOT trigger BACnet detection"
+    assert len(bacnet_data) == 0, "UniFi port 10001 should NOT trigger BACnet detection"
 
     # Now test REAL BACnet on port 47808 — proper Who-Is packet
     # BVLC: 0x81=BACnet/IP, 0x0b=Broadcast, len=12
@@ -439,12 +437,12 @@ def test_known_devices_integration():
     # HA should be in auto-whitelist
     assert "192.168.2.100" in net_env.auto_whitelist_ips
     assert net_env.should_skip_ids("192.168.2.100", "192.168.1.1", dst_port=443)
-    print(f"    HA auto-whitelisted: ✓")
-    print(f"    HA skips IDS heuristics: ✓")
+    print("    HA auto-whitelisted: ✓")
+    print("    HA skips IDS heuristics: ✓")
 
     # But should NOT skip malware ports even for known devices
     assert not net_env.should_skip_ids("192.168.2.100", "10.0.0.1", dst_port=4444)
-    print(f"    HA still checked for malware ports: ✓")
+    print("    HA still checked for malware ports: ✓")
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -524,7 +522,6 @@ def test_cloud_lookup_performance():
 
 @test("Config — save/load with known devices and DGA whitelist")
 def test_config_persistence():
-    import copy
     config = make_config()
     config.set('known_devices', 'devices', [
         {"name": "Test Device", "ip": "10.0.0.5", "type": "sensor"},
@@ -537,17 +534,17 @@ def test_config_persistence():
         json.dump(config.data, f, indent=2)
 
     # Reload
-    with open(config_path, 'r') as f:
+    with open(config_path) as f:
         loaded = json.load(f)
 
     devices = loaded.get('known_devices', {}).get('devices', [])
     assert len(devices) == 1
     assert devices[0]['name'] == "Test Device"
-    print(f"    Known devices persisted: ✓")
+    print("    Known devices persisted: ✓")
 
     dga_wl = loaded.get('whitelists', {}).get('dga_whitelist_suffixes', [])
     assert '.test.local' in dga_wl
-    print(f"    DGA whitelist persisted: ✓")
+    print("    DGA whitelist persisted: ✓")
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -569,9 +566,10 @@ def test_memory_cleanup():
     initial_dns = len(ids._dns_to_ip)
     print(f"    Before cleanup: {initial_cooldowns} cooldowns, {initial_dns} dns entries")
 
-    # Force cleanup
+    # Force cleanup. Without force=True the packet-counter guard returns immediately
+    # (cleanup normally runs once per 1000 packets), so nothing would be pruned.
     ids._last_cleanup = 0
-    ids._periodic_cleanup()
+    ids._periodic_cleanup(force=True)
 
     after_cooldowns = len(ids._alert_cooldowns)
     after_dns = len(ids._dns_to_ip)
@@ -633,7 +631,7 @@ def test_alert_replay():
     # Projected reduction
     eliminated = beaconing_only + len(bacnet_fp) + len(attack_fp)
     remaining = len(alerts) - eliminated
-    print(f"    ---")
+    print("    ---")
     print(f"    Projected: {len(alerts)} → {remaining} alerts ({eliminated} eliminated)")
 
 
@@ -664,7 +662,7 @@ def test_welford_large_scale():
     max_mean_err = np.max(np.abs(baseline.global_mean - np_mean))
     max_std_err = np.max(np.abs(baseline.global_std - 1e-8 - np_std))
 
-    print(f"    Samples: 10,000 × 18 features")
+    print("    Samples: 10,000 × 18 features")
     print(f"    Max mean error:  {max_mean_err:.2e}")
     print(f"    Max std error:   {max_std_err:.2e}")
 
@@ -688,4 +686,8 @@ if errors:
 # Cleanup
 shutil.rmtree(TEMP_DIR, ignore_errors=True)
 
-sys.exit(0 if failed == 0 else 1)
+# Only exit non-zero when run directly. Calling sys.exit() at import time made this
+# module impossible to collect: `unittest discover` and pytest both import every
+# test_*.py, and SystemExit surfaced as a collection error.
+if __name__ == "__main__":
+    sys.exit(0 if failed == 0 else 1)

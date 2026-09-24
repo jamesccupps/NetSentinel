@@ -4,10 +4,12 @@
 **Scope:** security, detection correctness, reliability, performance, tests, docs, repo hygiene
 **Method:** full source read + empirical reproduction of every finding marked *(verified)*
 
-> ⚠️ **This document describes unfixed vulnerabilities in a public repository.**
-> Reproduction payloads are withheld (see S1). Consider fixing S1, S2 and S3 before
-> publicising this file further, and adding a `SECURITY.md` with a private disclosure
-> channel.
+> **Status: all findings below were remediated in v1.5.0.** This document is kept as
+> the record of what was found and why each fix looks the way it does. See `CHANGELOG.md`
+> for the change list and `test_regressions.py` for a test per finding.
+>
+> Fixed-in-v1.5.0 markers appear inline. The reproduction payload for S1 is included
+> now that the injection sink is gone.
 
 ---
 
@@ -49,9 +51,13 @@ ps_cmd = (f'$sig = Get-AuthenticodeSignature -FilePath "{exe_path}"; ' ...)
 subprocess.run(['powershell', '-NoProfile', '-Command', ps_cmd], ...)
 ```
 
-> **Reproduction payload withheld.** This repository is public and the issue is
-> unfixed. The mechanism and the fix are below, which is what a maintainer needs; the
-> drop-in exploit string is deliberately not committed. Restore it here once a fix ships.
+> **FIXED in v1.5.0.** The path is passed via the `NETSENTINEL_TARGET_PATH` environment
+> variable and read with `-LiteralPath`; the PowerShell program is now a module constant
+> (`ProcessVerifier._SIGNATURE_PS`). Covered by
+> `test_regressions.TestSignatureCheckInjection`.
+
+A filename such as `C:\Users\Public\a$(Start-Process calc).exe` produced a `-Command`
+string in which `$(Start-Process calc)` was evaluated.
 
 `exe_path` comes from `psutil.Process(pid).exe()` (`process_verify.py:162`) — i.e. from
 whatever binary an unprivileged local user chose to run. PowerShell expands `$(...)`
@@ -79,6 +85,8 @@ proc = subprocess.run(
 Note `-LiteralPath`, not `-FilePath`, so wildcards in the name aren't globbed either.
 
 ### S2 · The credential vault provides no confidentiality
+
+> **FIXED in v1.5.0.** Raw values are no longer stored by default (`forensics.store_raw_credentials`), a scrypt passphrase mode was added, the XOR fallback was removed, and the AES-256 claim was corrected everywhere.
 `src/forensics_db.py:39-47` · **High**
 
 ```python
@@ -109,6 +117,8 @@ key from a user-supplied passphrase via Argon2id/scrypt and require it to open t
 Option (a) is the smaller change and probably the right default.
 
 ### S3 · Vault, config and log files are world-readable
+
+> **FIXED in v1.5.0.** Directories are created `0700` and sensitive files `0600`; `value_masked` was removed from `forensics_log.json`.
 `src/forensics_db.py:88`, `src/config.py:21` · **High**
 
 `~/.netsentinel/` and everything in it is created with the default umask — mode `0644`
@@ -126,6 +136,8 @@ characters (`forensics.py:2535`). For a 4-character password that is 75 % of it.
 Windows set an ACL restricted to the owner SID. Drop `value_masked` from the log.
 
 ### S4 · Unpickling model files in an elevated process
+
+> **FIXED in v1.5.0.** Model files carry an HMAC keyed outside the data directory, and feature-count mismatches are detected on load.
 `src/ml_engine.py:729-733` · **Medium**
 
 `isolation_forest.pkl` and `scaler.pkl` are loaded with `pickle.load` from
@@ -140,6 +152,8 @@ outside the data directory and refuse to load on mismatch. Validate `scaler.n_fe
 == len(feature_names)` after load.
 
 ### S5 · Security switches that do nothing
+
+> **FIXED in v1.5.0.** All 56 config keys are now read; `test_regressions` asserts this and will fail if a dead key is reintroduced.
 `src/config.py` · **Medium**
 
 16 of 56 config keys are never read. Several of them are the controls a user would reach
@@ -178,6 +192,8 @@ Consider moving it behind a plugin interface or dropping it.
 These are the bugs that matter most, because they undermine the thing the tool exists to do.
 
 ### D1 · The baseline whitelist never stops learning — attackers whitelist themselves
+
+> **FIXED in v1.5.0.** Observation is gated on `is_learning` in `app._on_packet`.
 `src/app.py:266-271` · **Critical**
 
 `app._on_packet` calls `observe_dns()` and `observe_connection()` unconditionally, with
@@ -214,6 +230,8 @@ self.baseline_whitelist.check_learning_complete()
 ```
 
 ### D2 · ML rate features are pinned to constants
+
+> **FIXED in v1.5.0.** The analysis window is time-bounded and the extractor divides by the observed span.
 `src/app.py:196, 391` + `src/ml_engine.py:117-118` · **Critical**
 
 `self._packet_window = deque(maxlen=5000)` is appended to on every packet and **never
@@ -244,6 +262,8 @@ packets = [p for p in self._packet_window if p.timestamp >= cutoff]
 — or, better, derive `window_sec` from the actual span: `max(p.timestamp) - min(p.timestamp)`.
 
 ### D3 · `direction_asymmetry` is structurally always 0
+
+> **FIXED in v1.5.0.** Now measures byte imbalance relative to local hosts.
 `src/ml_engine.py:141-143` · **High**
 
 ```python
@@ -267,6 +287,8 @@ direction_asymmetry = abs(up - down) / max(up + down, 1)
 ```
 
 ### D4 · `DATA-EXFIL` fires on downloads and blames your own machine
+
+> **FIXED in v1.5.0.** Only traffic leaving the local network is counted.
 `src/ids_engine.py:845-847` · **High**
 
 ```python
@@ -290,6 +312,8 @@ destination.
 (`net_env.local_ips` is already available to the engine).
 
 ### D5 · TLD checks match substrings, not TLDs
+
+> **FIXED in v1.5.0.** Both the IDS and threat-intel now compare the final DNS label.
 `src/ids_engine.py:768, 772` and `src/threat_intel.py:253` · **Medium**
 
 ```python
@@ -317,6 +341,8 @@ queries are routine on Windows LANs via LLMNR and NetBIOS, so this fires in prac
 `domain.endswith(tld)` keeping the dot.
 
 ### D6 · `ODD-HOURS` hourly suppression is destroyed by the cooldown pruner
+
+> **FIXED in v1.5.0.** Long-lived suppressions moved to `_long_suppressions` with their own horizon.
 `src/ids_engine.py:896-899` vs `205-209` · **Medium**
 
 Rule 12 stores its "one alert per IP per hour" marker in `self._alert_cooldowns` with a
@@ -328,6 +354,8 @@ fix #14 from the CHANGELOG (the pruner is fix #7).
 **Fix:** keep long-lived suppressions in a separate dict with its own horizon.
 
 ### D7 · Two config defaults make the tool blind to bulk traffic
+
+> **FIXED in v1.5.0.** Unchanged by design — the trade-off is now documented in the README under "Known scope limits".
 `src/config.py:31, 33` · **Medium — design, not a bug**
 
 ```python
@@ -347,6 +375,8 @@ a regex in a config default — a user reading "detects data exfiltration" will 
 HTTPS to be excluded.
 
 ### D8 · `anomaly_threshold` controls two unrelated things in opposite directions
+
+> **FIXED in v1.5.0.** Split into `ml.contamination` and `ml.alert_threshold`; the old key is still honoured.
 `src/ml_engine.py:381, 470, 701` · **Medium**
 
 The same value is used as the Isolation Forest `contamination` parameter *and* as the
@@ -358,6 +388,8 @@ default says `0.15` (`ml_engine.py:381`).
 **Fix:** split into `ml.contamination` and `ml.alert_threshold`.
 
 ### D9 · Process attribution is blank for almost every packet
+
+> **FIXED in v1.5.0.** The psutil enumeration runs on a background thread; every packet reads the cache.
 `src/capture.py:396-403` · **Medium**
 
 ```python
@@ -378,6 +410,8 @@ and do the dict lookup on every packet. Better still, refresh the map from a bac
 thread — `psutil.net_connections()` currently blocks the capture thread.
 
 ### D10 · `rules/default_rules.json` is never loaded
+
+> **FIXED in v1.5.0.** Loaded at import via `load_rule_pack()`, with a user override path.
 **Medium**
 
 The file is shipped, bundled by PyInstaller (`--add-data "rules;rules"`) and documented
@@ -393,6 +427,8 @@ drifted from the hardcoded rules (it lists ports 3127, 27374, 1080, 9999, 7777 a
 ## 3. Reliability and performance
 
 ### R1 · Forensics alert scan is O(findings) on every packet
+
+> **FIXED in v1.5.0.** Cursor-based scanning; duplicates no longer rewrite the vault.
 `src/app.py:253, 278-340` · **High**
 
 `_check_forensics_alerts()` runs per packet and iterates **all** of
@@ -409,6 +445,8 @@ session. That is a full-file encrypt + write per packet.
 callback), and make the vault append-only or batched.
 
 ### R2 · Blocking network and subprocess calls on the packet-processing thread
+
+> **FIXED in v1.5.0.** Slow rules publish immediately and verify on a background thread.
 `src/alert_verify.py:796` → `src/process_verify.py:466-486` · **High**
 
 The alert gateway is called synchronously from `ids_engine.inspect_packet`, on the
@@ -421,6 +459,8 @@ suspicious is precisely when the sensor goes deaf.
 as deferred and enrich the alert asynchronously.
 
 ### R3 · `_check_beaconing` is O(packets × destinations) every 5 seconds
+
+> **FIXED in v1.5.0.** Single pass builds both maps.
 `src/ml_engine.py:558, 570` · **Medium**
 
 ```python
@@ -434,6 +474,8 @@ buffer that is mostly the same packets as last time.
 **Fix:** build `dst_ip -> set(src_ip)` in the same single pass that builds `dst_times`.
 
 ### R4 · PCAP writer
+
+> **FIXED in v1.5.0.** Rotation errors contained, I/O outside the lock, configurable link type, capture pruning.
 `src/pcap_writer.py` · **Medium**
 
 - `_rotate_recording` (line 176) has no error handling of its own. If the `open()` for
@@ -450,6 +492,8 @@ buffer that is mostly the same packets as last time.
   indefinitely with no retention policy.
 
 ### R5 · DeviceLearner registers every remote internet IP as a "device on your network"
+
+> **FIXED in v1.5.0.** Only local addresses are profiled; per-device sets are trimmed.
 `src/device_learner.py:191-196` · **High**
 
 `observe_packet` calls `_get_or_create(pkt_info.dst_ip)` with no locality check, so every
@@ -471,6 +515,8 @@ never trimmed (only the three `Counter`s are, at `device_learner.py:226-233`).
 **Fix:** only profile addresses in `net_env.local_subnets` (or `ipaddress.ip_address(ip).is_private`).
 
 ### R6 · Alert history loss
+
+> **FIXED in v1.5.0.** Full history saved, order preserved on restore, periodic autosave added.
 `src/alerts.py:153` · **Medium**
 
 - `save_alerts()` writes only `list(self._alerts)[:500]` while `alerts.max_stored`
@@ -486,6 +532,8 @@ never trimmed (only the three `Counter`s are, at `device_learner.py:226-233`).
 a periodic flush.
 
 ### R7 · Batched desktop notifications can never be delivered
+
+> **FIXED in v1.5.0.** A timer flushes the batch.
 `src/alerts.py:252-266` · **Medium**
 
 `_batch_notification` only flushes when the *next* alert arrives. If three HIGH alerts
@@ -495,6 +543,8 @@ which is exactly the burst-then-silence pattern an incident produces. There is n
 **Fix:** flush from a `threading.Timer` or from the existing analysis loop.
 
 ### R8 · No atomic writes anywhere
+
+> **FIXED in v1.5.0.** `config.atomic_write_json` (temp + fsync + rename) is used by every persistence path.
 `config.py:151`, `alerts.py:155`, `forensics_db.py:277`, `ml_engine.py:311`,
 `baseline_whitelist.py`, `device_learner.py`, `alert_correlator.py` · **Medium**
 
@@ -505,6 +555,8 @@ mid-write truncates the file; the corresponding loader catches the exception and
 **Fix:** one shared helper — write to `path + '.tmp'`, `flush()`, `os.replace()`.
 
 ### R9 · `get_stats()` is documented as a snapshot but aliases live state
+
+> **FIXED in v1.5.0.** Mutable members are copied inside the lock.
 `src/capture.py:648-652` · **Low (latent)**
 
 ```python
@@ -535,6 +587,8 @@ snapshots.
 
 ### R10 · Dead state still being maintained
 
+> **FIXED in v1.5.0.** Removed; `test_regressions.TestDeadStateRemoved` asserts it stays gone.
+
 | Location | Field | Status |
 |---|---|---|
 | `ids_engine.py:158` | `_dhcp_devices` | declared, never read or written |
@@ -554,6 +608,8 @@ Also: `ids_engine.py:842` creates `self._exfil_thresholds` lazily via `hasattr` 
 per-packet path, and it is never pruned.
 
 ### R11 · Shutdown is best-effort
+
+> **FIXED in v1.5.0.** Worker threads are joined and the declined-UAC path now logs instead of exiting silently.
 `src/capture.py:637-642` · **Low**
 
 `stop()` only joins the capture thread (5 s); worker, cleanup and watchdog threads are
@@ -679,7 +735,14 @@ Worth stating plainly, because the finding list above is long:
 
 ---
 
-## Recommended order of work
+## Remediation status
+
+Everything in the "Now", "Next" and "Then" lists below was completed in v1.5.0, with
+one deliberate exception: **D7** (the default BPF filter and the 500 pps cap). Those
+are genuine CPU/visibility trade-offs rather than defects, so the defaults are
+unchanged and the consequence is now documented in the README instead.
+
+## Original recommended order of work
 
 **Now**
 

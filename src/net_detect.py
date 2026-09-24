@@ -16,13 +16,11 @@ Detects and whitelists:
 Also detects common noisy traffic patterns and adjusts alert thresholds.
 """
 
-import os
 import re
 import socket
 import logging
 import subprocess
 import ipaddress
-from collections import defaultdict
 
 logger = logging.getLogger("NetSentinel.NetDetect")
 
@@ -366,7 +364,6 @@ KNOWN_CLOUD_DOMAINS = {
     'wix.com', 'wixstatic.com',
     'wordpress.com', 'wp.com',
     'godaddy.com',
-    'cloudflare.com',
     'okta.com', 'oktacdn.com',
     'auth0.com',
     'sentry.io',
@@ -389,9 +386,7 @@ KNOWN_CLOUD_DOMAINS = {
     'windowsdefender.com',
 
     # ─── Ad / Analytics (noisy but not malicious) ────────────
-    'googlesyndication.com', 'googleadservices.com',
-    'doubleclick.net', 'google-analytics.com',
-    'googletagmanager.com', 'googletagservices.com',
+    'googletagservices.com',
     'facebook.net', 'fbsbx.com',
     'hotjar.com', 'hotjar.io',
     'segment.com', 'segment.io',

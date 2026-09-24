@@ -39,7 +39,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger("NetSentinel")
 
-APP_VERSION = "1.4.0"
+APP_VERSION = "1.5.0"
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 
 
@@ -58,11 +58,29 @@ def is_admin():
 
 
 def request_admin():
-    if sys.platform == 'win32':
-        ctypes.windll.shell32.ShellExecuteW(
-            None, "runas", sys.executable, " ".join(sys.argv), None, 1
-        )
-        sys.exit(0)
+    """
+    Relaunch elevated. Returns False if the user declined, True never returns
+    (the elevated copy takes over and this process exits).
+    """
+    if sys.platform != 'win32':
+        return False
+
+    # subprocess.list2cmdline quotes arguments the way CommandLineToArgvW parses
+    # them; " ".join breaks on any path containing a space.
+    import subprocess
+    params = subprocess.list2cmdline(sys.argv)
+    rc = ctypes.windll.shell32.ShellExecuteW(
+        None, "runas", sys.executable, params, None, 1
+    )
+    # ShellExecuteW returns <= 32 on failure (SE_ERR_ACCESSDENIED == 5 when the
+    # UAC prompt is declined). It does not raise, so without this check the
+    # process just called sys.exit(0) and vanished with no explanation.
+    if rc <= 32:
+        logger.warning(
+            "Elevation declined or failed (code %s). Continuing without "
+            "Administrator rights — packet capture will be limited.", rc)
+        return False
+    sys.exit(0)
 
 
 def show_splash():
@@ -159,8 +177,10 @@ def main():
         if sys.platform == 'win32':
             try:
                 request_admin()
-            except Exception:
-                logger.warning("Could not elevate. Running in limited mode.")
+            except Exception as e:
+                logger.warning("Could not elevate (%s). Running in limited mode.", e)
+        else:
+            logger.warning("Not running as root — packet capture will be limited.")
 
     # Splash screen
     splash = None

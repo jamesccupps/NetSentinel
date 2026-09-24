@@ -1,0 +1,60 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "netsentinel"
+version = "1.5.0"
+description = "AI-powered network monitor and intrusion detection system"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "NetSentinel Contributors" }]
+keywords = ["network-security", "ids", "packet-capture", "anomaly-detection", "forensics"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: System Administrators",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Security",
+    "Topic :: System :: Networking :: Monitoring",
+]
+dependencies = [
+    "scapy>=2.5.0",
+    "psutil>=5.9.0",
+    "scikit-learn>=1.3.0",
+    "numpy>=1.24.0",
+    "cryptography>=41.0.0",
+]
+
+[project.optional-dependencies]
+notifications = ["plyer>=2.1.0"]
+build = ["pyinstaller>=6.0.0"]
+
+[project.urls]
+Homepage = "https://github.com/jamesccupps/NetSentinel"
+Issues = "https://github.com/jamesccupps/NetSentinel/issues"
+
+[project.scripts]
+netsentinel = "main:main"
+
+[tool.setuptools]
+packages = ["src"]
+py-modules = ["main"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "B", "UP"]
+ignore = [
+    "E501",  # long lines: the alert evidence strings are intentionally prose
+    "B008",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tools/*" = ["E402"]  # sys.path setup must precede imports
+"test_*.py" = ["E402"]

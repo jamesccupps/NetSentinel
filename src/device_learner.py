@@ -29,6 +29,7 @@ import os
 import json
 import time
 import logging
+import ipaddress
 import threading
 from collections import defaultdict, Counter
 from datetime import datetime
@@ -151,7 +152,7 @@ class DeviceLearner:
 
         with self._lock:
             # Track source device
-            if pkt_info.src_ip and not pkt_info.src_ip.startswith('255.'):
+            if self._is_local_device(pkt_info.src_ip):
                 dev = self._get_or_create(pkt_info.src_ip)
                 dev.last_seen = now
                 dev.packet_count += 1
@@ -189,7 +190,7 @@ class DeviceLearner:
                         dev.mdns_services.add(pkt_info.dns_query)
 
             # Track destination device (lighter — just note it exists)
-            if pkt_info.dst_ip and not pkt_info.dst_ip.startswith('255.'):
+            if self._is_local_device(pkt_info.dst_ip):
                 dev = self._get_or_create(pkt_info.dst_ip)
                 # If something is connecting TO this device on a low port, it's a service
                 if pkt_info.dst_port and pkt_info.dst_port < 1024:
@@ -212,6 +213,35 @@ class DeviceLearner:
             if vendor_class:
                 dev.vendor_class = vendor_class
 
+    def _is_local_device(self, ip):
+        """
+        Is this address a device on our network, rather than somewhere on the internet?
+
+        This gate is the difference between an inventory of the LAN and an inventory of
+        every web server the user has ever contacted: without it, one browsing session
+        creates thousands of DeviceProfiles, all persisted to learned_devices.json.
+        """
+        if not ip:
+            return False
+        try:
+            addr = ipaddress.ip_address(ip)
+        except ValueError:
+            return False
+        if addr.is_multicast or addr.is_unspecified or addr.is_reserved:
+            return False
+        if addr.version == 4 and str(addr) == '255.255.255.255':
+            return False
+        if addr.is_loopback:
+            return False
+        if addr.is_private or addr.is_link_local:
+            return True
+        # A public address can still be local (some networks route public space), so
+        # honour explicitly detected local subnets when the environment knows them.
+        if self.net_env:
+            if ip in getattr(self.net_env, 'local_ips', ()):
+                return True
+        return False
+
     def _get_or_create(self, ip):
         """Get or create a device profile. Must be called under lock."""
         if ip not in self.devices:
@@ -231,6 +261,13 @@ class DeviceLearner:
                     dev.dns_domains = Counter(dict(dev.dns_domains.most_common(100)))
                 if len(dev.protocols_used) > 50:
                     dev.protocols_used = Counter(dict(dev.protocols_used.most_common(20)))
+                # Plain sets were never trimmed; a chatty mDNS device grows these forever.
+                if len(dev.mdns_services) > 100:
+                    dev.mdns_services = set(sorted(dev.mdns_services)[:50])
+                if len(dev.services_seen) > 200:
+                    dev.services_seen = set(sorted(dev.services_seen)[:100])
+                if len(dev.src_ports_served) > 200:
+                    dev.src_ports_served = set(sorted(dev.src_ports_served)[:100])
 
     def _classify_device(self, dev):
         """Classify a single device based on its behavioral profile."""
@@ -359,8 +396,8 @@ class DeviceLearner:
         with self._lock:
             data = {ip: dev.to_dict() for ip, dev in self.devices.items()}
         try:
-            with open(self._db_path, 'w') as f:
-                json.dump(data, f, indent=1, default=str)
+            from src.config import atomic_write_json
+            atomic_write_json(self._db_path, data, indent=1, default=str)
             logger.info("Saved %d learned device profiles", len(data))
         except Exception as e:
             logger.error("Failed to save device learner data: %s", e)
@@ -370,7 +407,7 @@ class DeviceLearner:
         if not os.path.exists(self._db_path):
             return
         try:
-            with open(self._db_path, 'r') as f:
+            with open(self._db_path) as f:
                 data = json.load(f)
             for ip, dev_data in data.items():
                 self.devices[ip] = DeviceProfile.from_dict(dev_data)

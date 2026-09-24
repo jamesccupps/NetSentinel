@@ -22,16 +22,10 @@ Checks:
 10. Outbound connections on non-standard protocols
 """
 
-import os
-import re
 import time
 import math
-import socket
 import logging
-import threading
-import subprocess
 from collections import Counter, defaultdict
-from datetime import datetime
 
 logger = logging.getLogger("NetSentinel.IOC")
 
@@ -527,7 +521,7 @@ class IOCScanner:
                         self.findings.append({
                             'rule_id': 'IOC-ACTIVE-THREAT',
                             'severity': 'CRITICAL',
-                            'title': f'Active Connection to Threat Intel IP',
+                            'title': 'Active Connection to Threat Intel IP',
                             'description': f'"{proc_name}" has an ESTABLISHED connection to '
                                            f'{remote_ip} ({result["category"]})',
                             'evidence': {

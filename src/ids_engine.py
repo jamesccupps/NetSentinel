@@ -5,9 +5,12 @@ Rule-based detection for known attack patterns, port scans,
 brute force attempts, suspicious payloads, and protocol anomalies.
 """
 
-import re
+import os
+import sys
+import json
 import time
 import logging
+import ipaddress
 import itertools
 from collections import defaultdict, deque
 from datetime import datetime
@@ -40,12 +43,90 @@ _COMMON_SERVICE_PORTS = frozenset({
 _STANDARD_OUTBOUND_PORTS = frozenset({80, 443, 8080, 8443, 27015, 27016, 27017, 27018})
 
 # Known malware/backdoor port names for alert descriptions
-_PORT_NAMES = {
+_BUILTIN_PORT_NAMES = {
     4444: 'Metasploit/Meterpreter', 5555: 'Android ADB/Trojan',
     6666: 'IRC Backdoor', 1337: 'Common Backdoor',
     31337: 'Back Orifice', 12345: 'NetBus Trojan',
     65535: 'Backdoor', 6667: 'IRC Botnet C2',
 }
+
+# TLDs with a high rate of abuse. Stored WITHOUT the leading dot and compared
+# against the final label only — `query.endswith('top')` also matches 'laptop',
+# 'desktop' and 'rooftop', which single-label LLMNR/NetBIOS lookups produce
+# constantly on Windows networks.
+_BUILTIN_HIGH_ABUSE_TLDS = frozenset({'xyz', 'top', 'buzz', 'tk', 'ml', 'ga', 'cf', 'gq'})
+
+
+def load_rule_pack():
+    """
+    Load rules/default_rules.json, shipped alongside the source (and bundled by
+    PyInstaller). It was previously packaged and documented but never read, so the
+    ports and TLDs in it had quietly drifted away from the hardcoded values.
+
+    A user copy at ~/.netsentinel/rules/default_rules.json overrides the bundled one.
+    Returns (bad_ports: dict[int, str], tlds: set[str]).
+    """
+    candidates = []
+    try:
+        from src.config import RULES_DIR
+        candidates.append(os.path.join(RULES_DIR, 'default_rules.json'))
+    except Exception:
+        pass
+    base = getattr(sys, '_MEIPASS', None) or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    candidates.append(os.path.join(base, 'rules', 'default_rules.json'))
+
+    for path in candidates:
+        if not os.path.exists(path):
+            continue
+        try:
+            with open(path, encoding='utf-8') as f:
+                data = json.load(f)
+            ports = {}
+            for port_str, name in data.get('known_bad_ports', {}).get('ports', {}).items():
+                try:
+                    ports[int(port_str)] = str(name)
+                except (TypeError, ValueError):
+                    logger.warning("Ignoring non-numeric port %r in %s", port_str, path)
+            tlds = {str(t).lstrip('.').lower() for t in data.get('suspicious_tlds', [])}
+            logger.info("Loaded rule pack from %s: %d ports, %d TLDs",
+                        path, len(ports), len(tlds))
+            return ports, tlds
+        except Exception as e:
+            logger.error("Could not load rule pack %s: %s", path, e)
+    return {}, set()
+
+
+_RULE_PACK_PORTS, _RULE_PACK_TLDS = load_rule_pack()
+
+# Rule-pack entries merge on top of the built-ins, so editing the JSON has an effect.
+_PORT_NAMES = {**_BUILTIN_PORT_NAMES, **_RULE_PACK_PORTS}
+_HIGH_ABUSE_TLDS = frozenset(_BUILTIN_HIGH_ABUSE_TLDS | _RULE_PACK_TLDS)
+
+
+def _domain_matches(domain, domain_set):
+    """Match a domain against a set of suffixes, walking up the label hierarchy."""
+    if not domain or not domain_set:
+        return False
+    domain = domain.lower().rstrip('.')
+    if domain in domain_set:
+        return True
+    idx = 0
+    while True:
+        idx = domain.find('.', idx)
+        if idx == -1:
+            return False
+        idx += 1
+        if domain[idx:] in domain_set:
+            return True
+
+
+def _tld_of(domain):
+    """Return the final DNS label, lowercased. Empty for single-label names."""
+    if not domain:
+        return ''
+    domain = domain.rstrip('.').lower()
+    return domain.rsplit('.', 1)[-1] if '.' in domain else ''
+
 
 # Service names for brute force alert descriptions
 _SERVICE_NAMES = {
@@ -118,11 +199,26 @@ class IDSEngine:
         self._alert_cooldowns = {}  # {rule_id+ip: last_alert_time}
         self.cooldown_sec = config.get('alerts', 'cooldown_sec', default=30)
 
+        # Suppressions measured in hours rather than seconds, kept separate so the
+        # short-cooldown pruner cannot discard them.
+        self._long_suppressions = {}
+
+        # Escalating per-destination exfil thresholds, in MB.
+        self._exfil_thresholds = {}
+
         # Whitelists/Blacklists
         self.whitelist_ips = set(config.get('whitelists', 'ips', default=[]))
         self.whitelist_ports = set(config.get('whitelists', 'ports', default=[]))
         self.blacklist_ips = set(config.get('blacklists', 'ips', default=[]))
         self.blacklist_ports = set(config.get('blacklists', 'ports', default=[]))
+        # Domain and process lists existed in DEFAULT_CONFIG but were never consulted,
+        # so entering one appeared to work and silently did nothing.
+        self.whitelist_domains = {d.lower().lstrip('.')
+                                  for d in config.get('whitelists', 'domains', default=[])}
+        self.whitelist_processes = {p.lower()
+                                    for p in config.get('whitelists', 'processes', default=[])}
+        self.blacklist_domains = {d.lower().lstrip('.')
+                                  for d in config.get('blacklists', 'domains', default=[])}
         self.known_bad_ports = set(config.get('ids', 'known_bad_ports', default=[]))
 
         # Thresholds
@@ -146,22 +242,8 @@ class IDSEngine:
         # we know that IP was resolved from docs.google.com
         self._dns_to_ip = {}        # {domain: (ip, timestamp)} - from DNS responses
         self._ip_to_domains = defaultdict(set)  # {ip: {domain1, domain2}} - reverse mapping
-        self._recent_dns = deque(maxlen=2000)   # [(timestamp, src_ip, domain)] - all recent queries
         self._latest_dns_by_ip = {}  # {src_ip: (domain, timestamp)} - O(1) lookup for inference
         self._ip_to_domains_max = 20  # Max domains to track per IP
-
-        # Connection context: recent connections for enriching alerts
-        self._recent_connections = deque(maxlen=5000)  # [(ts, src, dst, dport, proto, domain)]
-
-        # DHCP device inventory: track all devices seen via DHCP
-        self._dhcp_devices = {}  # {mac: {ip, hostname, vendor, first_seen, last_seen}}
-
-        # mDNS/LLMNR poisoning: track legitimate responders
-        self._mdns_responders = defaultdict(set)  # {query_name: {responding_ips}}
-        self._llmnr_responders = defaultdict(set)
-
-        # SMB version tracking
-        self._smb_versions = {}  # {(src_ip, dst_ip): smb_version}
 
         # Statistics
         self.alerts_generated = 0
@@ -241,13 +323,21 @@ class IDSEngine:
             for k in stale:
                 del tracker[k]
 
-        # Prune mDNS/LLMNR responder tracking
-        max_responder_entries = 2000
-        for tracker in (self._mdns_responders, self._llmnr_responders):
-            if len(tracker) > max_responder_entries:
-                keys = list(tracker.keys())
-                for k in keys[:len(keys) // 4]:
-                    del tracker[k]
+        # Prune long-lived suppressions once their window has fully elapsed
+        stale_long = [k for k, t in self._long_suppressions.items() if now - t > 7200]
+        for k in stale_long:
+            del self._long_suppressions[k]
+
+        # Prune escalating exfil thresholds for destinations no longer being tracked
+        stale_exfil = [ip for ip in self._exfil_thresholds if ip not in self._data_transfer]
+        for ip in stale_exfil:
+            del self._exfil_thresholds[ip]
+
+        # Cap the ARP table. Bounded by LAN size in normal use, but an ARP flood
+        # from a hostile host would otherwise grow it without limit.
+        if len(self._arp_table) > 4096:
+            for k in list(self._arp_table)[:len(self._arp_table) // 2]:
+                del self._arp_table[k]
 
     def inspect_packet(self, pkt_info):
         """
@@ -265,7 +355,6 @@ class IDSEngine:
         # Track every DNS query so we can map IPs to domains later
         if pkt_info.dns_query:
             now = time.time()
-            self._recent_dns.append((now, pkt_info.src_ip, pkt_info.dns_query))
             # O(1) index: remember most recent DNS query per source IP
             self._latest_dns_by_ip[pkt_info.src_ip] = (pkt_info.dns_query, now)
             # When we see a DNS response, map the domain to the destination
@@ -287,17 +376,33 @@ class IDSEngine:
                     if len(self._ip_to_domains.get(pkt_info.dst_ip, set())) < self._ip_to_domains_max:
                         self._ip_to_domains[pkt_info.dst_ip].add(domain)
 
-        # Track connections for context enrichment
-        domain_for_dst = self._get_domains_for_ip(pkt_info.dst_ip)
-        self._recent_connections.append((
-            time.time(), pkt_info.src_ip, pkt_info.dst_ip,
-            pkt_info.dst_port, pkt_info.protocol,
-            list(domain_for_dst)[:3] if domain_for_dst else []
-        ))
-
         # Manual whitelist = skip everything entirely
         if pkt_info.src_ip in self.whitelist_ips or pkt_info.dst_ip in self.whitelist_ips:
             return []
+        if self.whitelist_processes and pkt_info.process_name and \
+                pkt_info.process_name.lower() in self.whitelist_processes:
+            return []
+        if self.whitelist_domains and self._matches_domain_list(
+                pkt_info, self.whitelist_domains):
+            return []
+
+        # Explicitly blacklisted domain
+        if self.blacklist_domains and pkt_info.dns_query and \
+                _domain_matches(pkt_info.dns_query, self.blacklist_domains):
+            alerts.append(self._create_alert(
+                "BL-DOMAIN", Severity.HIGH,
+                "Blacklisted Domain",
+                f"DNS query for blacklisted domain: {pkt_info.dns_query}",
+                pkt_info,
+                evidence={
+                    'queried_domain': pkt_info.dns_query,
+                    'requesting_ip': pkt_info.src_ip,
+                    'process': pkt_info.process_name or 'Unknown',
+                    'recommendation': 'This domain is on your configured blacklist. '
+                        'Identify the process that requested it.',
+                },
+                category="Blacklist"
+            ))
 
         # Smart auto-whitelist: skip HEURISTIC rules for known infrastructure
         skip_heuristics = False
@@ -306,10 +411,6 @@ class IDSEngine:
                 pkt_info.src_ip, pkt_info.dst_ip,
                 pkt_info.dst_port, pkt_info.protocol
             )
-
-        # ─── Build common context used by all alerts ────────────────
-        dst_domains = self._get_domains_for_ip(pkt_info.dst_ip)
-        src_domains = self._get_domains_for_ip(pkt_info.src_ip)
 
         # === Rule 1: Threat Intel - IP Reputation (cloud-aware) ===
         if self.threat_intel:
@@ -627,19 +728,7 @@ class IDSEngine:
                 recent = [t for t in self._conn_failures[pair_key] if now - t < 10]
 
                 # Determine if this is local outbound (browsing) vs external inbound (attack)
-                src_is_local = False
-                if self.net_env:
-                    local_ips = getattr(self.net_env, 'local_ips', set())
-                    auto_wl = getattr(self.net_env, 'auto_whitelist_ips', set())
-                    if pkt_info.src_ip in local_ips or pkt_info.src_ip in auto_wl:
-                        src_is_local = True
-                if not src_is_local:
-                    # Fallback: check if src is on a private subnet
-                    src_is_local = (
-                        pkt_info.src_ip.startswith('192.168.') or
-                        pkt_info.src_ip.startswith('10.') or
-                        pkt_info.src_ip.startswith('172.')
-                    )
+                src_is_local = self._is_local_ip(pkt_info.src_ip)
 
                 # Higher threshold for local outbound to standard service ports
                 # (browser opening many tabs = dozens of SYNs to one CDN IP)
@@ -762,33 +851,29 @@ class IDSEngine:
                 ))
 
             # Suspicious TLD check — skip for known cloud or learned domains
-            if not is_known_cloud and not is_learned:
-                bad_tlds = {'.xyz', '.top', '.buzz', '.tk', '.ml', '.ga', '.cf'}
-                for tld in bad_tlds:
-                    if query.endswith(tld.lstrip('.')):
-                        # Get recent queries to this TLD
-                        recent_same_tld = [
-                            q for t, q in self._dns_queries_by_ip[pkt_info.src_ip]
-                            if q.endswith(tld.lstrip('.'))
-                        ]
-                        alerts.append(self._create_alert(
-                            "DNS-BAD-TLD", Severity.MEDIUM,
-                            f"Suspicious TLD Query ({tld})",
-                            f"DNS query to high-abuse TLD: {query}",
-                            pkt_info,
-                            evidence={
-                                'full_query': query,
-                                'suspicious_tld': tld,
-                                'recent_queries_same_tld': recent_same_tld[-10:],
-                                'total_queries_this_tld': len(recent_same_tld),
-                                'requesting_ip': pkt_info.src_ip,
-                                'process': pkt_info.process_name or 'Unknown',
-                                'description': f'The {tld} TLD has a high rate of abuse and is '
-                                    'frequently used for phishing, malware distribution, and C2.',
-                            },
-                            category="Suspicious DNS"
-                        ))
-                        break
+            tld = _tld_of(query)
+            if not is_known_cloud and not is_learned and tld in _HIGH_ABUSE_TLDS:
+                recent_same_tld = [
+                    q for _, q in self._dns_queries_by_ip[pkt_info.src_ip]
+                    if _tld_of(q) == tld
+                ]
+                alerts.append(self._create_alert(
+                    "DNS-BAD-TLD", Severity.MEDIUM,
+                    f"Suspicious TLD Query (.{tld})",
+                    f"DNS query to high-abuse TLD: {query}",
+                    pkt_info,
+                    evidence={
+                        'full_query': query,
+                        'suspicious_tld': f'.{tld}',
+                        'recent_queries_same_tld': recent_same_tld[-10:],
+                        'total_queries_this_tld': len(recent_same_tld),
+                        'requesting_ip': pkt_info.src_ip,
+                        'process': pkt_info.process_name or 'Unknown',
+                        'description': f'The .{tld} TLD has a high rate of abuse and is '
+                            'frequently used for phishing, malware distribution, and C2.',
+                    },
+                    category="Suspicious DNS"
+                ))
 
             # High DNS query rate from single source
             now = time.time()
@@ -841,15 +926,15 @@ class IDSEngine:
             self._arp_table[pkt_info.src_ip] = pkt_info.src_mac
 
         # === Rule 11: Large Data Transfer (potential exfil, escalating) ===
-        if pkt_info.payload_size > 0:
+        # Only outbound counts. Accumulating against dst_ip unconditionally meant every
+        # large download was reported as data "sent to" the user's own machine.
+        if pkt_info.payload_size > 0 and self._is_outbound(pkt_info):
             self._data_transfer[pkt_info.dst_ip] += pkt_info.payload_size
             self._active_transfer_ips.add(pkt_info.dst_ip)
             mb_sent = self._data_transfer[pkt_info.dst_ip] / (1024 * 1024)
 
             # Per-IP escalating threshold: first alert at configured MB,
             # then doubles each time (100 → 200 → 400 → ...)
-            if not hasattr(self, '_exfil_thresholds'):
-                self._exfil_thresholds = {}  # {dst_ip: next_threshold_mb}
             ip_threshold = self._exfil_thresholds.get(
                 pkt_info.dst_ip, self.large_upload_mb)
 
@@ -897,9 +982,10 @@ class IDSEngine:
                 # Custom cooldown: source IP + hour, so max 1 alert per IP per hour
                 odd_key = f"ODD-HOURS:{pkt_info.src_ip}:h{hour}"
                 now = time.time()
-                if odd_key not in self._alert_cooldowns or \
-                   now - self._alert_cooldowns.get(odd_key, 0) > 3600:
-                    self._alert_cooldowns[odd_key] = now
+                # Kept out of _alert_cooldowns: that dict is pruned at cooldown_sec*5
+                # (150s by default), which silently reduced this to ~24 alerts/hour.
+                if now - self._long_suppressions.get(odd_key, 0) > 3600:
+                    self._long_suppressions[odd_key] = now
                     alerts.append(self._create_alert(
                         "ODD-HOURS", Severity.LOW,
                         "Unusual Off-Hours Network Activity",
@@ -925,6 +1011,34 @@ class IDSEngine:
 
         self.alerts_generated += len(valid_alerts)
         return valid_alerts
+
+    def _matches_domain_list(self, pkt_info, domain_set):
+        """True if the query, or any domain known for either endpoint, is in the set."""
+        if pkt_info.dns_query and _domain_matches(pkt_info.dns_query, domain_set):
+            return True
+        for ip in (pkt_info.dst_ip, pkt_info.src_ip):
+            for domain in self._get_domains_for_ip(ip):
+                if _domain_matches(domain, domain_set):
+                    return True
+        return False
+
+    def _is_local_ip(self, ip):
+        """Is this address one of ours, or on a private network?"""
+        if not ip:
+            return False
+        if self.net_env:
+            if ip in getattr(self.net_env, 'local_ips', ()) or \
+               ip in getattr(self.net_env, 'auto_whitelist_ips', ()):
+                return True
+        try:
+            addr = ipaddress.ip_address(ip)
+        except ValueError:
+            return False
+        return addr.is_private or addr.is_loopback or addr.is_link_local
+
+    def _is_outbound(self, pkt_info):
+        """True when traffic leaves a local host for an external destination."""
+        return self._is_local_ip(pkt_info.src_ip) and not self._is_local_ip(pkt_info.dst_ip)
 
     def _get_domains_for_ip(self, ip):
         """Look up what domains have been associated with an IP via DNS."""
