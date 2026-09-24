@@ -107,6 +107,13 @@ DEFAULT_CONFIG = {
         # Replaces beaconing_tolerance, which gated on coefficient of variation and
         # so only caught beacons with no jitter at all.
         "beaconing_score_threshold": 0.75,
+        # Failed DNS lookups from one host in 60s before a DGA burst is reported.
+        # Chrome probes with 3 at startup and Windows suffix search multiplies a
+        # single failure, so this sits well clear of both.
+        "dns_nxdomain_threshold": 15,
+        # Distinct addresses for one name inside 15 minutes, with a short TTL,
+        # before fast-flux is reported.
+        "dns_flux_address_threshold": 8,
         "known_bad_ports": [4444, 5555, 6666, 1337, 31337, 12345, 65535],
         # JA3/JA4 client fingerprints to alert on. Public threat intel publishes
         # these for C2 frameworks; they match on encrypted traffic.

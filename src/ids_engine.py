@@ -14,6 +14,7 @@ import itertools
 from collections import Counter, defaultdict, deque
 from datetime import datetime
 
+from src.dns_analysis import DnsResponseMonitor
 from src.ipcache import is_private
 
 logger = logging.getLogger("NetSentinel.IDS")
@@ -310,6 +311,10 @@ class IDSEngine:
         # Distinct JA4 fingerprints observed, for the dashboard and for spotting a
         # client stack that has never been seen on this network before.
         self._ja4_seen = {}
+
+        # DNS response analysis: NXDOMAIN bursts (DGA) and fast-flux hosting.
+        # Queries alone cannot see either — both live in the answer section.
+        self.dns_monitor = DnsResponseMonitor(config)
 
         # Statistics
         self.alerts_generated = 0
@@ -709,6 +714,17 @@ class IDSEngine:
                     },
                     category="Threat Intelligence"
                 ))
+
+        # === Rule 2c: DNS response analysis (DGA bursts, fast-flux) ===
+        if pkt_info.dns_rcode >= 0 and pkt_info.dns_query:
+            for finding in self.dns_monitor.observe_response(
+                    pkt_info.dst_ip or pkt_info.src_ip,
+                    pkt_info.dns_query,
+                    pkt_info.dns_rcode,
+                    pkt_info.dns_answers,
+                    pkt_info.dns_ttl,
+                    pkt_info.timestamp):
+                alerts.append(self._alert_from_dns_finding(finding, pkt_info))
 
         # === Rule 3: Blacklisted IP ===
         if pkt_info.src_ip in self.blacklist_ips:
@@ -1168,6 +1184,45 @@ class IDSEngine:
         """True when traffic leaves a local host for an external destination."""
         return self._is_local_ip(pkt_info.src_ip) and not self._is_local_ip(pkt_info.dst_ip)
 
+    def _alert_from_dns_finding(self, finding, pkt_info):
+        """Turn a DnsResponseMonitor finding into an alert."""
+        if finding['type'] == 'nxdomain_burst':
+            return self._create_alert(
+                "DNS-NXDOMAIN-BURST", finding['severity'],
+                "Burst of Failed DNS Lookups (possible DGA)",
+                finding['description'], pkt_info,
+                evidence={
+                    'requesting_ip': finding['src_ip'],
+                    'failed_lookups': finding['failure_count'],
+                    'window_seconds': finding['window_sec'],
+                    'distinct_domains': finding['distinct_domains'],
+                    'machine_generated_ratio': finding['algorithmic_ratio'],
+                    'mean_name_entropy': finding['mean_entropy'],
+                    'sample_domains': finding['sample_domains'],
+                    'process': pkt_info.process_name or 'Unknown',
+                    'description': finding['description'],
+                    'recommendation': finding['recommendation'],
+                },
+                category="Suspicious DNS")
+
+        if finding['type'] == 'fast_flux':
+            return self._create_alert(
+                "DNS-FAST-FLUX", finding['severity'],
+                "Fast-Flux Hosting Detected",
+                finding['description'], pkt_info,
+                evidence={
+                    'domain': finding['domain'],
+                    'distinct_addresses': finding['address_count'],
+                    'minimum_ttl_seconds': finding['min_ttl'],
+                    'window_seconds': finding['window_sec'],
+                    'sample_addresses': finding['sample_addresses'],
+                    'process': pkt_info.process_name or 'Unknown',
+                    'description': finding['description'],
+                    'recommendation': finding['recommendation'],
+                },
+                category="Suspicious DNS")
+        return None
+
     def _get_domains_for_ip(self, ip):
         """Look up what domains have been associated with an IP via DNS."""
         return self._ip_to_domains.get(ip, set())
@@ -1278,6 +1333,7 @@ class IDSEngine:
             'arp_entries': len(self._arp_table),
             'threat_intel_hits': self.threat_intel_hits,
             'tls_fingerprints_seen': len(self._ja4_seen),
+            'dns': self.dns_monitor.get_stats(),
         }
         if self.threat_intel:
             stats['threat_intel'] = self.threat_intel.get_stats()

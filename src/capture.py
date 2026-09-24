@@ -39,6 +39,7 @@ class PacketInfo:
         'dns_query', 'dns_response', 'is_encrypted', 'raw_summary',
         'src_mac', 'dst_mac', 'process_name', 'process_pid',
         'tls_sni', 'tls_ja3', 'tls_ja4', 'tls_version',
+        'dns_rcode', 'dns_ttl', 'dns_answers',
         '_raw_payload',
     ]
 
@@ -67,6 +68,12 @@ class PacketInfo:
         self.tls_ja3 = ""
         self.tls_ja4 = ""
         self.tls_version = ""
+        # DNS response detail. Responses previously carried only a single rdata
+        # string and no question name, so nothing could correlate an answer with
+        # what was asked or notice that it failed.
+        self.dns_rcode = -1        # -1 = not a response; 0 = NOERROR, 3 = NXDOMAIN
+        self.dns_ttl = -1          # Lowest TTL across the answers
+        self.dns_answers = ()      # Every rdata in the answer section
         self._raw_payload = None
 
     def to_dict(self):
@@ -256,6 +263,33 @@ _TLS_PORTS = frozenset({
 })
 
 
+def _iter_dns_records(section, count):
+    """
+    Yield the records in a DNS section.
+
+    Scapy changed the representation: 2.7 exposes an iterable list, while older
+    releases chain records through .payload. Supporting only the chain silently
+    returned just the first answer on 2.7 — enough to look like it worked.
+    """
+    if section is None:
+        return
+
+    # Scapy 2.7 wraps the section in a list subclass that ALSO proxies attribute
+    # access to its first element, so `hasattr(section, 'rdata')` is true either
+    # way and cannot be used to tell the two representations apart. isinstance
+    # against list can.
+    if isinstance(section, list):
+        yield from section
+        return
+
+    record = section
+    for _ in range(max(int(count or 0), 1)):
+        if record is None or type(record).__name__ == 'NoPayload':
+            return
+        yield record
+        record = getattr(record, 'payload', None)
+
+
 class CaptureEngine:
     """
     Core packet capture engine.
@@ -345,6 +379,45 @@ class CaptureEngine:
         except Exception as e:
             logger.error("Could not auto-detect interface: %s", e)
             return None
+
+    @staticmethod
+    def _extract_dns(dns, info):
+        """
+        Pull the question and, for responses, the full answer detail.
+
+        The question name is recorded for responses too. Without it an answer
+        cannot be tied to what was asked, which is what NXDOMAIN-burst and
+        fast-flux analysis need.
+        """
+        try:
+            if dns.qd is not None:
+                qname = getattr(dns.qd, 'qname', b'')
+                if qname:
+                    info.dns_query = qname.decode('utf-8', errors='ignore').rstrip('.').lower()
+
+            if dns.qr != 1:
+                return
+
+            info.dns_rcode = int(dns.rcode)
+
+            answers = []
+            ttls = []
+            for record in _iter_dns_records(dns.an, getattr(dns, 'ancount', 0)):
+                rdata = getattr(record, 'rdata', None)
+                if rdata is not None:
+                    answers.append(rdata.decode('utf-8', errors='ignore').rstrip('.')
+                                   if isinstance(rdata, bytes) else str(rdata))
+                ttl = getattr(record, 'ttl', None)
+                if ttl is not None:
+                    ttls.append(int(ttl))
+
+            info.dns_answers = tuple(answers)
+            if answers:
+                info.dns_response = answers[0]
+            if ttls:
+                info.dns_ttl = min(ttls)
+        except Exception as e:
+            logger.debug("DNS extraction error: %s", e)
 
     @staticmethod
     def _transport_payload(packet):
@@ -456,14 +529,7 @@ class CaptureEngine:
 
         # DNS layer
         if packet.haslayer(DNS):
-            try:
-                dns = packet[DNS]
-                if dns.qr == 0 and dns.qd:
-                    info.dns_query = dns.qd.qname.decode('utf-8', errors='ignore').rstrip('.')
-                elif dns.qr == 1 and dns.an:
-                    info.dns_response = str(dns.an.rdata) if hasattr(dns.an, 'rdata') else ""
-            except Exception:
-                pass
+            self._extract_dns(packet[DNS], info)
 
         # Process attribution. The expensive part (enumerating sockets) happens on a
         # background thread; this is a dict lookup, so every packet can be attributed
