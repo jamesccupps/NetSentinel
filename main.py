@@ -39,7 +39,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger("NetSentinel")
 
-APP_VERSION = "1.6.0"
+APP_VERSION = "1.7.0"
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 
 

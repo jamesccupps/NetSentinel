@@ -1,5 +1,78 @@
 # NetSentinel Changelog
 
+## v1.7.0 — Detection that survives evasion, and a sensor you can deploy
+
+Three items the v1.6.0 review named as next. One of them, run for real, found
+that packet capture had been broken on main for several releases.
+
+**384 unit tests** (up from 280) plus 14 integration checks. Coverage 45% → 48%.
+
+### Beaconing that jitter does not defeat
+
+The old rule flagged a destination when `std(intervals)/mean(intervals)` fell
+below 0.05. Measured against synthetic beacons that catches a beacon with no
+jitter and almost nothing else — 5% at Cobalt Strike's default, 0% at Sliver's.
+Every mainstream C2 framework enables jitter, so it only ever caught naive
+scripts.
+
+`src/beaconing.py` scores three properties that survive jitter: Bowley skewness
+of the intervals (jitter is symmetric, human traffic is right-skewed), median
+absolute deviation scaled so random arrivals score zero, and payload-size
+consistency — weighted highest, because it is what separates a C2 check-in from
+an app that legitimately polls. 0%, 10%, 20%, 35% and 50% jitter now all score
+0.78-0.98 against a 0.75 threshold; Poisson arrivals, browsing and streaming
+score 0.
+
+It deliberately does not decide whether a beacon is malicious. NTP scores 0.90
+and should — it is a beacon. Separating the two needs context the scorer does
+not have, so eligibility is handled by the caller: globally routable
+destination, not a known polling service, not already beaconing during baseline
+learning. A test asserts NTP still scores high, so nobody later "fixes" the
+scorer to hide it.
+
+### DNS response analysis
+
+Only queries were inspected, and capture was discarding nearly everything a
+response carries: one rdata string, no rcode, no TTL, and no question name —
+so an answer could not even be tied to what was asked. Two bugs surfaced while
+fixing that: answers were walked through `record.payload`, but Scapy 2.7 exposes
+the section as a list subclass, so only the first answer was ever read; and the
+monitor seeded its prune timer from the wall clock while observations carry
+caller-supplied timestamps, so a PCAP replay would never have pruned.
+
+`src/dns_analysis.py` reports NXDOMAIN bursts (DGA) and fast-flux hosting. The
+benign cases drove the thresholds more than the malicious ones: Chrome issues
+three random lookups at startup to detect ISP hijacking, Windows multiplies one
+failure by its search suffixes, and CDNs answer with 60-second TTLs by design.
+So a burst needs 15 failures across 5+ distinct registrable domains in 60
+seconds, and a short TTL is only ever combined with address churn on the same
+name. The DGA name heuristic flags 0/20 realistic names and catches ~65% of
+generated ones.
+
+### Headless mode
+
+`python main.py --headless` runs the engine with no GUI and serves a read-only
+HTTP API — status, alerts, incidents, devices, and Prometheus metrics. It binds
+to localhost by default because the output contains captured credentials.
+
+### The regression that found
+
+Launching headless for real failed immediately:
+
+    Capture error: L2Socket.__init__() got an unexpected keyword argument 'snaplen'
+
+Wiring up `capture.snap_length` in v1.5.0 passed `snaplen=` to `sniff()`, which
+forwards unrecognised kwargs straight to the socket constructor. No Linux listen
+socket accepts it. **Packet capture had been dead on every start since that
+commit**, with the watchdog retrying ten times.
+
+No test caught it because none of them call `sniff()` — that needs a live
+interface. Twelve seconds of a real run found it. Options are now filtered
+against the socket's actual signature, and a `TypeError` sets a fatal flag so
+the watchdog stops retrying something restarting cannot fix.
+
+---
+
 ## v1.6.0 — Seeing encrypted traffic
 
 v1.5.0 fixed what was broken. This adds what the review identified as missing: the
