@@ -781,6 +781,37 @@ class TestReverseDnsNonBlocking(unittest.TestCase):
 
 
 # ══════════════════════════════════════════════════════════════════════
+# Verification verdicts must reach the alert
+# ══════════════════════════════════════════════════════════════════════
+class TestVerificationReachesTheAlert(unittest.TestCase):
+    """
+    verify_alert() did `evidence = alert.evidence if alert.evidence else {}`, which
+    rebinds to a *new* local dict whenever the alert has no evidence yet. The verdict
+    was then written to that local and thrown away, so any alert raised without
+    evidence silently lost its verification — despite the docstring promising it is
+    modified in place.
+    """
+
+    def test_verdict_is_attached_to_an_evidence_free_alert(self):
+        from src.alert_verify import AlertVerifier
+        verifier = AlertVerifier(fresh_config())
+        alert = Alert(rule_id='PORT-SCAN', severity='HIGH', title='t', description='d')
+        self.assertEqual(alert.evidence, {})
+        verifier.verify_alert(alert)
+        self.assertIn('alert_verification', alert.evidence)
+        self.assertIn('verdict', alert.evidence['alert_verification'])
+
+    def test_existing_evidence_is_preserved(self):
+        from src.alert_verify import AlertVerifier
+        verifier = AlertVerifier(fresh_config())
+        alert = Alert(rule_id='PORT-SCAN', severity='HIGH', title='t', description='d',
+                      evidence={'scanner_ip': '203.0.113.9'})
+        verifier.verify_alert(alert)
+        self.assertEqual(alert.evidence['scanner_ip'], '203.0.113.9')
+        self.assertIn('alert_verification', alert.evidence)
+
+
+# ══════════════════════════════════════════════════════════════════════
 # R10 — dead state actually removed
 # ══════════════════════════════════════════════════════════════════════
 class TestDeadStateRemoved(unittest.TestCase):

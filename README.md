@@ -4,7 +4,7 @@
 
 NetSentinel is a desktop network security application that monitors all traffic on your machine, detects anomalies using machine learning, and alerts you to suspicious activity in real time. It learns your network automatically — no configuration required.
 
-![Python](https://img.shields.io/badge/python-3.10+-blue) ![Platform](https://img.shields.io/badge/platform-Windows-lightgrey) ![License](https://img.shields.io/badge/license-MIT-green) ![Tests](https://img.shields.io/badge/tests-144%20unit%20%2B%2014%20integration-brightgreen)
+![Python](https://img.shields.io/badge/python-3.10+-blue) ![Platform](https://img.shields.io/badge/platform-Windows-lightgrey) ![License](https://img.shields.io/badge/license-MIT-green) ![Tests](https://img.shields.io/badge/tests-190%20unit%20%2B%2014%20integration-brightgreen)
 
 ## Key Features
 
@@ -179,11 +179,14 @@ Worth knowing before you rely on a detector:
 ## Testing
 
 ```bash
-# Everything (144 tests)
+# Everything (190 tests)
 python -m unittest discover -s . -p "test_*.py"
 
 # Regression tests for the v1.5.0 audit fixes
 python -m unittest test_regressions -v
+
+# Coverage for modules the original suite never reached
+python -m unittest test_coverage -v
 
 # End-to-end integration checks (real code paths, no capture required)
 python tools/integration_check.py

@@ -143,7 +143,13 @@ class AlertVerifier:
         self.stats['total_verified'] += 1
 
         rule = alert.rule_id
-        evidence = alert.evidence if alert.evidence else {}
+        # Bind the alert's own dict, never a fresh one. `alert.evidence if
+        # alert.evidence else {}` rebinds to a new local whenever evidence is empty,
+        # so the verdict written below never reached the alert — silently dropping
+        # verification for every alert raised without evidence.
+        if alert.evidence is None:
+            alert.evidence = {}
+        evidence = alert.evidence
 
         try:
             if rule == 'THREAT-INTEL-IP':

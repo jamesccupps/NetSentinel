@@ -26,13 +26,16 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           # pyinstaller is a build-time tool, not needed to run the tests
-          pip install scapy psutil scikit-learn numpy cryptography
+          pip install scapy psutil scikit-learn numpy cryptography coverage
 
       - name: Unit and regression tests
-        run: python -m unittest discover -s . -p "test_*.py" -v
+        run: python -m coverage run --source=src -m unittest discover -s . -p "test_*.py" -v
 
       - name: Integration check
         run: python tools/integration_check.py
+
+      - name: Coverage report
+        run: python -m coverage report --sort=cover
 
   lint:
     runs-on: ubuntu-latest
