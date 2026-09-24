@@ -17,9 +17,11 @@ try:
         sniff, conf, get_if_list, get_if_addr,
         IP, IPv6, TCP, UDP, ICMP, DNS, ARP, Raw, Ether
     )
+    from scapy.packet import NoPayload
     SCAPY_AVAILABLE = True
 except ImportError:
     SCAPY_AVAILABLE = False
+    NoPayload = ()
     logger.warning("Scapy not available. Install with: pip install scapy")
 
 try:
@@ -345,6 +347,26 @@ class CaptureEngine:
             return None
 
     @staticmethod
+    def _transport_payload(packet):
+        """
+        The bytes carried above TCP/UDP, however Scapy chose to dissect them.
+
+        `packet.haslayer(Raw)` is only true when Scapy had no dissector for the
+        payload. With scapy.layers.tls loaded — which `from scapy.all import *`
+        does — port-443 traffic dissects into a TLS layer instead, and DNS, and
+        anything else Scapy recognises. Keying off Raw therefore silently reported
+        payload_size = 0 for every one of those, which is most of a real capture.
+        """
+        transport = packet.getlayer(TCP) or packet.getlayer(UDP)
+        if transport is None:
+            return b''
+        payload = transport.payload
+        if payload is None or isinstance(payload, NoPayload):
+            return b''
+        original = getattr(payload, 'original', None)
+        return original if original else bytes(payload)
+
+    @staticmethod
     def _raw_bytes(packet):
         """
         The packet's wire bytes, without asking Scapy to rebuild it.
@@ -362,6 +384,7 @@ class CaptureEngine:
         info.timestamp = time.time()
         raw = self._raw_bytes(packet)
         info.length = len(raw)
+        payload = b''
 
         # Ethernet layer
         if packet.haslayer(Ether):
@@ -380,8 +403,8 @@ class CaptureEngine:
                 info.dst_port = packet[TCP].dport
                 flags = packet[TCP].flags
                 info.flags = str(flags)
-                if packet.haslayer(Raw):
-                    info.payload_size = len(packet[Raw].load)
+                payload = self._transport_payload(packet)
+                info.payload_size = len(payload)
                 if info.dst_port == 443 or info.src_port == 443:
                     info.is_encrypted = True
 
@@ -389,8 +412,8 @@ class CaptureEngine:
                 info.protocol = "UDP"
                 info.src_port = packet[UDP].sport
                 info.dst_port = packet[UDP].dport
-                if packet.haslayer(Raw):
-                    info.payload_size = len(packet[Raw].load)
+                payload = self._transport_payload(packet)
+                info.payload_size = len(payload)
 
             elif packet.haslayer(ICMP):
                 info.protocol = "ICMP"
@@ -408,16 +431,16 @@ class CaptureEngine:
                 info.dst_port = packet[TCP].dport
                 flags = packet[TCP].flags
                 info.flags = str(flags)
-                if packet.haslayer(Raw):
-                    info.payload_size = len(packet[Raw].load)
+                payload = self._transport_payload(packet)
+                info.payload_size = len(payload)
                 if info.dst_port == 443 or info.src_port == 443:
                     info.is_encrypted = True
             elif packet.haslayer(UDP):
                 info.protocol = "UDP"
                 info.src_port = packet[UDP].sport
                 info.dst_port = packet[UDP].dport
-                if packet.haslayer(Raw):
-                    info.payload_size = len(packet[Raw].load)
+                payload = self._transport_payload(packet)
+                info.payload_size = len(payload)
             elif packet.haslayer(ICMP):
                 info.protocol = "ICMPv6"
             else:
@@ -455,29 +478,20 @@ class CaptureEngine:
         # to scan for credentials. This is a tiny fraction of traffic.
         if (info.payload_size > 0 and
             (info.dst_port in _CREDENTIAL_PORTS or info.src_port in _CREDENTIAL_PORTS)):
-            try:
-                if packet.haslayer(Raw):
-                    info._raw_payload = bytes(packet[Raw].load)
-            except Exception:
-                pass
+            info._raw_payload = payload
 
         # TLS handshake inspection. Only the first packets of a connection carry a
         # ClientHello, and looks_like_tls_handshake() rejects everything else in four
         # byte comparisons, so this costs almost nothing on established connections.
         elif (info.payload_size > 0 and info.protocol == 'TCP'
-                and (info.dst_port in _TLS_PORTS or info.src_port in _TLS_PORTS)):
-            try:
-                if packet.haslayer(Raw):
-                    payload = bytes(packet[Raw].load)
-                    if looks_like_tls_handshake(payload):
-                        hello = parse_client_hello(payload)
-                        if hello:
-                            info.tls_sni = hello['sni'] or ''
-                            info.tls_ja3 = hello['ja3']
-                            info.tls_ja4 = hello['ja4']
-                            info.tls_version = hello['version']
-            except Exception as e:
-                logger.debug("TLS inspection error: %s", e)
+                and (info.dst_port in _TLS_PORTS or info.src_port in _TLS_PORTS)
+                and looks_like_tls_handshake(payload)):
+            hello = parse_client_hello(payload)
+            if hello:
+                info.tls_sni = hello['sni'] or ''
+                info.tls_ja3 = hello['ja3']
+                info.tls_ja4 = hello['ja4']
+                info.tls_version = hello['version']
 
         # QUIC rides UDP/443 and would otherwise be indistinguishable from any other
         # UDP traffic — no flags, and is_encrypted left False.

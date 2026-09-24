@@ -883,3 +883,95 @@ class TestNoPacketRebuild(unittest.TestCase):
         finally:
             type(packet).build = original_build
         self.assertEqual(calls, [], "capture path must not re-serialise the packet")
+
+
+# ══════════════════════════════════════════════════════════════════════
+# Payload extraction must not depend on how Scapy dissected the packet
+# ══════════════════════════════════════════════════════════════════════
+class TestPayloadExtraction(unittest.TestCase):
+    """
+    Extraction keyed off packet.haslayer(Raw), which is only true when Scapy had
+    no dissector for the payload. `from scapy.all import *` loads the TLS and DNS
+    layers, so on a real capture port-443 and port-53 traffic dissects into TLS
+    and DNS layers instead — and payload_size silently read 0 for both, which is
+    most of a real capture.
+
+    Only dissected packets show this. Packets built in memory keep a Raw layer,
+    which is why the unit tests never caught it and an end-to-end run did.
+    """
+
+    def setUp(self):
+        if not SCAPY_REAL:
+            self.skipTest('real scapy unavailable')
+        from src.capture import CaptureEngine
+        self.engine = CaptureEngine(fresh_config())
+
+    @staticmethod
+    def _dissect(built):
+        from scapy.all import Ether
+        return Ether(bytes(built))
+
+    def _client_hello(self, host=b'secure.example.com'):
+        from scapy.layers.tls.record import TLS
+        from scapy.layers.tls.handshake import TLSClientHello
+        from scapy.layers.tls.extensions import (
+            TLS_Ext_ServerName, ServerName, TLS_Ext_SupportedVersion_CH)
+        ch = TLSClientHello(ciphers=[0x1301, 0xc02f], ext=[
+            TLS_Ext_ServerName(servernames=[ServerName(servername=host)]),
+            TLS_Ext_SupportedVersion_CH(versions=['TLS 1.3'])])
+        return bytes(TLS(msg=[ch]))
+
+    def test_tls_payload_size_is_not_zero_when_dissected(self):
+        from scapy.all import Ether, IP, TCP, Raw
+        built = Ether() / IP() / TCP(sport=5, dport=443, flags='PA') / Raw(
+            load=self._client_hello())
+        dissected = self._dissect(built)
+        self.assertFalse(dissected.haslayer(Raw),
+                         "precondition: scapy should dissect this into TLS")
+        info = self.engine._extract_packet_info(dissected)
+        self.assertGreater(info.payload_size, 0)
+
+    def test_dns_payload_size_is_not_zero_when_dissected(self):
+        from scapy.all import Ether, IP, UDP, DNS, DNSQR
+        built = Ether() / IP() / UDP(sport=5, dport=53) / DNS(rd=1, qd=DNSQR(qname='a.com'))
+        info = self.engine._extract_packet_info(self._dissect(built))
+        self.assertGreater(info.payload_size, 0)
+
+    def test_sni_is_extracted_from_a_dissected_packet(self):
+        """The end-to-end case: this is how capture actually delivers packets."""
+        from scapy.all import Ether, IP, TCP, Raw
+        built = Ether() / IP() / TCP(sport=5, dport=443, flags='PA') / Raw(
+            load=self._client_hello())
+        info = self.engine._extract_packet_info(self._dissect(built))
+        self.assertEqual(info.tls_sni, 'secure.example.com')
+        self.assertTrue(info.tls_ja4)
+
+    def test_both_dissection_modes_agree(self):
+        from scapy.all import Ether, IP, TCP, Raw
+        built = Ether() / IP() / TCP(sport=5, dport=443, flags='PA') / Raw(
+            load=self._client_hello())
+        a = self.engine._extract_packet_info(built)
+        b = self.engine._extract_packet_info(self._dissect(built))
+        self.assertEqual(a.payload_size, b.payload_size)
+        self.assertEqual(a.tls_sni, b.tls_sni)
+        self.assertEqual(a.tls_ja4, b.tls_ja4)
+
+    def test_credential_payload_still_reaches_forensics(self):
+        from scapy.all import Ether, IP, TCP, Raw
+        built = Ether() / IP() / TCP(sport=5, dport=21, flags='PA') / Raw(
+            load=b'PASS hunter2\r\n')
+        info = self.engine._extract_packet_info(self._dissect(built))
+        self.assertEqual(info._raw_payload, b'PASS hunter2\r\n')
+
+    def test_packet_with_no_payload_reports_zero(self):
+        from scapy.all import Ether, IP, TCP
+        built = Ether() / IP() / TCP(sport=5, dport=443, flags='A')
+        info = self.engine._extract_packet_info(self._dissect(built))
+        self.assertEqual(info.payload_size, 0)
+        self.assertIsNone(info._raw_payload)
+
+    def test_non_transport_packets_are_safe(self):
+        from scapy.all import Ether, IP, ICMP, ARP
+        for built in (Ether() / IP() / ICMP(), Ether() / ARP()):
+            info = self.engine._extract_packet_info(self._dissect(built))
+            self.assertEqual(info.payload_size, 0)

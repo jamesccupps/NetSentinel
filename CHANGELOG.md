@@ -5,7 +5,7 @@
 v1.5.0 fixed what was broken. This adds what the review identified as missing: the
 ability to say anything useful about the ~85% of traffic that is encrypted.
 
-**273 unit tests** (up from 190) plus 14 integration checks. Coverage 43% → 45%.
+**280 unit tests** (up from 190) plus 14 integration checks. Coverage 43% → 45%.
 
 ### TLS ClientHello inspection
 
@@ -77,6 +77,25 @@ difference: benchmarking one packet object in a loop lets Scapy cache the built
 bytes after the first call. Only fresh objects — what the capture thread actually
 receives — show the cost. A test hooks `build()` and fails if the capture path calls
 it at all.
+
+### Payload extraction no longer depends on how Scapy dissected the packet
+
+Found by an end-to-end run after the TLS work, and it turned out to predate it.
+
+`packet.haslayer(Raw)` is only true when Scapy had *no* dissector for the payload.
+`from scapy.all import *` loads the TLS and DNS layers, so on a real capture
+port-443 traffic dissects into a TLS layer and port-53 into a DNS layer — and the
+extraction that keyed off `Raw` therefore reported **payload_size = 0 for both**.
+That is most of a real capture, and it silently starved the exfiltration byte
+counting and the `payload_ratio` ML feature.
+
+The payload is now read from the TCP/UDP layer directly, which works however Scapy
+chose to dissect it.
+
+Only *dissected* packets show this: a packet built in memory keeps its Raw layer,
+which is exactly why 273 unit tests passed over it and a smoke test against
+wire-format frames caught it in one line. Seven regression tests now cover both
+dissection modes.
 
 ### Test isolation
 
