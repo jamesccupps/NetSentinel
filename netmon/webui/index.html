@@ -1,0 +1,182 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>netmon</title>
+<link rel="stylesheet" href="/static/style.css">
+<link rel="icon" href="data:,">
+</head>
+<body data-token="{{TOKEN}}" data-editable="{{EDITABLE}}">
+
+<header>
+  <h1>netmon</h1>
+  <span class="site" id="site-name">loading…</span>
+  <span class="spacer"></span>
+  <span class="note" id="analysed"></span>
+  <button class="ghost" id="reload">Reload from disk</button>
+</header>
+
+<nav>
+  <button data-tab="findings" class="active">Findings</button>
+  <button data-tab="devices">Devices</button>
+  <button data-tab="rules">Rules</button>
+  <button data-tab="filter">Capture filter</button>
+  <button data-tab="profile">Profile</button>
+</nav>
+
+<main>
+
+<!-- ─── Findings ─────────────────────────────────────────────────────── -->
+<section id="findings" class="active">
+  <div class="cards" id="finding-cards"></div>
+  <div class="toolbar">
+    <label>Severity
+      <select id="f-severity">
+        <option value="info">all</option>
+        <option value="low">low and above</option>
+        <option value="medium">medium and above</option>
+        <option value="high">high and above</option>
+        <option value="critical">critical only</option>
+      </select>
+    </label>
+    <label>Tier
+      <select id="f-tier">
+        <option value="">all</option>
+        <option value="push">needs attention now</option>
+        <option value="digest">daily report</option>
+      </select>
+    </label>
+    <label>Rule <select id="f-rule"><option value="">all</option></select></label>
+    <input type="text" id="f-search" placeholder="filter by device or text…">
+  </div>
+  <div id="finding-list"></div>
+</section>
+
+<!-- ─── Devices ──────────────────────────────────────────────────────── -->
+<section id="devices">
+  <p class="note">
+    Every device in the profile, whether or not anything was found. A list that
+    shows only problems cannot tell you that something has gone quiet.
+  </p>
+  <div class="toolbar">
+    <input type="text" id="d-search" placeholder="name, address, MAC, role…">
+    <label><input type="checkbox" id="d-only-findings"> only devices with findings</label>
+  </div>
+  <table id="device-table">
+    <thead><tr>
+      <th>Device</th><th>Role</th><th>Address</th><th>VLAN</th>
+      <th>Zone</th><th>Findings</th>
+    </tr></thead>
+    <tbody></tbody>
+  </table>
+
+  <h3>VLANs</h3>
+  <table id="vlan-table">
+    <thead><tr>
+      <th>ID</th><th>Name</th><th>Subnet</th><th>Zone</th><th>Gateway</th><th></th>
+    </tr></thead>
+    <tbody></tbody>
+  </table>
+
+  <div id="unprofiled-wrap" style="display:none">
+    <h3>Seen but not in the profile</h3>
+    <p class="note">Identify these and add them, or find out why they are here.</p>
+    <pre class="out" id="unprofiled"></pre>
+  </div>
+</section>
+
+<!-- ─── Rules ────────────────────────────────────────────────────────── -->
+<section id="rules">
+  <div class="toolbar">
+    <input type="text" id="r-search" placeholder="filter rules…">
+    <span class="spacer"></span>
+    <button class="ghost" id="r-edit-toggle">Edit source</button>
+  </div>
+  <div id="rule-list"></div>
+  <div id="rule-editor" style="display:none">
+    <p class="note">
+      Checked before it is written. An invalid rule file would stop the monitor
+      starting, and the previous version is kept alongside as <code>.bak</code>.
+    </p>
+    <textarea id="rule-source" spellcheck="false"></textarea>
+    <div class="toolbar">
+      <button class="action" id="r-save">Validate and save</button>
+      <span id="r-status" class="note"></span>
+    </div>
+  </div>
+</section>
+
+<!-- ─── Capture filter ───────────────────────────────────────────────── -->
+<section id="filter">
+  <div class="grid2">
+    <div>
+      <h3>Build</h3>
+      <p class="note">
+        BPF handles 802.1Q badly enough that hand-written filters are usually
+        wrong in ways that fail silently — they capture less than you think, or
+        more, and you find out later. This builds the forms that are known to
+        work and never emits the two that do not.
+      </p>
+      <div class="toolbar"><label>VLANs
+        <input type="text" id="cf-vlans" placeholder="5,6,20 — blank for all"></label></div>
+      <div class="toolbar"><label>
+        <input type="checkbox" id="cf-untagged" checked> include untagged frames
+        <span class="note">(management traffic usually is)</span></label></div>
+      <div class="toolbar"><label>Drop hosts
+        <input type="text" id="cf-drop-hosts" placeholder="10.0.30.10, 10.0.30.0/24"></label></div>
+      <div class="toolbar"><label>Drop ports
+        <input type="text" id="cf-drop-ports" placeholder="554"></label></div>
+      <div class="toolbar">
+        <label>Protocol
+          <select id="cf-protocol">
+            <option value="">any</option><option>tcp</option><option>udp</option>
+            <option>icmp</option><option>arp</option>
+          </select></label>
+        <label>Ports <input type="text" id="cf-ports" placeholder="47808"></label>
+      </div>
+    </div>
+    <div>
+      <h3>Result</h3>
+      <p class="note">tcpdump / libpcap</p>
+      <pre class="out" id="cf-bpf">—</pre>
+      <p class="note">Wireshark display filter — tags are transparent here, so
+        none of the care above applies</p>
+      <pre class="out" id="cf-wireshark">—</pre>
+      <p class="note" id="cf-note"></p>
+    </div>
+  </div>
+
+  <h3>Verify it</h3>
+  <p class="note">
+    <code>ether[12:2] != 0x8100</code> is reported not to exclude tagged frames
+    under Npcap, where it does under libpcap. Rather than trust either report,
+    take a short unfiltered capture on the machine that will run this and check
+    what the filter actually keeps.
+  </p>
+  <div class="toolbar">
+    <input type="text" id="cf-pcap" placeholder="/path/to/sample.pcap on this machine">
+    <button class="action" id="cf-verify">Run it over that capture</button>
+  </div>
+  <pre class="out" id="cf-result" style="display:none"></pre>
+</section>
+
+<!-- ─── Profile ──────────────────────────────────────────────────────── -->
+<section id="profile">
+  <p class="note">
+    Everything site-specific lives here. Keep it out of version control: a
+    completed profile is a map of your network, and that is the document an
+    attacker would most like to be handed.
+  </p>
+  <div id="profile-summary" class="cards"></div>
+  <textarea id="profile-source" spellcheck="false"></textarea>
+  <div class="toolbar">
+    <button class="action" id="p-save">Validate and save</button>
+    <span id="p-status" class="note"></span>
+  </div>
+</section>
+
+</main>
+<script src="/static/app.js"></script>
+</body>
+</html>

@@ -429,6 +429,28 @@ class RuleSet:
         return iter(self.rules)
 
 
+def _ensure_handlers():
+    """
+    Make sure the stateful handlers are registered before rules are validated.
+
+    Imported here rather than at module scope because netmon.handlers imports
+    this module; by the time load_rules is called, this one is fully
+    initialised and the cycle resolves.
+
+    Doing it here rather than in each entry point is deliberate. Leaving it to
+    the caller means a program that happens to import netmon.handlers for some
+    other reason works, and one that does not fails at startup with "no handler
+    named overlapping_ip" — a bug that reaches whichever entry point nobody
+    tried, which is how it was found.
+    """
+    if _HANDLERS:
+        return
+    try:
+        import netmon.handlers                        # noqa: F401
+    except ImportError as e:
+        logger.warning('stateful rule handlers unavailable: %s', e)
+
+
 def load_rules(path):
     """
     Load rules from a YAML file, or every *.yaml in a directory.
@@ -437,6 +459,7 @@ def load_rules(path):
     has added, loaded in sorted order so behaviour does not depend on the
     filesystem.
     """
+    _ensure_handlers()
     paths = []
     if os.path.isdir(path):
         paths = sorted(os.path.join(path, name) for name in os.listdir(path)
@@ -488,14 +511,6 @@ def _main(argv=None):
     args = parser.parse_args(argv)
 
     logging.basicConfig(level=logging.WARNING, format='%(levelname)s: %(message)s')
-
-    # Importing the handlers registers them; without it every stateful rule
-    # fails validation for want of a handler that does in fact exist.
-    try:
-        import netmon.handlers                        # noqa: F401
-    except ImportError as e:
-        print(f'could not load stateful handlers: {e}')
-        return 1
 
     try:
         rules = load_rules(args.path)
