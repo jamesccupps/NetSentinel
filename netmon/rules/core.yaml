@@ -168,8 +168,8 @@
     approved_remote_access: true
   device: src_name
   key: "{watched_name}"
-  describe: "{src_name} ({src_ip}) contacted {watched_name} — {sni}"
-  evidence: [sni, dst_ip, dst_port, watched_name]
+  describe: "{src_name} ({src_ip}) contacted {watched_name} — {name_seen}"
+  evidence: [name_seen, dst_ip, dst_port, watched_name]
   escalate:
     when:
       src_zone: [ot, restricted, management]
@@ -192,7 +192,7 @@
   device: src_name
   key: "{dst_ip}:{dst_port}"
   describe: "{src_name} opened a tunnel to {dst_ip}:{dst_port}"
-  evidence: [dst_ip, dst_port, protocol, sni]
+  evidence: [dst_ip, dst_port, protocol, name_seen]
   escalate:
     when: {src_zone: [ot, restricted]}
     severity: high

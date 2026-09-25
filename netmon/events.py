@@ -232,8 +232,13 @@ def enrich(event, profile, now=None):
     src = profile.identify(mac=event.src_mac, ip=event.src_ip)
     dst = profile.identify(mac=event.dst_mac, ip=event.dst_ip)
 
-    event.fields.setdefault('src_name', src.name)
-    event.fields.setdefault('dst_name', dst.name)
+    # A name the source supplied wins, but only if it is actually a name.
+    # setdefault would let an empty column beat the profile's real name, which
+    # is how a known controller renders as "?" in an alert.
+    if not str(event.fields.get('src_name') or '').strip():
+        event.fields['src_name'] = src.name
+    if not str(event.fields.get('dst_name') or '').strip():
+        event.fields['dst_name'] = dst.name
     event.fields['src_role'] = src.role
     event.fields['dst_role'] = dst.role
     event.fields['src_known'] = src.mac in profile.devices
@@ -307,6 +312,15 @@ def enrich(event, profile, now=None):
 
     sensor_macs = getattr(profile, 'sensor_macs', set())
     event.fields['is_sensor_mac'] = bool(sensor_macs) and event.src_mac in sensor_macs
+
+    # Sources disagree about where a name lands: a TLS parser fills `sni`, a
+    # flow export fills `query`, a DNS parser fills both. One resolved field
+    # means a rule's description reads the same whichever produced the event,
+    # instead of rendering "?" for half of them.
+    event.fields['name_seen'] = next(
+        (str(event.fields[key]) for key in
+         ('sni', 'server_name', 'query', 'domain', 'hostname', 'url')
+         if str(event.fields.get(key) or '').strip()), '')
 
     watched = _matched_watched_name(event, profile.watched_names)
     event.fields['watched_name'] = watched

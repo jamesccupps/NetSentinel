@@ -85,13 +85,19 @@ def new_device(event, rule, state):
     tier = rule.tier if (not zones or zone in zones) else \
         rule.params.get('quiet_zones_tier', Tier.DIGEST)
 
+    # A flow export carries no VLAN tag, so fall back to the one the address
+    # resolves to rather than printing "VLAN None" at someone.
+    vlan = event.get('observed_vlan')
+    if vlan is None:
+        vlan = event.get('src_vlan')
+    where = f'VLAN {vlan}' if vlan is not None else 'the network'
+
     return _finding(
         rule, event, tier=tier, key=mac, device=mac,
-        description=f"{mac} appeared on VLAN {event.get('observed_vlan')} "
+        description=f"{mac} appeared on {where} "
                     f"as {event.src_ip or 'no address yet'}"
                     + (f" in the {zone} zone" if zone else ''),
-        evidence={'mac': mac, 'ip': event.src_ip, 'vlan': event.get('observed_vlan'),
-                  'zone': zone},
+        evidence={'mac': mac, 'ip': event.src_ip, 'vlan': vlan, 'zone': zone},
         next_check='Identify it physically, then add it to the profile or remove it.')
 
 
