@@ -41,9 +41,18 @@ the tag field explicitly on both branches, so no offset shifting happens anywher
 
 **Verify on your own capture setup.** The spec this was built from reports that
 `ether[12:2] != 0x8100` did not exclude tagged frames under Npcap on Windows,
-where it does under libpcap on Linux. `verify_filter()` runs a candidate filter
-over a sample capture and reports what it matched per VLAN, so the question can be
-settled on the hardware that will run it rather than argued from documentation.
+where it does under libpcap on Linux. That matters because the mixed form above
+has no alternative: `not vlan` cannot appear beside a tagged branch without
+shifting its offsets, so the ethertype test is the only way to write "untagged or
+these VLANs" in one expression.
+
+Untagged-*only* selection has no such constraint and uses `not vlan`, which is
+reported to work on both stacks.
+
+`diagnose_untagged()` runs both forms over a sample capture and says which one
+your stack honours; `verify_filter()` does the same for any candidate filter. Take
+a short unfiltered capture on the machine that will run the sensor and settle it
+there rather than arguing from documentation.
 
 **MAC terms need no `vlan` keyword.** `ether host`, `ether broadcast` and friends
 match tagged and untagged frames alike, because they read bytes before the tag.
@@ -83,7 +92,12 @@ def vlan_filter(vlan_ids, include_untagged=False):
 
     if not ids:
         # No VLAN selection: keep untagged only, or everything.
-        return f'ether[12:2] != {DOT1Q}' if include_untagged else ''
+        #
+        # `not vlan` rather than the ethertype test, because there is no tagged
+        # branch here for it to shift offsets in, and the ethertype test is the
+        # form reported not to exclude tagged frames under Npcap. Where both
+        # work, they are equivalent; where only one works, this is it.
+        return 'not vlan' if include_untagged else ''
 
     inner = ' or '.join(tag_field_expr(v) for v in ids)
     tagged = f'(ether[12:2] == {DOT1Q} and ({inner}))' if len(ids) > 1 \
@@ -432,3 +446,52 @@ def _main(argv=None):
 if __name__ == '__main__':
     import sys
     sys.exit(_main())
+
+
+def diagnose_untagged(pcap_path, tcpdump='tcpdump'):
+    """
+    Work out which untagged-selection form this capture stack honours.
+
+    The spec this was built from reports `ether[12:2] != 0x8100` failing to
+    exclude tagged frames under Npcap, where it works under libpcap. Rather than
+    take either report on faith, run both over a capture that contains tagged and
+    untagged frames and see.
+
+    Returns a dict per form with what it matched, plus `recommended` naming a form
+    that selected untagged frames and nothing else — or None if neither did, which
+    would mean the mixed-VLAN filters in this module cannot be trusted on this
+    stack and the capture should be split into two.
+    """
+    forms = {
+        'ethertype': f'ether[12:2] != {DOT1Q}',
+        'not-vlan': 'not vlan',
+    }
+    baseline = verify_filter('', pcap_path, tcpdump=tcpdump)
+    if 'error' in baseline:
+        return baseline
+    if not baseline['vlans_present']:
+        return {'error': 'sample contains no tagged frames, so it cannot '
+                         'distinguish the two forms'}
+    if not baseline['untagged_present']:
+        return {'error': 'sample contains no untagged frames, so it cannot '
+                         'confirm either form keeps them'}
+
+    results, recommended = {}, None
+    for name, expr in forms.items():
+        report = verify_filter(expr, pcap_path, tcpdump=tcpdump)
+        correct = ('error' not in report
+                   and not report.get('by_vlan')
+                   and report.get('untagged_matched') == baseline['untagged_present'])
+        results[name] = {
+            'filter': expr,
+            'untagged_kept': report.get('untagged_matched'),
+            'tagged_leaked': sum((report.get('by_vlan') or {}).values()),
+            'correct': correct,
+            'error': report.get('error'),
+        }
+        if correct and recommended is None:
+            recommended = name
+
+    results['recommended'] = recommended
+    results['mixed_form_trustworthy'] = results['ethertype']['correct']
+    return results

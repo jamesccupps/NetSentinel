@@ -333,6 +333,38 @@ watched_names:
   - transfer.sh
 
 
+# ─── Poisonable names ────────────────────────────────────────────────────────
+# Local names that must only ever be answered by the host that owns them.
+# Different from watched_names above, which are destinations nobody should be
+# reaching. These are names asked for *on* your network.
+#
+# WPAD is the canonical case: nothing owns it, Windows asks for it anyway, and
+# whoever answers first becomes everyone's proxy. The rest of the list should be
+# your own: decommissioned servers still being asked for, hostname typos that
+# half the site has cached, anything in the name-resolution table with no owner.
+
+poisonable_names:
+  - wpad
+  - bas-server
+  - door-panel-north
+  - fileserver
+  - not-setup
+
+
+# ─── Sensor self-check ───────────────────────────────────────────────────────
+# The monitor's own capture interfaces. They should have no address and no
+# protocol bindings, and should never transmit. List them here and the
+# sensor_chatter rule will say so if one ever does — a capture NIC left with
+# bindings enabled puts DHCP, NBNS, LLMNR, mDNS, SSDP and EAPOL onto the
+# mirrored VLAN, which contaminates every baseline built from it.
+#
+# Leave it empty and the rule stays inert rather than guessing.
+
+sensor_macs:
+  - 00:11:22:ff:ff:01
+  - 00:11:22:ff:ff:02
+
+
 # ─── Capture ─────────────────────────────────────────────────────────────────
 # Read by netmon.bpf to build the capture filter. Verify the result against a
 # short unfiltered sample on the machine that will run it — BPF VLAN handling

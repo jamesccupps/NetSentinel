@@ -248,6 +248,20 @@ class SiteProfile:
         self.remote_access_allowed = list(data.get('remote_access_allowed') or [])
         self.watched_names = [n.lower() for n in (data.get('watched_names') or [])]
 
+        # Local names that must only ever be answered by their owner. Different
+        # from watched_names, which are destinations nobody should reach. WPAD
+        # is the canonical example: nothing owns it, so whoever answers first
+        # becomes everyone's proxy.
+        self.poisonable_names = [n.lower()
+                                 for n in (data.get('poisonable_names') or [])]
+
+        # The monitor's own capture interfaces. They are supposed to be silent:
+        # no address, no protocol bindings. If one ever transmits, the monitor
+        # has started polluting the segment it is meant to be observing, and
+        # every baseline it has built is contaminated.
+        self.sensor_macs = {normalise_mac(m)
+                            for m in (data.get('sensor_macs') or []) if m}
+
         self.metadata_only_vlans = {
             int(v) for v in (data.get('metadata_only_vlans') or [])
         } | {v.id for v in self.vlans.values() if not v.store_payload}
@@ -320,8 +334,13 @@ class SiteProfile:
             if dsts and dst_ip not in dsts:
                 continue
             objects = entry.get('objects')
-            if objects and obj is not None and obj not in objects:
-                continue
+            if objects:
+                # The entry authorises specific objects. A message that names
+                # none cannot be checked against that scope, so it is not
+                # covered — otherwise an exception written for one setpoint
+                # would authorise every unparsed write from that source.
+                if obj is None or obj not in objects:
+                    continue
             return True
         return False
 
@@ -342,6 +361,10 @@ class SiteProfile:
         for mac in self.devices:
             if not _MAC_RE.match(mac):
                 problems.append(f"devices: '{mac}' is not a MAC address")
+
+        for mac in self.sensor_macs:
+            if not _MAC_RE.match(mac):
+                problems.append(f"sensor_macs: '{mac}' is not a MAC address")
 
         for vlan in self.vlans.values():
             if vlan.subnet:
@@ -391,6 +414,8 @@ class SiteProfile:
             'metadata_only_vlans': sorted(self.metadata_only_vlans),
             'muted_references': len(self.known_dead_references),
             'watched_names': len(self.watched_names),
+            'poisonable_names': len(self.poisonable_names),
+            'sensor_macs': len(self.sensor_macs),
         }
 
 

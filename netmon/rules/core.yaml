@@ -1,0 +1,403 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Core detection rules.
+#
+# Each rule states what it is grounded in — the observation that motivated it —
+# because a rule nobody can trace back to a real event is a rule nobody will
+# trust enough to act on, and the first thing anyone asks of an alert is "is
+# this normal here?"
+#
+# Fields come from netmon.events.enrich(), which resolves everything the site
+# profile knows before any rule runs: roles, zones, whether a flow is expected,
+# whether a BACnet write is on the allowlist. So a rule says `flow_expected:
+# false` and means it, at any site.
+#
+# Tiers: push is an immediate notification, digest goes in the daily report.
+# `escalate` raises both when the context warrants — the same remote-access tool
+# is urgent on a controller VLAN and merely interesting on the staff network.
+#
+# Edit freely. `python -m netmon.rules_engine --check` validates this file.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ─── Addressing and layer 2 ──────────────────────────────────────────────────
+
+- id: bad_address
+  title: Address does not belong to the VLAN it arrived on
+  severity: medium
+  tier: digest
+  grounded_in: A camera requested an address from another VLAN's subnet.
+  when:
+    any:
+      - address_matches_vlan: false
+      - link_local: true
+  device: src_name
+  key: "{src_ip}"
+  describe: "{src_name} ({src_ip}) appeared on VLAN {observed_vlan}, whose subnet it is not in"
+  evidence: [src_mac, src_ip, observed_vlan, src_vlan]
+  next_check: "tshark -r <pcap> -Y 'eth.src == {src_mac}' -T fields -e vlan.id -e ip.src | sort -u"
+
+- id: rogue_dhcp_ra
+  title: DHCP offer or IPv6 router advertisement from something that is not the gateway
+  severity: critical
+  tier: push
+  grounded_in: Baseline — only the gateway answers. Anything else is a takeover of addressing.
+  when:
+    kind: [dhcp, icmp6]
+    message: [offer, ack, router-advertisement]
+  unless:
+    src_is_gateway: true
+  device: src_name
+  key: "{src_mac}"
+  describe: "{src_name} ({src_ip}, {src_mac}) answered addressing on VLAN {observed_vlan}"
+  evidence: [src_mac, src_ip, message, observed_vlan]
+  next_check: "tshark -r <pcap> -Y 'dhcp.type == 2 || icmpv6.type == 134' -T fields -e eth.src -e ip.src"
+
+- id: overlapping_ip
+  type: stateful
+  handler: overlapping_ip
+  title: One address, two MACs
+  severity: medium
+  tier: digest
+  grounded_in: The same address was seen on two VLANs with different MACs.
+  params:
+    ignore_gateways: true
+
+- id: sensor_chatter
+  title: The sensor is transmitting on a capture interface
+  severity: high
+  tier: push
+  grounded_in: >
+    A capture NIC with protocol bindings left enabled put DHCP, NBNS, LLMNR,
+    mDNS, SSDP and EAPOL onto the mirrored VLAN. A monitor that injects traffic
+    is no longer a passive monitor, and its own packets pollute every baseline.
+  when:
+    is_sensor_mac: true
+  device: src_mac
+  key: "{src_mac}"
+  describe: "Capture interface {src_mac} transmitted on VLAN {observed_vlan} ({kind})"
+  evidence: [src_mac, kind, observed_vlan, dst_ip]
+  # Inert until `sensor_macs` is filled in, since is_sensor_mac is then never
+  # true. That is the right default: a site that has not listed its capture
+  # interfaces gets silence, not false alarms about every device.
+  next_check: "ip link show <capture nic>; it should have no address. On Windows, uncheck every protocol binding on the adapter." 
+
+# ─── Name resolution ─────────────────────────────────────────────────────────
+
+- id: name_poisoning
+  title: A watched name was answered by a host that does not own it
+  severity: high
+  tier: push
+  grounded_in: >
+    LLMNR, NBNS and mDNS have no authentication: whoever answers first wins. A
+    name nobody owns — WPAD, a decommissioned server, a typo'd hostname — is a
+    standing invitation, and the answer is a credential relay.
+  when:
+    kind: [llmnr, nbns, mdns]
+    is_answer: true
+    poisonable_name: {exists: true}
+  unless:
+    answer_owner: true
+  device: src_name
+  key: "{poisonable_name}"
+  describe: "{src_name} ({src_ip}) claimed the name {poisonable_name}"
+  evidence: [poisonable_name, src_ip, src_mac, query]
+  next_check: "tshark -r <pcap> -Y 'llmnr || nbns || mdns' -T fields -e ip.src -e dns.qry.name"
+
+- id: dns_bypass
+  title: DNS sent somewhere other than the gateway
+  severity: medium
+  tier: digest
+  grounded_in: >
+    A device resolving through a resolver of its own choosing is invisible to
+    every other DNS-based check here, and DoH is invisible entirely. Restricted
+    VLANs are exempt because their payload is never inspected.
+  when:
+    kind: [dns, dot, doh]
+    direction: outbound
+  unless:
+    any:
+      - dst_is_gateway: true
+      - may_store_payload: false
+  device: src_name
+  key: "{dst_ip}"
+  describe: "{src_name} sent {kind} to {dst_ip}, not the gateway"
+  evidence: [dst_ip, dst_port, query]
+  escalate:
+    when: {src_zone: [ot, restricted]}
+    severity: high
+    tier: push
+  next_check: "tshark -r <pcap> -Y 'dns && ip.src == {src_ip} && ip.dst != <gateway>'"
+
+- id: unanswered_name
+  type: stateful
+  handler: unanswered_name
+  title: A name nobody answers, asked repeatedly
+  severity: low
+  tier: digest
+  grounded_in: >
+    A host asking for a name that does not resolve is either misconfigured or
+    reaching for something that has been removed. Both are worth knowing; the
+    second is how a decommissioned server becomes a poisoning target.
+  params:
+    min_queries: 5
+    window_sec: 3600
+
+- id: dhcp_loop
+  type: stateful
+  handler: dhcp_loop
+  title: A device asking for an address and never getting one
+  severity: low
+  tier: digest
+  grounded_in: A camera sent DHCP Discover every 3 seconds, unanswered.
+  params:
+    min_discovers: 10
+    window_sec: 600
+
+# ─── Remote access and tunnels ───────────────────────────────────────────────
+
+- id: remote_access_tool
+  title: Remote-access tool reaching out
+  severity: high
+  tier: digest
+  grounded_in: >
+    Vendors install their own favourite and nobody is told. Each one is an
+    inbound path that bypasses the firewall entirely, established from the
+    inside so no rule has to allow it.
+  when:
+    watched_name: {exists: true}
+  unless:
+    approved_remote_access: true
+  device: src_name
+  key: "{watched_name}"
+  describe: "{src_name} ({src_ip}) contacted {watched_name} — {sni}"
+  evidence: [sni, dst_ip, dst_port, watched_name]
+  escalate:
+    when:
+      src_zone: [ot, restricted, management]
+    severity: critical
+    tier: push
+  next_check: "tshark -r <pcap> -Y 'tls.handshake.extensions_server_name contains \"{watched_name}\"'"
+
+- id: vpn_tunnel
+  title: A VPN tunnel started
+  severity: medium
+  tier: digest
+  grounded_in: Signage over OpenVPN, Tailscale on two hosts, a WireGuard session on the gateway.
+  when:
+    any:
+      - protocol: udp
+        dst_port: [51820, 41641]              # WireGuard, Tailscale
+      - dst_port: [1194]                       # OpenVPN
+      - sni: {matches: "tailscale\\.com|wireguard|openvpn"}
+      - dst_ip: "100.100.100.100"              # Tailscale's resolver
+  device: src_name
+  key: "{dst_ip}:{dst_port}"
+  describe: "{src_name} opened a tunnel to {dst_ip}:{dst_port}"
+  evidence: [dst_ip, dst_port, protocol, sni]
+  escalate:
+    when: {src_zone: [ot, restricted]}
+    severity: high
+    tier: push
+  next_check: "tshark -r <pcap> -Y 'ip.src == {src_ip} && udp.dstport == {dst_port}'"
+
+- id: port_mapping_request
+  title: A device asking the gateway to open a port for it
+  severity: medium
+  tier: digest
+  grounded_in: One laptop sent 1,017 NAT-PMP requests in an afternoon.
+  when:
+    any:
+      - protocol: udp
+        dst_port: [5351]                       # NAT-PMP / PCP
+      - kind: ssdp
+        search_target: {contains: "InternetGatewayDevice"}
+  device: src_name
+  key: "{src_ip}"
+  describe: "{src_name} ({src_ip}) requested a port mapping"
+  evidence: [dst_ip, dst_port, search_target]
+  next_check: "tshark -r <pcap> -Y 'udp.dstport == 5351 && ip.src == {src_ip}'"
+
+# ─── Cleartext and exposure ──────────────────────────────────────────────────
+
+- id: cleartext_credentials
+  title: Credentials crossing the network in the clear
+  severity: high
+  tier: push
+  grounded_in: >
+    An automation session cookie, an SNMP community string of "public", a SIP
+    registration. Anyone on the segment can read these; on a mirror port, so
+    can this monitor, which is why it reports the fact and never the value.
+  when:
+    credential_type: {exists: true}
+  unless:
+    may_store_payload: false
+  device: src_name
+  key: "{credential_type}/{dst_ip}"
+  describe: "{src_name} sent {credential_type} in the clear to {dst_ip}:{dst_port}"
+  # Deliberately no credential value in evidence, the description or the key.
+  evidence: [credential_type, dst_ip, dst_port, protocol]
+  next_check: "Rotate the credential, then confirm the replacement is not also in the clear."
+
+- id: dmz_inbound
+  title: The DMZ host started a connection inward
+  severity: critical
+  tier: push
+  grounded_in: Baseline — none seen. The DMZ host is the one exposed to the internet.
+  when:
+    src_zone: [dmz, public-facing]
+    direction: internal
+    cross_vlan: true
+  unless:
+    flow_expected: true
+  device: src_name
+  key: "{dst_ip}:{dst_port}"
+  describe: "{src_name} ({src_ip}) connected inward to {dst_name} ({dst_ip}:{dst_port})"
+  evidence: [src_ip, dst_ip, dst_port, protocol]
+  next_check: "tshark -r <pcap> -Y 'ip.src == {src_ip} && ip.dst != <dmz subnet>'"
+
+- id: blocked_egress
+  title: The gateway blocked an outbound connection
+  severity: high
+  tier: push
+  grounded_in: Six blocked attempts to one address in a day.
+  when:
+    action: blocked
+    direction: outbound
+  device: src_name
+  key: "{dst_ip}"
+  describe: "{src_name} was blocked reaching {dst_ip}:{dst_port} ({policy})"
+  evidence: [dst_ip, dst_port, policy, signature]
+  next_check: "Check what on {src_name} is generating this; a block is a symptom, not a fix."
+
+- id: cross_vlan_unexpected
+  title: Traffic between VLANs the profile does not list
+  severity: medium
+  tier: digest
+  grounded_in: >
+    The cross-VLAN table in the site survey. Segmentation that is not enforced
+    is documentation; this is the check that it is still true.
+  when:
+    cross_vlan: true
+    flow_expected: false
+  unless:
+    any:
+      - muted_reference: true
+      - dst_is_gateway: true
+      - src_is_gateway: true
+  device: src_name
+  key: "{src_vlan}->{dst_vlan}:{dst_port}"
+  describe: "{src_name} (VLAN {src_vlan}) reached {dst_name} (VLAN {dst_vlan}) on {protocol}/{dst_port}"
+  evidence: [src_ip, dst_ip, dst_port, protocol, src_zone, dst_zone]
+  escalate:
+    when:
+      dst_zone: [management, ot, restricted]
+    severity: high
+    tier: push
+  next_check: "Confirm with the site owner, then either add it to expected_flows or close it on the firewall."
+
+# ─── Building automation ─────────────────────────────────────────────────────
+
+- id: bacnet_control
+  title: A BACnet command outside the write allowlist
+  severity: critical
+  tier: push
+  grounded_in: >
+    BACnet/IP has no authentication. Anything that can reach UDP 47808 can
+    command a controller — change a setpoint, stop a device, reinitialise it.
+    The only useful question is whether this source is supposed to be doing it.
+  when:
+    kind: bacnet
+    service:
+      - WriteProperty
+      - WritePropertyMultiple
+      - DeviceCommunicationControl
+      - ReinitializeDevice
+      - AtomicWriteFile
+  unless:
+    bacnet_write_allowed: true
+  device: dst_name
+  key: "{src_ip}->{dst_ip}/{object}"
+  describe: "{src_name} ({src_ip}) sent {service} to {dst_name} ({dst_ip}), object {object}"
+  evidence: [src_ip, dst_ip, service, object, value]
+  next_check: "tshark -r <pcap> -Y 'bacapp.type == 0 && ip.src == {src_ip}' -T fields -e bacapp.confirmed_service"
+
+- id: bacnet_topology
+  title: A change to the BACnet network's shape
+  severity: high
+  tier: push
+  grounded_in: >
+    A duplicate broadcast-management device, and forwarded messages naming peers
+    that do not exist. Whoever controls the broadcast tables controls which
+    controllers hear what.
+  when:
+    kind: bacnet
+    service:
+      - WriteBroadcastDistributionTable
+      - ReadBroadcastDistributionTable
+      - RegisterForeignDevice
+      - ReadForeignDeviceTable
+      - DeleteForeignDeviceTableEntry
+      - Forwarded-NPDU
+  unless:
+    bacnet_write_allowed: true
+  device: dst_name
+  key: "{service}/{peer}"
+  describe: "{src_name} performed {service} involving {peer}"
+  evidence: [src_ip, dst_ip, service, peer]
+  next_check: "tshark -r <pcap> -Y 'bvlc.function >= 0x01 && bvlc.function <= 0x07'"
+
+# ─── Behaviour over time ─────────────────────────────────────────────────────
+
+- id: new_device
+  type: stateful
+  handler: new_device
+  title: A device not in the registry appeared
+  severity: medium
+  tier: push
+  grounded_in: Unknown or relocated devices — the first thing to establish after any change.
+  params:
+    zones: [ot, restricted, management]
+    quiet_zones_tier: digest
+
+- id: beaconing
+  type: stateful
+  handler: beaconing
+  title: Regular, low-jitter contact with one destination
+  severity: high
+  tier: digest
+  grounded_in: >
+    One host connected out at the same minute past every hour. Legitimate
+    software does this too, which is why the rule reports the pattern and the
+    destination rather than calling it malicious.
+  when:
+    direction: outbound
+  params:
+    min_samples: 12            # the scorer will not judge on fewer
+    min_score: 0.75            # below this it is regularity, not a beacon
+    max_interval_sec: 86400    # a longer gap than this starts a new pattern
+
+- id: egress_new_destination
+  type: stateful
+  handler: new_destination
+  title: A building device contacted somewhere it never has before
+  severity: medium
+  tier: digest
+  grounded_in: Controllers and panels have short, stable destination lists. Growth in one is the signal.
+  when:
+    direction: outbound
+  params:
+    zones: [ot, restricted]
+    learn_sec: 604800          # a week of observation before it starts reporting
+
+- id: upload_anomaly
+  type: stateful
+  handler: upload_volume
+  title: More data leaving a device than it usually sends
+  severity: medium
+  tier: digest
+  grounded_in: One host averaged about 94 MB a day; another uploaded overnight.
+  when:
+    direction: outbound
+  params:
+    min_bytes: 52428800        # 50 MB before the baseline is worth consulting
+    multiple: 4                # times its own median day
+    quiet_hours_multiple: 2    # a lower bar when nobody is on site

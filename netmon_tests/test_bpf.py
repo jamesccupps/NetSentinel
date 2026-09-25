@@ -51,9 +51,18 @@ class TestConstruction(unittest.TestCase):
         """Empty reads as 'capture everything', which is the honest answer."""
         self.assertEqual(bpf.vlan_filter([]), '')
 
-    def test_untagged_only(self):
-        self.assertEqual(bpf.vlan_filter([], include_untagged=True),
-                         'ether[12:2] != 0x8100')
+    def test_untagged_only_uses_the_keyword_not_the_ethertype_test(self):
+        """
+        With no tagged branch there is nothing for `vlan` to shift offsets in,
+        so the keyword is safe here — and it is the form reported to work on
+        both libpcap and Npcap, where the ethertype test is not.
+        """
+        self.assertEqual(bpf.vlan_filter([], include_untagged=True), 'not vlan')
+
+    def test_the_mixed_form_still_needs_the_ethertype_test(self):
+        """It has no alternative: `not vlan` beside a tagged branch shifts it."""
+        self.assertIn('ether[12:2] != 0x8100',
+                      bpf.vlan_filter([5], include_untagged=True))
 
     def test_ids_are_deduplicated_and_ordered(self):
         """Same selection, same filter text — so it can be compared and cached."""
