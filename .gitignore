@@ -47,3 +47,22 @@ desktop.ini
 # Distribution
 *.exe
 *.zip
+
+# netmon — site profiles and captures are site-specific and sensitive.
+# A completed profile is a map of the network: VLANs, device inventory, which
+# systems are unencrypted, what is reachable from where. Keep yours out of the
+# repository. Only the fictional example ships.
+netmon/profiles/*.yaml
+!netmon/profiles/example-site.yaml
+netmon/profiles/*.yml
+!netmon/profiles/example-site.yml
+
+# Captures. Some segments carry credential and cardholder data; none of it
+# belongs in version control, and a test fixture must be synthetic.
+*.pcap
+*.pcapng
+captures/
+
+# UniFi exports and other site data pulled in for offline analysis.
+netmon/data/
+*.flows.csv

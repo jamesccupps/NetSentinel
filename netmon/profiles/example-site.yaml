@@ -1,0 +1,351 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Example site profile — entirely fictional.
+#
+# This file exists to document the schema. Every address, MAC and device name in
+# it was made up. Copy it, fill in your own site, and keep the result OUT of
+# version control: a completed profile is a map of your network — VLANs, device
+# inventory, which systems are unencrypted, what is reachable from where. It is
+# the single most useful document an attacker could be handed.
+#
+#     cp netmon/profiles/example-site.yaml ~/.config/netmon/my-site.yaml
+#     netmon --profile ~/.config/netmon/my-site.yaml
+#
+# Validate at any time with:  python -m netmon.profile <path>
+# ─────────────────────────────────────────────────────────────────────────────
+
+site:
+  name: Example Operations Centre
+  timezone: America/New_York
+  # Outside-hours window, inclusive of start, exclusive of end. Rules use it to
+  # raise the significance of activity nobody should be around for. Wraps
+  # midnight when start > end.
+  quiet_hours: [21, 5]
+
+
+# ─── VLANs ───────────────────────────────────────────────────────────────────
+# zone is a free-form grouping rules can reason about: rules say "into the
+# management zone", not "into VLAN 30", so the same rule works at another site.
+#
+# store_payload: false is a hard prohibition, not a preference. It means no bytes
+# from this segment may be written to the ring buffer, extracted to a file,
+# logged, or included in anything sent to an external service. Set it on any
+# segment carrying regulated or credential-bearing traffic. The capture path
+# checks may_store_payload() before it writes.
+
+vlans:
+  1:
+    name: management
+    subnet: 10.10.1.0/24
+    zone: management
+    gateway: 10.10.1.1
+    notes: Switch and AP management. Untagged on the mirror.
+
+  20:
+    name: building-automation
+    subnet: 10.10.20.0/24
+    zone: ot
+    gateway: 10.10.20.1
+    notes: BACnet/IP controllers. Unencrypted by protocol design.
+
+  30:
+    name: video
+    subnet: 10.10.30.0/24
+    zone: video
+    gateway: 10.10.30.1
+    notes: >
+      Cameras and recorder. High volume — excluded from capture by default
+      (see capture.drop_hosts below) so the ring buffer holds useful minutes
+      rather than useful seconds.
+
+  40:
+    name: access-control
+    subnet: 10.10.40.0/24
+    zone: restricted
+    gateway: 10.10.40.1
+    store_payload: false
+    notes: >
+      Badge readers and door controllers. Carries credential material in the
+      clear. METADATA ONLY — who talked to whom, when, how much. Never payload.
+
+  50:
+    name: kiosks
+    subnet: 10.10.50.0/24
+    zone: public-facing
+    gateway: 10.10.50.1
+    store_payload: false
+    notes: Payment kiosks. Cardholder data. Metadata only, same as VLAN 40.
+
+  60:
+    name: staff
+    subnet: 10.10.60.0/24
+    zone: corporate
+    gateway: 10.10.60.1
+
+
+# Belt and braces: anything listed here is metadata-only regardless of what the
+# vlans block says. Use it when you want the prohibition stated in one obvious
+# place rather than spread across VLAN entries.
+metadata_only_vlans: [40, 50]
+
+
+# ─── Roles ───────────────────────────────────────────────────────────────────
+# A role describes what a kind of device is supposed to do. Rules are written
+# against roles, so adding a twentieth controller needs no rule changes.
+#
+# allowed_domains empty means "no expectation recorded" — which is not the same
+# as "nothing allowed". Each rule decides how to treat an empty list; most treat
+# it as "don't judge", so an incomplete profile produces silence, not noise.
+
+roles:
+  controller:
+    description: Building automation controller. Speaks BACnet, nothing else.
+    internet_expected: false
+    remote_access_expected: false
+
+  automation_server:
+    description: Supervisory server. Polls controllers, serves operator UI.
+    internet_expected: true
+    allowed_domains:
+      - updates.example-vendor.test
+      - ntp.example.test
+    remote_access_expected: true      # vendor support, via the approved tool
+
+  camera:
+    description: IP camera. Streams to the recorder and nowhere else.
+    internet_expected: false
+
+  recorder:
+    description: Video recorder. Pulls from cameras, serves clients.
+    internet_expected: true
+    allowed_domains:
+      - licence.example-video.test
+
+  door_controller:
+    description: Access control panel.
+    internet_expected: false
+
+  badge_reader:
+    description: Reader head. Talks to its panel only.
+    internet_expected: false
+
+  kiosk:
+    description: Payment kiosk. Reaches the payment processor and nothing else.
+    internet_expected: true
+    allowed_domains:
+      - gateway.example-payments.test
+
+  workstation:
+    description: Operator or staff workstation.
+    internet_expected: true
+
+  network_device:
+    description: Switch, AP or firewall.
+    internet_expected: true
+
+
+# ─── Devices ─────────────────────────────────────────────────────────────────
+# Keyed by MAC, because MAC survives DHCP. Any separator works — aa:bb:cc:dd:ee:ff,
+# aa-bb-cc-dd-ee-ff and aabb.ccdd.eeff all normalise to the same key.
+#
+# ips is what you expect the device to have. A device appearing on a different
+# address is worth knowing about; so is two devices claiming one address, which
+# the validator refuses to load.
+#
+# You do not need every device. Unknown devices get role 'unknown' and rules
+# treat them accordingly — an unprofiled device reaching the internet is a
+# weaker signal than a profiled camera doing it, and rules weight it that way.
+
+devices:
+  00:11:22:00:00:01:
+    name: bas-server
+    role: automation_server
+    ips: [10.10.20.10]
+    vlan: 20
+    switch_port: sw1/1
+
+  00:11:22:00:00:02:
+    name: ahu-controller-1
+    role: controller
+    ips: [10.10.20.21]
+    vlan: 20
+
+  00:11:22:00:00:03:
+    name: ahu-controller-2
+    role: controller
+    ips: [10.10.20.22]
+    vlan: 20
+
+  00:11:22:00:00:04:
+    name: chiller-controller
+    role: controller
+    ips: [10.10.20.23]
+    vlan: 20
+    notes: Vendor-supplied. Firmware has never been updated.
+
+  00:11:22:00:00:10:
+    name: nvr
+    role: recorder
+    ips: [10.10.30.10]
+    vlan: 30
+
+  00:11:22:00:00:11:
+    name: cam-lobby
+    role: camera
+    ips: [10.10.30.41]
+    vlan: 30
+
+  00:11:22:00:00:12:
+    name: cam-dock
+    role: camera
+    ips: [10.10.30.42]
+    vlan: 30
+
+  00:11:22:00:00:20:
+    name: door-panel-north
+    role: door_controller
+    ips: [10.10.40.10]
+    vlan: 40
+
+  00:11:22:00:00:21:
+    name: door-panel-south
+    role: door_controller
+    ips: [10.10.40.11]
+    vlan: 40
+
+  00:11:22:00:00:30:
+    name: kiosk-entry
+    role: kiosk
+    ips: [10.10.50.20]
+    vlan: 50
+
+  00:11:22:00:00:40:
+    name: ops-workstation
+    role: workstation
+    ips: [10.10.60.50]
+    vlan: 60
+
+  00:11:22:00:00:50:
+    name: core-switch
+    role: network_device
+    ips: [10.10.1.2]
+    vlan: 1
+
+
+# ─── Expected flows ──────────────────────────────────────────────────────────
+# Cross-VLAN conversations the site knows about. Anything crossing a zone
+# boundary that is NOT listed here is worth a look — that is the whole point of
+# the list, so keep it tight. Endpoints may be an IP, a CIDR, a role name, or '*'.
+#
+# Listing a flow does not whitelist it into silence. Rules still watch volume and
+# timing on expected flows; what the list removes is the "why is this happening
+# at all" question.
+
+expected_flows:
+  - src: automation_server
+    dst: 10.10.20.0/24
+    ports: [47808]
+    protocol: udp
+    note: BAS polling its controllers.
+
+  - src: recorder
+    dst: 10.10.30.0/24
+    ports: [554, 80]
+    protocol: tcp
+    note: Recorder pulling camera streams.
+
+  - src: 10.10.60.0/24
+    dst: recorder
+    ports: [443]
+    protocol: tcp
+    note: Operators viewing video.
+
+  - src: 10.10.60.0/24
+    dst: automation_server
+    ports: [443]
+    protocol: tcp
+    note: Operators using the BAS web UI.
+
+  - src: badge_reader
+    dst: door_controller
+    note: Reader to its panel. Port varies by vendor.
+
+
+# ─── BACnet write allowlist ──────────────────────────────────────────────────
+# BACnet/IP has no authentication: anything that can reach UDP 47808 can command
+# a controller. Writes are therefore the event that matters, and the only useful
+# question is whether this source is supposed to be issuing them.
+#
+# Leave this empty and every write is reported. Fill it in and the reports narrow
+# to the ones nobody authorised.
+
+bacnet_write_allowlist:
+  - src: 10.10.20.10           # the BAS server, and only it
+    dst: [10.10.20.21, 10.10.20.22, 10.10.20.23]
+    note: Normal supervisory control.
+
+  - src: 10.10.60.50
+    dst: [10.10.20.21]
+    objects: [analog-value-7]
+    note: >
+      Engineer's workstation, temporary. Remove after the spring changeover —
+      a standing exception nobody revisits is how allowlists rot.
+
+
+# ─── Known dead references ───────────────────────────────────────────────────
+# Things already known to be broken and already on someone's list. Muting them
+# keeps the alert stream about what is new. Each entry should name the ticket and
+# the date it was muted, so a stale mute is visible as a stale mute.
+
+known_dead_references:
+  - target: 10.10.20.99
+    src_any: true
+    note: Decommissioned controller. Half the site still polls it. TICKET-1042, muted 2026-03-01.
+
+  - target: 10.10.30.99
+    src: [10.10.30.10]
+    proto: tcp
+    note: Camera removed during the lobby refit; recorder still retries. TICKET-1055, muted 2026-04-12.
+
+
+# ─── Approved remote access ──────────────────────────────────────────────────
+# Remote-access tooling the site has sanctioned. Anything else reaching out for
+# remote control is the finding — vendors install their own favourite and nobody
+# is told.
+
+remote_access_allowed:
+  - name: approved-rmm
+    domains: [rmm.example-msp.test]
+    note: Managed service provider. Contracted.
+
+
+# ─── Watched names ───────────────────────────────────────────────────────────
+# Hostnames and SNI substrings worth flagging on sight: the remote-access tools
+# you have not approved, exfiltration-friendly file services, tunnelling
+# brokers. Matched case-insensitively as substrings.
+
+watched_names:
+  - anydesk
+  - teamviewer
+  - ngrok
+  - logmein
+  - screenconnect
+  - pastebin
+  - transfer.sh
+
+
+# ─── Capture ─────────────────────────────────────────────────────────────────
+# Read by netmon.bpf to build the capture filter. Verify the result against a
+# short unfiltered sample on the machine that will run it — BPF VLAN handling
+# differs between libpcap and Npcap, and a filter that is right on one silently
+# captures the wrong thing on the other:
+#
+#     python -m netmon.bpf --profile my-site.yaml --verify sample.pcap
+
+capture:
+  vlans: [1, 20, 40, 50, 60]      # note 30 (video) is absent — see below
+  include_untagged: true          # management traffic usually is
+  drop_hosts: [10.10.30.10]       # recorder: tens of Mbit of no diagnostic value
+  drop_ports: [554]               # RTSP
+  drop_port_protocol: tcp
+  ring_buffer_mb: 2048
+  snaplen: 2048                   # headers and a little context, not full payloads
