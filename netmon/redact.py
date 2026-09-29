@@ -295,6 +295,7 @@ def summary_for_model(analyzer, profile, max_findings=60):
         'withheld_from_restricted_segments': withheld,
         'instructions': (
             'Advisory only. Prioritise these findings and say which are likely '
-            'benign for a site of this shape. Suggest next checks. Do not '
-            'recommend changes to the network itself.'),
+            'benign for a site of this shape. Describe what to check in prose; '
+            'do not write commands. Do not recommend changes to the network '
+            'itself.'),
     }

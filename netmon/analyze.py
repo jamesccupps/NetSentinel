@@ -174,6 +174,13 @@ def _main(argv=None):
                              'NETMON_NTFY_TOPIC, or --secrets')
     parser.add_argument('--digest', action='store_true',
                         help='send the daily report')
+    parser.add_argument('--summarise', '--summarize', action='store_true',
+                        dest='summarise',
+                        help='ask a model to triage the findings. Sends a '
+                             'redacted summary — no payload, nothing from a '
+                             'metadata-only segment — and prints its reasoning')
+    parser.add_argument('--investigate', metavar='DEVICE',
+                        help='ask about one device rather than the whole window')
     parser.add_argument('--secrets', metavar='FILE',
                         help='JSON file with the ntfy settings. Must be mode '
                              '600; the environment overrides it')
@@ -248,6 +255,11 @@ def _main(argv=None):
     if report['by_severity']:
         print('  ' + ', '.join(f'{k} {v}' for k, v in report['by_severity'].items()))
 
+    if args.summarise or args.investigate:
+        code = _summarise(analyzer, profile, args)
+        if code:
+            return code
+
     if args.notify or args.digest:
         code = _notify(analyzer, profile, args)
         if code:
@@ -255,6 +267,34 @@ def _main(argv=None):
 
     # A non-zero exit when something needs attention, so this can be a cron job.
     return 2 if report['push'] else 0
+
+
+def _summarise(analyzer, profile, args):
+    """Ask a model to triage. Advisory: nothing it returns is executed."""
+    from netmon.summarise import (Summariser, SummaryError,
+                                  format_summary, load_summariser_config)
+    try:
+        config = load_summariser_config(args.secrets)
+    except Exception as e:
+        print(f'summariser: {e}', file=sys.stderr)
+        return 1
+
+    summariser = Summariser(config)
+    try:
+        if args.investigate:
+            result = summariser.investigate(analyzer, profile, args.investigate)
+        else:
+            result = summariser.summarise(analyzer, profile)
+    except SummaryError as e:
+        print(f'summariser: {e}', file=sys.stderr)
+        return 1
+
+    print()
+    print('─' * 78)
+    print('Model triage — advisory only, nothing here has been run')
+    print('─' * 78)
+    print(format_summary(result))
+    return 0
 
 
 def _notify(analyzer, profile, args):

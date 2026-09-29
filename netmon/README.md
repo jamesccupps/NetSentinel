@@ -55,6 +55,7 @@ It binds to localhost and will not write anything without `--allow-edit`.
 | `analyze.py` | the offline analyzer |
 | `redact.py` | what may leave the building |
 | `alerting.py` | ntfy push and the daily digest |
+| `summarise.py` | asking a model to triage the findings |
 | `web.py` | the local UI |
 
 Each module's docstring explains what it is for and what will go wrong if you
@@ -133,6 +134,48 @@ the mistakes someone already made.
 A test fires every shipped rule against an event stuffed with a password, a
 session cookie, a card number and a private key, then audits the redacted
 output. Adding a rule that names a value-bearing field fails there.
+
+---
+
+## Model triage
+
+```
+export ANTHROPIC_API_KEY=sk-ant-...
+python -m netmon.analyze --profile my-site.yaml --pcap capture.pcapng --summarise
+python -m netmon.analyze --profile my-site.yaml --pcap capture.pcapng \
+                         --investigate ahu-controller-1
+```
+
+The rules detect; the model prioritises and explains. It is told to be willing
+to call something benign — a triage that agrees with every rule is worth
+nothing.
+
+Model, daily token budget, API base URL and redaction level are all configurable
+(`NETMON_SUMMARISER_MODEL`, `NETMON_SUMMARISER_DAILY_TOKENS`,
+`ANTHROPIC_BASE_URL`, `NETMON_SUMMARISER_REDACTION=minimal`), so a local model
+can be substituted and an unattended cron job cannot run up a bill. Set the base
+URL and the request drops the API-specific options a local model would reject.
+
+Three things it deliberately does not do:
+
+**It does not write commands.** It says in prose what to check; the command
+comes from the rule, which is authored in this repository. An allowlist was the
+first attempt and it does not hold — `python3 -c` runs anything, `tcpdump -z`
+executes a program, `ip link set` changes the network — and filtering per-command
+flags means writing a shell parser and being right about every tool. A monitor's
+output is exactly what someone pastes into a root shell without reading twice.
+
+**It does not write BPF.** It returns which VLANs, hosts and ports to watch, and
+`netmon.bpf` builds the filter. One of the two wrong VLAN forms silently
+captures a segment the site forbids storing; that is not a judgement to
+delegate.
+
+**It does not act.** Nothing it returns is executed, and it is told not to
+recommend changes to the network — only what to look at.
+
+The findings sent to it contain device and server names taken from the network
+being watched. They are fenced and labelled as data in the prompt, and the
+response is checked before anything is shown.
 
 ---
 
