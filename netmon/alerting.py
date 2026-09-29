@@ -75,7 +75,7 @@ class NotifierConfig:
 
     def __init__(self, server='', topic='', token='', enabled=True,
                  min_push_severity=Severity.HIGH, timeout=10,
-                 digest_topic='', dry_run=False):
+                 digest_topic='', dry_run=False, extract_seconds=30):
         self.server = (server or '').rstrip('/')
         self.topic = topic or ''
         self.token = token or ''
@@ -84,6 +84,7 @@ class NotifierConfig:
         self.timeout = int(timeout)
         self.digest_topic = digest_topic or topic or ''
         self.dry_run = bool(dry_run)
+        self.extract_seconds = int(extract_seconds)
 
     def validate(self):
         """Raise AlertingError on anything that would fail or leak at send time."""
@@ -173,15 +174,21 @@ def _read_secrets_file(path):
 class Notifier:
     """Sends findings. Holds no state beyond what it has already sent."""
 
-    def __init__(self, config, profile=None, opener=None):
+    def __init__(self, config, profile=None, opener=None, ring=None):
         self.config = config
         self.profile = profile
         # Injectable so tests exercise the real body-building and header logic
         # without a network. The default is urllib, not requests: one fewer
         # dependency on a sensor that may have no route to a package index.
         self._opener = opener or self._post
+        # When a rolling capture is configured, each pushed finding gets the
+        # packets around it written out and named in the alert. An alert saying
+        # "a controller was commanded at 03:14" is worth much more with the
+        # thirty seconds either side attached.
+        self.ring = ring
         self.sent = []
         self.failures = []
+        self.extracts = []
 
     # ─── Sending ─────────────────────────────────────────────────────────
 
@@ -207,6 +214,9 @@ class Notifier:
             if record is None:                       # cannot happen for ALERT
                 skipped.append(finding)              # but fail closed anyway
                 continue
+            extract = self._extract(finding)
+            if extract:
+                record['pcap'] = extract
             if self._deliver(record):
                 sent.append(finding)
             else:
@@ -225,6 +235,25 @@ class Notifier:
             'severity': Severity.INFO,
             'description': body,
         }, topic=self.config.digest_topic, priority=2, tags='memo')
+
+    def _extract(self, finding):
+        """
+        The packets around a finding, if a rolling capture is configured.
+
+        Failure here never stops the alert. The alert is the point; the capture
+        extract is a convenience, and a full disk or a rotated-away window is
+        not a reason for nobody to hear about a BACnet write.
+        """
+        if self.ring is None:
+            return ''
+        try:
+            result = self.ring.extract_for_finding(
+                finding, seconds=int(self.config.extract_seconds))
+        except Exception as e:
+            logger.info('no capture extract for %s: %s', finding.rule_id, e)
+            return ''
+        self.extracts.append(result)
+        return result['path']
 
     def _deliver(self, record, topic=None, priority=None, tags=None):
         severity = record.get('severity', Severity.MEDIUM)
@@ -310,6 +339,10 @@ def _format_message(record):
     if record.get('next_check'):
         lines.append('')
         lines.append(f"next: {record['next_check']}")
+
+    if record.get('pcap'):
+        lines.append('')
+        lines.append(f"packets: {record['pcap']}")
     return '\n'.join(lines)
 
 

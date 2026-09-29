@@ -187,6 +187,9 @@ def _main(argv=None):
     parser.add_argument('--dry-run', action='store_true',
                         help='with --notify or --digest, print what would be '
                              'sent instead of sending it')
+    parser.add_argument('--ring', metavar='DIR',
+                        help='the rolling capture directory. Each pushed alert '
+                             'gets the packets around it written out and named')
     parser.add_argument('-v', '--verbose', action='store_true')
     args = parser.parse_args(argv)
 
@@ -309,12 +312,19 @@ def _notify(analyzer, profile, args):
     if args.dry_run:
         config.dry_run = True
 
-    notifier = Notifier(config, profile)
+    ring = None
+    if args.ring:
+        from netmon.ringbuffer import RingBuffer
+        ring = RingBuffer(args.ring, profile)
+
+    notifier = Notifier(config, profile, ring=ring)
     try:
         if args.notify:
             sent, skipped = notifier.send(analyzer.findings)
             print()
             print(f'pushed {len(sent)}, held back {len(skipped)} for the digest')
+            if notifier.extracts:
+                print(f'wrote {len(notifier.extracts)} capture extracts')
         if args.digest:
             notifier.send_digest(analyzer)
             print('digest sent')

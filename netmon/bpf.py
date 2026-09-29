@@ -64,8 +64,9 @@ import os
 import re
 
 __all__ = [
-    'vlan_filter', 'protocol_filter', 'host_filter', 'exclude_hosts',
-    'exclude_ports', 'build_capture_filter', 'tag_field_expr', 'combine',
+    'vlan_filter', 'exclude_vlans', 'protocol_filter', 'host_filter',
+    'exclude_hosts', 'exclude_ports', 'build_capture_filter', 'tag_field_expr',
+    'combine',
 ]
 
 _MAC_RE = re.compile(r'^([0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}$')
@@ -106,6 +107,31 @@ def vlan_filter(vlan_ids, include_untagged=False):
     if include_untagged:
         return f'(ether[12:2] != {DOT1Q} or {tagged})'
     return tagged
+
+
+def exclude_vlans(vlan_ids):
+    """
+    Everything except these VLANs — untagged frames included.
+
+    The complement of `vlan_filter`, and the one that carries a different kind
+    of weight: this is what keeps a segment's payload off the disk. A capture
+    written with a selection filter that happens to omit VLAN 40 is one
+    misconfiguration away from including it; a capture written with an exclusion
+    filter names what must never be there.
+
+    Written without the `vlan` keyword for the same reason as the mixed form
+    above: the keyword shifts offsets across `or`, and the failure is silent.
+    """
+    ids = sorted({int(v) for v in (vlan_ids or [])})
+    if not ids:
+        return ''
+
+    inner = ' or '.join(tag_field_expr(v) for v in ids)
+    excluded = f'({inner})' if len(ids) > 1 else inner
+    # Untagged frames carry no tag to match, so they pass; tagged ones pass only
+    # if their tag is not in the list.
+    return (f'(ether[12:2] != {DOT1Q} or '
+            f'(ether[12:2] == {DOT1Q} and not {excluded}))')
 
 
 def _both_forms(term):
@@ -223,7 +249,8 @@ def combine(*terms, op='and'):
 
 def build_capture_filter(vlans=None, include_untagged=True,
                          drop_hosts=None, drop_ports=None,
-                         drop_port_protocol='tcp', extra=None):
+                         drop_port_protocol='tcp', extra=None,
+                         never_vlans=None):
     """
     Assemble a capture filter for one mirror input.
 
@@ -233,6 +260,10 @@ def build_capture_filter(vlans=None, include_untagged=True,
         drop_hosts: hosts to exclude — typically camera streams.
         drop_ports: ports to exclude — typically video.
         drop_port_protocol: protocol for drop_ports.
+        never_vlans: VLANs that must not appear in the output at all. Use this
+            rather than relying on `vlans` to omit them: a selection filter that
+            happens to leave one out is one edit away from including it, where
+            an exclusion names what must never be there. Applied first.
         extra: a BPF fragment appended with `and`. Given the both-forms
             treatment so a plain term like `udp` matches tagged frames too —
             without it, `extra='udp'` matches nothing on a trunk mirror, which
@@ -252,6 +283,10 @@ def build_capture_filter(vlans=None, include_untagged=True,
     elif not include_untagged:
         parts.append('vlan')
 
+    if never_vlans:
+        # Placed first so it is the first thing read, and so a later term can
+        # only ever narrow it further.
+        parts.insert(0, exclude_vlans(never_vlans))
     if drop_hosts:
         parts.append(exclude_hosts(drop_hosts))
     if drop_ports:
@@ -366,13 +401,18 @@ def display_filter(vlans=None, hosts=None, ports=None, protocol=None):
 def from_profile(profile):
     """Build the capture filter described by a profile's `capture:` section."""
     capture = (getattr(profile, 'raw', {}) or {}).get('capture') or {}
+    # Segments the profile marks metadata-only are excluded from the filter
+    # itself, not merely left out of the selection. Whatever a `capture:`
+    # section says, their payload does not reach the disk.
+    never = sorted(getattr(profile, 'metadata_only_vlans', set()) or set())
     return build_capture_filter(
         vlans=capture.get('vlans'),
         include_untagged=capture.get('include_untagged', True),
         drop_hosts=capture.get('drop_hosts'),
         drop_ports=capture.get('drop_ports'),
         drop_port_protocol=capture.get('drop_port_protocol', 'tcp'),
-        extra=capture.get('extra'))
+        extra=capture.get('extra'),
+        never_vlans=never)
 
 
 def _main(argv=None):

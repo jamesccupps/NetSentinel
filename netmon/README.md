@@ -56,6 +56,7 @@ It binds to localhost and will not write anything without `--allow-edit`.
 | `protocols/site.py` | naming the systems a building runs |
 | `analyze.py` | the offline analyzer |
 | `redact.py` | what may leave the building |
+| `ringbuffer.py` | the rolling capture: what to run, keep and extract |
 | `alerting.py` | ntfy push and the daily digest |
 | `summarise.py` | asking a model to triage the findings |
 | `web.py` | the local UI |
@@ -175,6 +176,46 @@ the mistakes someone already made.
 A test fires every shipped rule against an event stuffed with a password, a
 session cookie, a card number and a private key, then audits the redacted
 output. Adding a rule that names a value-bearing field fails there.
+
+---
+
+## The rolling capture
+
+A day or two of packets on disk, so that when a rule fires there is something to
+look at.
+
+```
+python -m netmon.ringbuffer --profile my-site.yaml --dir /var/lib/netmon/capture --command
+```
+
+That prints the tcpdump invocation to put in a unit file — filter, snap length,
+rotation and privilege drop included. netmon owns the policy; tcpdump owns the
+plumbing. At 5,000 packets a second a Python capture loop is the wrong tool, and
+writing one would mean reimplementing what libpcap already does well.
+
+```
+python -m netmon.ringbuffer --profile my-site.yaml --dir ... --status
+python -m netmon.ringbuffer --profile my-site.yaml --dir ... --prune
+```
+
+Pass `--ring <dir>` to `netmon.analyze --notify` and each pushed alert gets the
+packets around it written out and named, narrowed to the devices involved — a
+hundred thousand packets become the few dozen someone will read. A failed
+extract never stops the alert.
+
+**Restricted segments are excluded by the filter, not omitted from it.** A
+capture that happens not to select VLAN 40 is one edit away from selecting it.
+The generated filter names every metadata-only segment in a `not` term, so it
+wins even where the `capture:` section explicitly selects that VLAN — and the
+tests demonstrate exactly that case. Extraction applies the same exclusion
+again, because a file on disk was written under whatever profile was current
+then.
+
+Pruning never removes the newest file. It is the one being written, and deleting
+it leaves the capture writing to a deleted inode with no error anywhere. Age
+comes from the filename rather than the mtime, because a file still being
+written has an mtime of now and a name from an hour ago — pruning by mtime would
+keep exactly the wrong ones.
 
 ---
 

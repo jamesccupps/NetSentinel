@@ -410,6 +410,7 @@ sensor_macs:
 #     python -m netmon.bpf --profile my-site.yaml --verify sample.pcap
 
 capture:
+  interface: mirror0              # the capture NIC; no address, no bindings
   vlans: [1, 20, 40, 50, 60]      # note 30 (video) is absent — see below
   include_untagged: true          # management traffic usually is
   drop_hosts: [10.10.30.10]       # recorder: tens of Mbit of no diagnostic value

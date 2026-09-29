@@ -338,6 +338,69 @@ class TestHeaderInjection(_SendCase):
         self.assertTrue(self.title_for(''))
 
 
+class TestCaptureExtracts(_SendCase):
+    """
+    An alert saying "a controller was commanded at 03:14" is worth much more
+    with the thirty seconds either side attached.
+    """
+
+    class _Ring:
+        def __init__(self, result=None, error=None):
+            self.result = result or {'path': '/var/lib/netmon/extract.pcap',
+                                     'packets': 42}
+            self.error = error
+            self.calls = []
+
+        def extract_for_finding(self, finding, seconds=30):
+            self.calls.append((finding.rule_id, seconds))
+            if self.error:
+                raise self.error
+            return self.result
+
+    def notifier_with(self, ring):
+        return Notifier(self.config, self.profile, opener=self.recorder,
+                        ring=ring)
+
+    def test_the_extract_is_named_in_the_alert(self):
+        notifier = self.notifier_with(self._Ring())
+        notifier.send([finding()])
+        self.assertIn('/var/lib/netmon/extract.pcap',
+                      self.recorder.calls[0]['body'])
+
+    def test_it_is_only_done_for_findings_that_push(self):
+        ring = self._Ring()
+        self.notifier_with(ring).send([finding(tier=Tier.DIGEST)])
+        self.assertEqual(ring.calls, [])
+
+    def test_the_window_width_is_configurable(self):
+        self.config.extract_seconds = 90
+        ring = self._Ring()
+        self.notifier_with(ring).send([finding()])
+        self.assertEqual(ring.calls[0][1], 90)
+
+    def test_a_failed_extract_never_stops_the_alert(self):
+        """
+        The alert is the point. A full disk or a window that rotated away is
+        not a reason for nobody to hear about a BACnet write.
+        """
+        ring = self._Ring(error=RuntimeError('nothing on disk'))
+        notifier = self.notifier_with(ring)
+        with self.assertLogs('netmon.alerting', level='INFO'):
+            sent, _ = notifier.send([finding()])
+        self.assertEqual(len(sent), 1)
+        self.assertNotIn('packets:', self.recorder.calls[0]['body'])
+
+    def test_without_a_ring_buffer_nothing_changes(self):
+        sent, _ = self.notifier.send([finding()])
+        self.assertEqual(len(sent), 1)
+        self.assertNotIn('packets:', self.recorder.calls[0]['body'])
+
+    def test_the_extracts_are_recorded_for_the_caller(self):
+        notifier = self.notifier_with(self._Ring())
+        notifier.send([finding(), finding(device='b')])
+        self.assertEqual(len(notifier.extracts), 2)
+
+
 # ─── The digest ──────────────────────────────────────────────────────────────
 
 class _Analyzer:
