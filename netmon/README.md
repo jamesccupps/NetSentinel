@@ -52,6 +52,7 @@ It binds to localhost and will not write anything without `--allow-edit`.
 | `sources/unifi_csv.py` | UniFi flow exports |
 | `sources/pcap.py` | capture files and live mirror ports |
 | `protocols/bacnet.py` | BACnet/IP: commands, objects, broadcast tables |
+| `protocols/site.py` | naming the systems a building runs |
 | `analyze.py` | the offline analyzer |
 | `redact.py` | what may leave the building |
 | `alerting.py` | ntfy push and the daily digest |
@@ -311,6 +312,38 @@ Otis, Gallagher, parking kiosks).
 
 Test it with `python -m unittest discover -s netmon_tests -t .` from the
 repository root.
+
+---
+
+## Naming the systems
+
+A finding that says "TCP 7000" is one nobody acts on. One that says "Otis
+elevator control" goes to the lift contractor.
+
+netmon recognises BACnet, Siemens P2, Gallagher, Otis, Exacq, parking kiosks,
+UniFi Protect and discovery, WeatherFlow, Sentinel licensing, Tailscale,
+WireGuard, OpenVPN, the common remote-access tools, and the cleartext protocols
+worth naming. Add your own under `services:` in the profile — they are checked
+first, because your building beats the default.
+
+Identification goes by magic number, then hostname, then port, in that order of
+how much the answer is worth. Unrecognised traffic is left unnamed rather than
+guessed at: an invented label is worse than none.
+
+Three protocols are read a little further. Siemens P2 yields the roster — which
+panels are announcing themselves, which is the whole point on a protocol with no
+authentication. Otis yields the frame type and nothing else, because the
+protocol has no public specification and guessing at fields would produce
+findings nobody could verify. ESET update traffic yields the Windows build,
+which is the only place on the wire it appears.
+
+**Parking kiosks are metadata only, structurally.** Those broadcasts carry
+cardholder and credential data. The parser matches two named elements by regular
+expression and never walks the document, so there is no path by which another
+field could be read — it is not a filter applied afterwards. Its test fixture is
+synthetic and stuffed with obviously-fake card numbers, PINs and tokens, and the
+tests check none of it comes out, through the parser and again through the whole
+capture-to-alert path.
 
 ---
 

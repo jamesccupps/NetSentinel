@@ -39,13 +39,14 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(
     os.path.abspath(__file__)))))
 
 from netmon.events import Event                                   # noqa: E402
-from netmon.protocols import bacnet                               # noqa: E402
+from netmon.protocols import bacnet, site                         # noqa: E402
 
 logger = logging.getLogger("netmon.sources.pcap")
 
@@ -169,7 +170,50 @@ def packet_to_events(packet, profile=None, scapy=None):
     payload = _transport_payload(packet, scapy)
     specific = _protocol_events(packet, base, payload, src_port, dst_port,
                                 protocol, scapy)
-    return specific or [Event(kind='flow', **base)]
+    events = specific or [Event(kind='flow', **base)]
+    for event in events:
+        _name_the_service(event, payload, profile)
+    return events
+
+
+def _name_the_service(event, payload, profile):
+    """
+    Say which system this is, where that can be established.
+
+    A finding that says "TCP 7000" is one nobody acts on; one that says "Otis
+    elevator control" can go to the lift contractor. The site's own additions
+    come from the profile, because the next building runs a different lift.
+    """
+    service = site.identify(
+        src_port=event.src_port, dst_port=event.dst_port,
+        protocol=event.protocol, payload=payload,
+        name=event.fields.get('sni') or event.fields.get('query') or '',
+        extra_services=getattr(profile, 'services', ()) if profile else ())
+    if service is None:
+        return
+
+    event.fields['service_name'] = service.name
+    event.fields['service_description'] = service.description
+    if service.category:
+        event.fields['service_category'] = service.category
+    event.fields['service_encrypted'] = service.encrypted
+
+    # The three protocols worth reading further. Each adds fields a rule can
+    # match on; none of them reads more of the message than it needs.
+    if service.name == 'parking-kiosk':
+        # Metadata only, always: these carry cardholder data, and the profile's
+        # payload policy is not the mechanism here — the parser is.
+        details = site.parse_kiosk_command(payload)
+        if details:
+            event.fields.update({f'kiosk_{k}': v for k, v in details.items()})
+    elif service.name == 'siemens-p2':
+        details = site.parse_p2(payload, event.src_port, event.dst_port)
+        if details:
+            event.fields.update(details)
+    elif service.name == 'otis':
+        details = site.parse_otis(payload)
+        if details:
+            event.fields.update(details)
 
 
 def _arp_event(arp, src_mac, dst_mac, vlan, timestamp):
@@ -210,6 +254,18 @@ def _protocol_events(packet, base, payload, src_port, dst_port, protocol, scapy)
         if looks_like_quic(payload):
             event = Event(kind='quic', **base)
             return [event]
+
+    if protocol == 'tcp' and 80 in ports and payload:
+        agent = _user_agent(payload)
+        if agent:
+            details = site.parse_eset_user_agent(agent)
+            if details:
+                event = Event(kind='http', **base)
+                event.fields.update(details)
+                # The User-Agent itself is not carried: the OS build is the
+                # finding, and the rest of the string is a fingerprint nobody
+                # asked this monitor to keep.
+                return [event]
 
     credential = _cleartext_kind(ports, payload)
     if credential:
@@ -359,6 +415,15 @@ def _tls_events(base, payload):
         if value:
             event.fields[key] = value
     return [event]
+
+
+_USER_AGENT = re.compile(rb'\r\nUser-Agent:\s*([^\r\n]{1,300})\r\n', re.I)
+
+
+def _user_agent(payload):
+    """The User-Agent header, if this looks like an HTTP request."""
+    found = _USER_AGENT.search(payload[:2048])
+    return found.group(1).decode('latin-1', 'replace') if found else ''
 
 
 def _cleartext_kind(ports, payload):

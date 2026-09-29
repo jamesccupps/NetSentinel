@@ -416,3 +416,84 @@ def upload_volume(event, rule, state):
                   'days_of_history': len(history)},
         next_check=f"Identify the destination: the beaconing and "
                    f"egress_new_destination findings for this device, same day.")
+
+
+@register_handler('p2_roster')
+def p2_roster(event, rule, state):
+    """
+    A Siemens P2 node announcing itself for the first time.
+
+    The roster is the useful part of P2: which panels are advertising, and on
+    which port. A name that was not there last week is a new panel, or
+    something pretending to be one — and on a protocol with no authentication,
+    those look identical from the network.
+    """
+    nodes = event.get('p2_nodes') or []
+    if not nodes:
+        return None
+
+    known = state.setdefault('known', set())
+    learning_until = state.setdefault('learn_until',
+                                      event.ts + float(rule.params.get('learn_sec', 3600)))
+
+    findings = []
+    for node in nodes:
+        if node in known:
+            continue
+        known.add(node)
+        if event.ts < learning_until:
+            continue                      # still building the baseline
+        findings.append(_finding(
+            rule, event, key=node,
+            description=f"{node} appeared in the P2 roster, announced by "
+                        f"{event.get('src_name') or event.src_ip}",
+            evidence={'node': node, 'src_ip': event.src_ip,
+                      'direction': event.get('p2_direction'),
+                      'known_nodes': len(known)},
+            next_check=f'Ask the automation contractor whether {node} was '
+                       f'commissioned. P2 has no authentication, so a new name '
+                       f'is either a new panel or something claiming to be one.'))
+    return findings
+
+
+@register_handler('os_build')
+def os_build(event, rule, state):
+    """
+    A Windows build that is out of support, or behind the rest of the site.
+
+    The build number only appears on the wire in an endpoint's own update
+    traffic, so this is the one place it can be seen without touching the
+    machine. Reported once per device per build, because a machine that has not
+    been patched is not news every hour.
+    """
+    build = event.get('os_build')
+    if not build:
+        return None
+
+    device = event.get('src_name') or event.src_ip or event.src_mac
+    seen = state.setdefault('seen', {})
+    if seen.get(device) == build:
+        return None
+    seen[device] = build
+
+    unsupported = {int(b) for b in (rule.params.get('unsupported_builds') or [])}
+    floor = int(rule.params.get('minimum_build', 0))
+
+    # The rest of the site is the more useful comparison: a build nobody else is
+    # running is a machine nobody is managing, whatever the vendor's dates say.
+    others = [b for d, b in seen.items() if d != device]
+    behind_peers = bool(others) and build < max(others)
+
+    if build not in unsupported and build >= floor and not behind_peers:
+        return None
+
+    why = ('is out of support' if build in unsupported
+           else f'is behind the rest of the site (highest seen: {max(others)})'
+           if behind_peers else f'is below the site minimum of {floor}')
+    return _finding(
+        rule, event, key=str(build),
+        description=f"{device} reports Windows build {build}, which {why}",
+        evidence={'os_build': build, 'os_version': event.get('os_version'),
+                  'os_ubr': event.get('os_ubr'), 'devices_seen': len(seen)},
+        next_check='Confirm the build on the machine itself, then check why it '
+                   'is not receiving updates.')

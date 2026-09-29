@@ -351,6 +351,29 @@ poisonable_names:
   - not-setup
 
 
+# ─── Site-specific systems ───────────────────────────────────────────────────
+# netmon already recognises BACnet, Siemens P2, Gallagher, Otis, Exacq, parking
+# kiosks, UniFi Protect, Tailscale, WireGuard, OpenVPN and the common
+# remote-access tools. Add whatever else your building runs, so findings name
+# the system rather than a port number — the difference between an alert someone
+# acts on and one they ignore.
+#
+# These are checked before the built-in list; your building beats the default.
+
+services:
+  - name: lighting-controller
+    description: Lighting control panel
+    ports: [4001]
+    protocol: tcp
+    category: building-automation
+
+  - name: irrigation
+    description: Irrigation controller
+    ports: [9000]
+    protocol: udp
+    category: building-automation
+
+
 # ─── Routers ─────────────────────────────────────────────────────────────────
 # A trunk mirror shows every routed packet twice: once arriving from the sender
 # on the source VLAN, once leaving the router on the destination VLAN. In a

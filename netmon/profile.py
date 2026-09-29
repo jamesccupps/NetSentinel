@@ -255,6 +255,11 @@ class SiteProfile:
         self.poisonable_names = [n.lower()
                                  for n in (data.get('poisonable_names') or [])]
 
+        # Systems this site runs that the built-in list does not know. Each
+        # entry is {name, description, ports, protocol, category}, and they are
+        # checked before the defaults — the site knows its own building.
+        self.services = _load_services(data.get('services') or [])
+
         # The routers. A trunk mirror shows each routed packet twice — once
         # arriving from the sender, once leaving the router — so without these
         # every byte total doubles and half the traffic is attributed to the
@@ -426,7 +431,30 @@ class SiteProfile:
             'poisonable_names': len(self.poisonable_names),
             'sensor_macs': len(self.sensor_macs),
             'router_macs': len(self.router_macs),
+            'site_services': len(self.services),
         }
+
+
+def _load_services(entries):
+    """Site-specific service definitions, built lazily so profile.py stays
+    importable without the protocols package."""
+    if not entries:
+        return ()
+    from netmon.protocols.site import Service
+    services = []
+    for entry in entries:
+        if not isinstance(entry, dict) or not entry.get('name'):
+            continue
+        services.append(Service(
+            name=str(entry['name']),
+            description=str(entry.get('description', '')),
+            ports=[int(p) for p in (entry.get('ports') or [])
+                   if str(p).isdigit()],
+            protocol=str(entry.get('protocol', '')).lower(),
+            names=[str(n) for n in (entry.get('names') or [])],
+            category=str(entry.get('category', '')),
+            encrypted=bool(entry.get('encrypted', False))))
+    return tuple(services)
 
 
 def load_profile(path):

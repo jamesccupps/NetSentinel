@@ -394,6 +394,40 @@
     zones: [ot, restricted]
     learn_sec: 604800          # a week of observation before it starts reporting
 
+- id: p2_anomaly
+  type: stateful
+  handler: p2_roster
+  title: A new name in the building-automation roster
+  severity: high
+  tier: push
+  grounded_in: >
+    The P2 roster, which is how the supervisory server and its panels find each
+    other. The protocol has no authentication, so a new name is either a new
+    panel or something claiming to be one, and from the network those look
+    identical.
+  when:
+    service_name: siemens-p2
+  params:
+    learn_sec: 3600          # an hour of watching before the roster is 'known'
+
+- id: os_support
+  type: stateful
+  handler: os_build
+  title: An endpoint running an out-of-support or lagging Windows build
+  severity: low
+  tier: weekly
+  grounded_in: >
+    The build number appears on the wire only in an endpoint's own update
+    traffic, so this is the one place it can be seen without touching the
+    machine.
+  params:
+    # Windows 10 builds past end of servicing. Update these as dates pass; a
+    # build nobody else on site is running is caught by the peer comparison
+    # regardless of what is listed here.
+    unsupported_builds: [10240, 10586, 14393, 15063, 16299, 17134, 17763,
+                         18362, 18363, 19041, 19042, 19043]
+    minimum_build: 0
+
 - id: upload_anomaly
   type: stateful
   handler: upload_volume

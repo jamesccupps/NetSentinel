@@ -411,6 +411,133 @@ class TestMetadataOnlySegments(_PcapCase):
         self.assertEqual(events[0].kind, 'dns')
 
 
+# ─── Site protocols, through the whole path ──────────────────────────────────
+
+class TestSiteProtocols(_PcapCase):
+    """
+    The identification reaching an event. A finding that says "TCP 7000" is one
+    nobody acts on; one that says "Otis elevator control" goes to the lift
+    contractor.
+    """
+
+    def tcp(self, port, payload=b'', src='10.10.60.50', dst='10.10.20.21'):
+        return (frame(vlan=20) / IP(src=src, dst=dst)
+                / TCP(sport=50000, dport=port) / Raw(payload or b'\x00'))
+
+    def udp(self, port, payload=b'', src='10.10.50.20', dst='10.10.50.255'):
+        return (frame(vlan=60) / IP(src=src, dst=dst)
+                / UDP(sport=50000, dport=port) / Raw(payload or b'\x00'))
+
+    def test_a_port_names_the_system(self):
+        for port, expected in ((7000, 'otis'), (1072, 'gallagher'),
+                               (22609, 'exacq'), (5033, 'siemens-p2')):
+            with self.subTest(port=port):
+                event = self.one(self.tcp(port))
+                self.assertEqual(event.fields['service_name'], expected)
+                self.assertTrue(event.fields['service_description'])
+
+    def test_an_unrecognised_port_names_nothing(self):
+        """Better than guessing: an invented label is worse than none."""
+        self.assertNotIn('service_name', self.one(self.tcp(12345)).fields)
+
+    def test_the_p2_roster_reaches_the_event(self):
+        event = self.one(self.tcp(5034, b'\x00OCCDCC-SVR|5034\x00BMS-01|5033'))
+        self.assertEqual(event.fields['service_name'], 'siemens-p2')
+        self.assertIn('OCCDCC-SVR|5034', event.fields['p2_nodes'])
+        self.assertEqual(event.fields['p2_direction'], 'panel-to-server')
+
+    def test_an_otis_frame_is_recognised(self):
+        event = self.one(self.tcp(7000, b'\xa5\x5a\x11\x00abcd'))
+        self.assertTrue(event.fields['otis_frame'])
+        self.assertEqual(event.fields['otis_type'], '0x11')
+
+    def test_whether_a_protocol_encrypts_itself_is_recorded(self):
+        self.assertFalse(self.one(self.tcp(5033)).fields['service_encrypted'])
+        self.assertTrue(self.one(self.tcp(1072)).fields['service_encrypted'])
+
+    def test_an_eset_user_agent_yields_the_os_build(self):
+        payload = (b'GET /update HTTP/1.1\r\nHost: update.eset.com\r\n'
+                   b'User-Agent: ESET Update (Windows; OS: 10.0.19044 UBR 3086)'
+                   b'\r\n\r\n')
+        event = self.one(self.tcp(80, payload))
+        self.assertEqual(event.fields['os_build'], 19044)
+        self.assertEqual(event.fields['os_ubr'], 3086)
+
+    def test_the_user_agent_string_itself_is_not_carried(self):
+        """The build is the finding; the rest is a fingerprint nobody asked for."""
+        payload = (b'GET /update HTTP/1.1\r\n'
+                   b'User-Agent: ESET Update (Windows; OS: 10.0.19044)\r\n\r\n')
+        event = self.one(self.tcp(80, payload))
+        self.assertNotIn('user_agent', event.fields)
+        self.assertNotIn('ESET Update', str(event.as_dict()))
+
+    def test_a_site_service_from_the_profile_is_used(self):
+        self.profile = SiteProfile({
+            'vlans': {20: {'name': 'ot', 'subnet': '10.10.20.0/24'}},
+            'services': [{'name': 'lighting', 'description': 'Lighting panel',
+                          'ports': [4001], 'protocol': 'tcp'}]})
+        self.assertEqual(self.one(self.tcp(4001)).fields['service_name'], 'lighting')
+
+
+class TestKioskThroughTheCapturePath(_PcapCase):
+    """
+    The end-to-end version of the metadata-only guarantee: a broadcast full of
+    cardholder data goes in, and only the command name comes out.
+    """
+
+    CARD_DATA = ('4111111111111111', 'A. Person', '0123456789ABCDEF',
+                 'eyJhbGciOiJIUzI1NiJ9')
+
+    def broadcast(self, vlan=60):
+        from netmon_tests.test_site_protocols import kiosk_xml
+        return (frame(vlan=vlan, dst_mac='ff:ff:ff:ff:ff:ff')
+                / IP(src='10.10.50.20', dst='10.10.50.255')
+                / UDP(sport=31769, dport=31769) / Raw(kiosk_xml()))
+
+    def test_the_command_reaches_the_event(self):
+        event = self.one(self.broadcast())
+        self.assertEqual(event.fields['service_name'], 'parking-kiosk')
+        self.assertEqual(event.fields['kiosk_command'], 'RequestStatus')
+
+    def test_no_cardholder_data_reaches_the_event(self):
+        blob = str(self.one(self.broadcast()).as_dict())
+        for secret in self.CARD_DATA:
+            with self.subTest(secret=secret):
+                self.assertNotIn(secret, blob)
+
+    def test_it_holds_on_the_restricted_vlan_too(self):
+        """
+        Where the parser is not even reached, because that segment is not
+        parsed above the transport header at all.
+        """
+        event = self.one(self.broadcast(vlan=40))
+        self.assertEqual(event.kind, 'flow')
+        self.assertNotIn('kiosk_command', event.fields)
+        blob = str(event.as_dict())
+        for secret in self.CARD_DATA:
+            with self.subTest(secret=secret):
+                self.assertNotIn(secret, blob)
+
+    def test_the_finding_that_comes_out_carries_none_of_it_either(self):
+        import netmon.handlers  # noqa: F401
+        from netmon.events import enrich
+        from netmon.redact import ALERT, audit, redact_finding
+        from netmon.rules_engine import load_rules
+
+        rules = load_rules(os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            'netmon', 'rules'))
+        event = self.one(self.broadcast())
+        enrich(event, self.profile)
+        for item in rules.evaluate(event):
+            record = redact_finding(item, self.profile, ALERT)
+            blob = str(record)
+            with self.subTest(rule=item.rule_id):
+                self.assertEqual(audit(record), [])
+                for secret in self.CARD_DATA:
+                    self.assertNotIn(secret, blob)
+
+
 # ─── Router deduplication ────────────────────────────────────────────────────
 
 class TestRouterDeduplication(_PcapCase):
