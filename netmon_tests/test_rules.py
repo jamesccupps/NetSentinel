@@ -695,10 +695,15 @@ class TestCoreRules(_RuleScenario):
                                fields={'service': 'ReadProperty'}))
 
     def test_bacnet_topology(self):
-        self.assertFires('bacnet_topology',
-                         event('bacnet', src_ip='10.10.60.50', dst_ip='10.10.20.21',
-                               fields={'service': 'WriteBroadcastDistributionTable',
-                                       'peer': '192.168.0.7'}))
+        """
+        The event shape the parser actually produces: table operations live in
+        the BVLC header and carry no service at all.
+        """
+        finding = self.assertFires('bacnet_topology', event(
+            'bacnet', src_ip='10.10.60.50', dst_ip='10.10.20.21',
+            fields={'bvlc_function': 'WriteBroadcastDistributionTable',
+                    'bacnet_topology': True, 'peer': '192.168.0.7'}))
+        self.assertIn('WriteBroadcastDistributionTable', finding.description)
 
     def test_sensor_chatter_is_inert_without_configured_capture_macs(self):
         """A site that has not listed its capture NICs gets silence, not noise."""
@@ -882,6 +887,92 @@ class TestStatefulRules(_RuleScenario):
                       bytes_to_dst=60 * 1024 * 1024, ts=86400.0 * day + 43200)
                 for day in range(10, 25)]
         self.assertEqual(self.feed(rule, days), [])
+
+
+class TestRegressionsFoundByRunningIt(_RuleScenario):
+    """
+    Each of these fired — or failed to fire — on a synthetic capture that
+    exercised the whole pipeline. None was visible from the rule text, and none
+    of the unit tests for the parts caught them.
+    """
+
+    def test_bacnet_topology_fires_on_a_bvlc_table_operation(self):
+        """
+        The table operations live in the BVLC header and carry no service, so
+        the rule's original `service:` match found nothing at all. The second
+        most important BACnet finding was silently dead.
+        """
+        self.assertFires('bacnet_topology', event(
+            'bacnet', src_ip='10.10.60.50', dst_ip='10.10.20.21',
+            fields={'bvlc_function': 'WriteBroadcastDistributionTable',
+                    'bacnet_topology': True}))
+
+    def test_bacnet_topology_ignores_ordinary_messages(self):
+        self.assertQuiet('bacnet_topology', event(
+            'bacnet', src_ip='10.10.20.10', dst_ip='10.10.20.21',
+            fields={'bvlc_function': 'Original-Unicast-NPDU',
+                    'service': 'ReadProperty', 'bacnet_topology': False}))
+
+    def test_bad_address_ignores_a_host_with_no_address_yet(self):
+        """0.0.0.0 in a DHCP Discover is how a host says it has none."""
+        self.assertQuiet('bad_address', event(
+            'dhcp', src_ip='0.0.0.0', dst_ip='255.255.255.255', vlan=20,
+            src_mac='aa:bb:cc:00:00:77', fields={'message': 'discover'}))
+
+    def test_bad_address_ignores_a_router_relayed_frame(self):
+        """
+        A frame the router put onto a VLAN carries the original sender's
+        address from another subnet — that is what routing is. Without this,
+        every routed packet on a trunk mirror is a finding.
+        """
+        self.assertQuiet('bad_address', event(
+            src_ip='10.10.60.50', dst_ip='10.10.20.21', vlan=20,
+            src_mac='00:11:22:00:00:50'))          # a router MAC in the profile
+
+    def test_bad_address_still_fires_on_a_genuine_mismatch(self):
+        self.assertFires('bad_address', event(
+            src_ip='10.10.30.41', dst_ip='10.10.1.1', vlan=1,
+            src_mac='00:11:22:00:00:11'))
+
+
+class TestOverlappingIpUsesTheSourceSideOnly(_RuleScenario):
+    """
+    A destination MAC is the next hop. On anything routed that is the router,
+    so pairing it with the destination address reports every routed destination
+    as an address conflict — which it did, twice, on a 111-packet capture.
+    """
+
+    def setUp(self):
+        self.rule = self.rules.by_id('overlapping_ip')
+        self.rule.state = {}
+
+    def feed(self, events):
+        findings = []
+        for evt in events:
+            enrich(evt, self.profile)
+            findings.extend(self.rule.evaluate(evt))
+        return findings
+
+    def test_two_senders_claiming_one_address_is_reported(self):
+        findings = self.feed([
+            event(src_ip='10.10.20.50', src_mac='aa:bb:cc:00:00:01'),
+            event(src_ip='10.10.20.50', src_mac='aa:bb:cc:00:00:02')])
+        self.assertEqual(len(findings), 1)
+
+    def test_the_next_hop_mac_is_not_treated_as_the_owner(self):
+        findings = self.feed([
+            event(src_ip='10.10.60.50', dst_ip='10.10.20.10',
+                  src_mac='00:11:22:00:00:40', dst_mac='00:11:22:00:00:50'),
+            event(src_ip='10.10.60.51', dst_ip='10.10.20.10',
+                  src_mac='00:11:22:00:00:41', dst_mac='00:11:22:00:00:99')])
+        self.assertEqual(findings, [])
+
+    def test_a_host_with_no_address_is_not_a_conflict(self):
+        """Every DHCP client on the segment shares 0.0.0.0."""
+        findings = self.feed([
+            event('dhcp', src_ip='0.0.0.0', src_mac='aa:bb:cc:00:00:01'),
+            event('dhcp', src_ip='0.0.0.0', src_mac='aa:bb:cc:00:00:02')])
+        self.assertEqual(findings, [])
 
 
 class TestRulesAreWellFormed(_RuleScenario):

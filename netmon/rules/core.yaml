@@ -29,6 +29,14 @@
     any:
       - address_matches_vlan: false
       - link_local: true
+  unless:
+    any:
+      # A DHCP client has no address yet. 0.0.0.0 is how it says so.
+      - unspecified_address: true
+      # A frame the router put onto this VLAN carries the original sender's
+      # address from another subnet — that is what routing is. Without this,
+      # every routed packet on a trunk mirror is a finding.
+      - src_is_router: true
   device: src_name
   key: "{src_ip}"
   describe: "{src_name} ({src_ip}) appeared on VLAN {observed_vlan}, whose subnet it is not in"
@@ -330,19 +338,17 @@
     controllers hear what.
   when:
     kind: bacnet
-    service:
-      - WriteBroadcastDistributionTable
-      - ReadBroadcastDistributionTable
-      - RegisterForeignDevice
-      - ReadForeignDeviceTable
-      - DeleteForeignDeviceTableEntry
-      - Forwarded-NPDU
+    # The table operations live in the BVLC header and carry no service, so
+    # matching on `service` here matched nothing at all — the second most
+    # important BACnet finding was silently dead. The parser sets this flag for
+    # exactly the operations that reshape the network.
+    bacnet_topology: true
   unless:
     bacnet_write_allowed: true
   device: dst_name
-  key: "{service}/{peer}"
-  describe: "{src_name} performed {service} involving {peer}"
-  evidence: [src_ip, dst_ip, service, peer]
+  key: "{bvlc_function}/{peer}"
+  describe: "{src_name} performed {bvlc_function}{peer}"
+  evidence: [src_ip, dst_ip, bvlc_function, peer, network]
   next_check: "tshark -r <pcap> -Y 'bvlc.function >= 0x01 && bvlc.function <= 0x07'"
 
 # ─── Behaviour over time ─────────────────────────────────────────────────────

@@ -153,6 +153,13 @@ def _main(argv=None):
                         help='rule file or directory (default: the shipped rules)')
     parser.add_argument('--unifi', metavar='CSV',
                         help='UniFi flow export (.csv or .csv.gz)')
+    parser.add_argument('--pcap', metavar='FILE',
+                        help='a capture file. Protocol-aware rules — BACnet, '
+                             'TLS server names, DNS, DHCP — need this; a flow '
+                             'export does not carry any of it')
+    parser.add_argument('--no-dedup-router', action='store_true',
+                        help='keep the router-relayed copy of routed packets. '
+                             'A trunk mirror shows each one twice')
     parser.add_argument('--limit', type=int, help='stop after N events')
     parser.add_argument('--dedup-window', type=int, default=3600,
                         metavar='SEC', help='collapse repeats within this window')
@@ -167,8 +174,9 @@ def _main(argv=None):
     logging.basicConfig(level=logging.INFO if args.verbose else logging.WARNING,
                         format='%(levelname)s: %(message)s')
 
-    if not args.unifi:
-        parser.error('nothing to read — pass --unifi with an export')
+    if not args.unifi and not args.pcap:
+        parser.error('nothing to read — pass --unifi with an export '
+                     'or --pcap with a capture')
 
     try:
         profile = load_profile(args.profile)
@@ -181,27 +189,40 @@ def _main(argv=None):
         print(f'rules: {e}', file=sys.stderr)
         return 1
 
-    from netmon.sources.unifi_csv import UnifiCsvError, read_flows
-
     analyzer = Analyzer(profile, rules, dedup_window_sec=args.dedup_window)
-    try:
-        analyzer.feed(read_flows(args.unifi, limit=args.limit))
-    except UnifiCsvError as e:
-        print(f'export: {e}', file=sys.stderr)
-        return 1
+    sources = []
+
+    if args.unifi:
+        from netmon.sources.unifi_csv import UnifiCsvError, read_flows
+        try:
+            analyzer.feed(read_flows(args.unifi, limit=args.limit))
+        except UnifiCsvError as e:
+            print(f'export: {e}', file=sys.stderr)
+            return 1
+        sources.append(os.path.basename(args.unifi))
+
+    if args.pcap:
+        from netmon.sources.pcap import PcapError, read_pcap
+        try:
+            analyzer.feed(read_pcap(args.pcap, profile, limit=args.limit,
+                                    dedup_router=not args.no_dedup_router))
+        except PcapError as e:
+            print(f'capture: {e}', file=sys.stderr)
+            return 1
+        sources.append(os.path.basename(args.pcap))
 
     floor = Severity.rank(args.min_severity)
     analyzer.findings = [f for f in analyzer.findings
                          if Severity.rank(f.severity) >= floor]
 
     if args.json:
-        print(json.dumps({'report': analyzer.report(),
+        print(json.dumps({'sources': sources, 'report': analyzer.report(),
                           'findings': [f.as_dict() for f in analyzer.by_severity()]},
                          indent=2, default=str))
         return 0
 
     report = analyzer.report()
-    print(f"{profile.name} — {os.path.basename(args.unifi)}")
+    print(f"{profile.name} — {' + '.join(sources)}")
     print(f"  {report['events']} events, {len(rules)} rules, "
           f"{report['seconds']}s")
     if report['suppressed_repeats']:

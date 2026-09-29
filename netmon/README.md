@@ -18,8 +18,12 @@ apply.
 
 ```
 python -m netmon.analyze --profile netmon/profiles/example-site.yaml \
-                         --unifi flows.csv
+                         --unifi flows.csv --pcap capture.pcapng
 ```
+
+Either source alone works. They answer different questions: a flow export covers
+every device for a day but carries no protocol detail, while a capture carries
+BACnet commands, TLS server names and DNS but only sees one mirror port.
 
 The shipped `example-site.yaml` is a fictional site that exists to document the
 schema. Copy it, fill in your own, and **keep the result out of version
@@ -46,6 +50,8 @@ It binds to localhost and will not write anything without `--allow-edit`.
 | `handlers.py` | the rules that need memory |
 | `rules/core.yaml` | 21 detection rules |
 | `sources/unifi_csv.py` | UniFi flow exports |
+| `sources/pcap.py` | capture files and live mirror ports |
+| `protocols/bacnet.py` | BACnet/IP: commands, objects, broadcast tables |
 | `analyze.py` | the offline analyzer |
 | `web.py` | the local UI |
 
@@ -192,13 +198,28 @@ is absent. Absence of a flow in an export is not evidence it did not happen.
 
 ## Status
 
-Phase 1 works: profile, rules, UniFi import, offline analysis, the UI, and the
-capture-filter builder.
+Working: the profile, the rule engine and 21 rules, UniFi flow import, capture
+reading with BACnet / TLS / DNS / DHCP / ARP parsing, offline analysis, the web
+UI, and the capture-filter builder.
 
-Not built yet: live capture, pcap replay through protocol parsers, ntfy
-alerting, the Claude API summariser, UniFi API device sync, and the
-protocol-specific rules (Siemens P2, Otis, Gallagher, parking kiosks) that need
-those parsers.
+Not built yet: ntfy alerting, the Claude API summariser, UniFi API device sync,
+a rolling capture ring buffer, and the remaining site protocols (Siemens P2,
+Otis, Gallagher, parking kiosks).
 
 Test it with `python -m unittest discover -s netmon_tests -t .` from the
 repository root.
+
+---
+
+## Two things about reading a trunk mirror
+
+**Every routed packet appears twice** — once arriving from the sender on the
+source VLAN, once leaving the router on the destination VLAN. In a measured
+seven-second sample, 3,178 packets appeared on both sides. Counting both doubles
+every byte total and attributes half the traffic to the router. List your
+routers under `router_macs` and the relayed copy is dropped.
+
+**The capture interface should be silent.** No address, no protocol bindings.
+One left configured puts DHCP, NBNS, LLMNR, mDNS, SSDP and EAPOL onto the
+mirrored VLAN, contaminating every baseline built from it. List its MAC under
+`sensor_macs` and the `sensor_chatter` rule will say so if it ever transmits.

@@ -255,6 +255,13 @@ class SiteProfile:
         self.poisonable_names = [n.lower()
                                  for n in (data.get('poisonable_names') or [])]
 
+        # The routers. A trunk mirror shows each routed packet twice — once
+        # arriving from the sender, once leaving the router — so without these
+        # every byte total doubles and half the traffic is attributed to the
+        # router. See netmon.sources.pcap.
+        self.router_macs = {normalise_mac(m)
+                            for m in (data.get('router_macs') or []) if m}
+
         # The monitor's own capture interfaces. They are supposed to be silent:
         # no address, no protocol bindings. If one ever transmits, the monitor
         # has started polluting the segment it is meant to be observing, and
@@ -362,9 +369,11 @@ class SiteProfile:
             if not _MAC_RE.match(mac):
                 problems.append(f"devices: '{mac}' is not a MAC address")
 
-        for mac in self.sensor_macs:
-            if not _MAC_RE.match(mac):
-                problems.append(f"sensor_macs: '{mac}' is not a MAC address")
+        for label, macs in (('sensor_macs', self.sensor_macs),
+                            ('router_macs', self.router_macs)):
+            for mac in macs:
+                if not _MAC_RE.match(mac):
+                    problems.append(f"{label}: '{mac}' is not a MAC address")
 
         for vlan in self.vlans.values():
             if vlan.subnet:
@@ -416,6 +425,7 @@ class SiteProfile:
             'watched_names': len(self.watched_names),
             'poisonable_names': len(self.poisonable_names),
             'sensor_macs': len(self.sensor_macs),
+            'router_macs': len(self.router_macs),
         }
 
 

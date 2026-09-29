@@ -351,6 +351,19 @@ poisonable_names:
   - not-setup
 
 
+# ─── Routers ─────────────────────────────────────────────────────────────────
+# A trunk mirror shows every routed packet twice: once arriving from the sender
+# on the source VLAN, once leaving the router on the destination VLAN. In a
+# measured seven-second sample, 3,178 packets appeared on both sides.
+#
+# List the routers' MACs and the relayed copy is dropped, so byte totals are
+# right and traffic is attributed to whoever actually sent it. Traffic the
+# router itself originates is kept.
+
+router_macs:
+  - 00:11:22:00:00:50
+
+
 # ─── Sensor self-check ───────────────────────────────────────────────────────
 # The monitor's own capture interfaces. They should have no address and no
 # protocol bindings, and should never transmit. List them here and the

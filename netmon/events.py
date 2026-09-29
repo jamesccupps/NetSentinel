@@ -313,6 +313,13 @@ def enrich(event, profile, now=None):
     sensor_macs = getattr(profile, 'sensor_macs', set())
     event.fields['is_sensor_mac'] = bool(sensor_macs) and event.src_mac in sensor_macs
 
+    router_macs = getattr(profile, 'router_macs', set())
+    event.fields['src_is_router'] = bool(router_macs) and event.src_mac in router_macs
+
+    # 0.0.0.0 and :: are how a host says it has no address yet, which is not the
+    # same as having the wrong one.
+    event.fields['unspecified_address'] = event.src_ip in ('0.0.0.0', '::', '')
+
     # Sources disagree about where a name lands: a TLS parser fills `sni`, a
     # flow export fills `query`, a DNS parser fills both. One resolved field
     # means a rule's description reads the same whichever produced the event,

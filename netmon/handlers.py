@@ -113,10 +113,15 @@ def overlapping_ip(event, rule, state):
     owners = state.setdefault('owners', {})
     findings = []
 
-    for ip, mac, vlan in ((event.src_ip, event.src_mac, event.get('src_vlan')),
-                          (event.dst_ip, event.dst_mac, event.get('dst_vlan'))):
+    # Source side only. A destination MAC is the *next hop* — on anything routed
+    # that is the router, so pairing it with the destination address would
+    # report every routed destination as an address conflict. A source MAC is
+    # always the true owner of its source address, and every device sends.
+    for ip, mac, vlan in ((event.src_ip, event.src_mac, event.get('src_vlan')),):
         if not ip or not mac:
             continue
+        if ip in ('0.0.0.0', '::'):
+            continue                          # a host with no address yet
         if rule.params.get('ignore_gateways', True) and ip in _gateways(event):
             continue
 

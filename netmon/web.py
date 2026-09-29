@@ -611,6 +611,10 @@ def _main(argv=None):
     parser.add_argument('--unifi', metavar='CSV',
                         help='analyse this export on startup so the findings '
                              'view has something in it')
+    parser.add_argument('--pcap', metavar='FILE',
+                        help='also analyse this capture. The protocol-aware '
+                             'rules need it; a flow export carries no BACnet, '
+                             'no server names and no DNS')
     parser.add_argument('--limit', type=int, help='stop after N events')
     parser.add_argument('--host', default='127.0.0.1',
                         help='default 127.0.0.1; anything else is a deliberate '
@@ -627,14 +631,19 @@ def _main(argv=None):
                         format='%(levelname)s: %(message)s')
 
     analyzer = None
-    if args.unifi:
+    if args.unifi or args.pcap:
         from netmon.analyze import Analyzer
+        from netmon.sources.pcap import PcapError, read_pcap
         from netmon.sources.unifi_csv import UnifiCsvError, read_flows
         try:
-            analyzer = Analyzer(load_profile(args.profile),
-                                load_rules(args.rules or os.path.join(HERE, 'rules')))
-            analyzer.feed(read_flows(args.unifi, limit=args.limit))
-        except (ProfileError, RuleError, UnifiCsvError) as e:
+            profile = load_profile(args.profile)
+            analyzer = Analyzer(profile, load_rules(
+                args.rules or os.path.join(HERE, 'rules')))
+            if args.unifi:
+                analyzer.feed(read_flows(args.unifi, limit=args.limit))
+            if args.pcap:
+                analyzer.feed(read_pcap(args.pcap, profile, limit=args.limit))
+        except (ProfileError, RuleError, UnifiCsvError, PcapError) as e:
             print(f'{e}', file=sys.stderr)
             return 1
 
