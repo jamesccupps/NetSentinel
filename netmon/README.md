@@ -51,6 +51,7 @@ It binds to localhost and will not write anything without `--allow-edit`.
 | `rules/core.yaml` | 21 detection rules |
 | `sources/unifi_csv.py` | UniFi flow exports |
 | `sources/pcap.py` | capture files and live mirror ports |
+| `sources/unifi_api.py` | bootstrapping a profile from the controller |
 | `protocols/bacnet.py` | BACnet/IP: commands, objects, broadcast tables |
 | `protocols/site.py` | naming the systems a building runs |
 | `analyze.py` | the offline analyzer |
@@ -61,6 +62,45 @@ It binds to localhost and will not write anything without `--allow-edit`.
 
 Each module's docstring explains what it is for and what will go wrong if you
 change it carelessly. Those are the real documentation; this file is the map.
+
+---
+
+## Starting a profile from the controller
+
+Typing out a dozen VLANs and however many devices is where the mistakes are.
+The controller already knows most of it.
+
+```
+# once: get the controller's certificate fingerprint
+python -m netmon.sources.unifi_api --host https://unifi.example --print-fingerprint
+
+export UNIFI_API_KEY=...
+python -m netmon.sources.unifi_api --host https://unifi.example \
+    --fingerprint AA:BB:... --out ~/.config/netmon/my-site.yaml
+```
+
+Then fill in the three things the controller cannot know: a **zone** on each
+VLAN (rules say "into the management zone", not "into VLAN 30", which is what
+makes them portable), **`store_payload: false`** on segments carrying
+credentials or cardholder data, and **`expected_flows`** for the cross-VLAN
+traffic you know about.
+
+Re-running merges. Names, roles, notes and everything the controller does not
+know are kept; new devices are added, and devices that were not seen are kept
+and listed rather than deleted — one that is merely switched off should not
+vanish, and one that has genuinely gone is a decision for a person.
+
+**Read-only, structurally.** The client class has one method, `get`. There is no
+post, put or delete to reach for by accident. Use a view-only UniFi account as
+well; this is the second lock, not the first.
+
+**Pin the certificate rather than skipping verification.** A UniFi gateway on
+your own network presents a self-signed certificate, and the usual advice is
+`--insecure` — which turns "this is the controller" into "this is whatever
+answered", on the one connection about to hand over an API key. `--fingerprint`
+is one command to obtain and is a stronger guarantee than a public CA would give
+for an internal service. `--insecure` exists, says what it gives up, and is not
+the default.
 
 ---
 
