@@ -211,6 +211,17 @@ def evaluate_condition(condition, event):
 
 _PLACEHOLDER = re.compile(r'\{([a-zA-Z_][a-zA-Z0-9_]*)\}')
 
+#: An optional group: `[, object {object}]` disappears entirely when `object` is
+#: empty. Without it, half the BACnet services render as "object ?", because a
+#: DeviceCommunicationControl has no object and a table write has no peer —
+#: which is not a missing value, it is a service that does not have one.
+#:
+#: The group must contain a placeholder. Brackets are ordinary characters in the
+#: commands a `next_check` carries — `tshark -Y 'ether[14:2] & 0x0fff == 5'` —
+#: and a syntax that quietly ate them would corrupt exactly the field whose job
+#: is to be pasted into a terminal.
+_OPTIONAL = re.compile(r'\[([^\[\]]*\{[a-zA-Z_][a-zA-Z0-9_]*\}[^\[\]]*)\]')
+
 
 def render(template, event, fallback='?'):
     """
@@ -218,10 +229,21 @@ def render(template, event, fallback='?'):
 
     str.format on a rule-supplied string would allow `{x.__class__.__mro__}` and
     friends, which turns an editable rule file into a way to read the
-    interpreter. This handles names and nothing else.
+    interpreter. This handles names, and optional groups, and nothing else.
     """
     if not template:
         return ''
+
+    text = str(template)
+
+    def drop_if_empty(match):
+        inner = match.group(1)
+        if any(event.get(name) in (None, '')
+               for name in _PLACEHOLDER.findall(inner)):
+            return ''
+        return inner
+
+    text = _OPTIONAL.sub(drop_if_empty, text)
 
     def replace(match):
         value = event.get(match.group(1))
@@ -229,7 +251,7 @@ def render(template, event, fallback='?'):
             return fallback
         return str(value)
 
-    return _PLACEHOLDER.sub(replace, str(template))
+    return _PLACEHOLDER.sub(replace, text)
 
 
 # ─── Rules ───────────────────────────────────────────────────────────────────

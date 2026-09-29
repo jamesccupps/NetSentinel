@@ -172,7 +172,7 @@ class TestCommands(unittest.TestCase):
         message = parse(bvlc(0x0A, npdu() + confirmed(
             18, context_uint(0, 7) + context_uint(1, 511))))
         self.assertEqual(message.vendor, 7)
-        self.assertEqual(message.private_service, 511)
+        self.assertEqual(message.vendor_service, 511)
 
     def test_a_recognised_private_transfer_is_named(self):
         """So it reads as the site's own automation traffic, not a mystery."""

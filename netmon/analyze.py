@@ -168,6 +168,18 @@ def _main(argv=None):
     parser.add_argument('--json', action='store_true')
     parser.add_argument('--quiet', action='store_true',
                         help='summary only, no individual findings')
+    parser.add_argument('--notify', action='store_true',
+                        help='push the findings that need attention now. '
+                             'Configure with NETMON_NTFY_SERVER and '
+                             'NETMON_NTFY_TOPIC, or --secrets')
+    parser.add_argument('--digest', action='store_true',
+                        help='send the daily report')
+    parser.add_argument('--secrets', metavar='FILE',
+                        help='JSON file with the ntfy settings. Must be mode '
+                             '600; the environment overrides it')
+    parser.add_argument('--dry-run', action='store_true',
+                        help='with --notify or --digest, print what would be '
+                             'sent instead of sending it')
     parser.add_argument('-v', '--verbose', action='store_true')
     args = parser.parse_args(argv)
 
@@ -236,8 +248,49 @@ def _main(argv=None):
     if report['by_severity']:
         print('  ' + ', '.join(f'{k} {v}' for k, v in report['by_severity'].items()))
 
+    if args.notify or args.digest:
+        code = _notify(analyzer, profile, args)
+        if code:
+            return code
+
     # A non-zero exit when something needs attention, so this can be a cron job.
     return 2 if report['push'] else 0
+
+
+def _notify(analyzer, profile, args):
+    """Deliver the findings. Returns a non-zero code only on a real failure."""
+    from netmon.alerting import AlertingError, Notifier, load_config
+
+    try:
+        config = load_config(args.secrets)
+    except AlertingError as e:
+        print(f'alerting: {e}', file=sys.stderr)
+        return 1
+    if args.dry_run:
+        config.dry_run = True
+
+    notifier = Notifier(config, profile)
+    try:
+        if args.notify:
+            sent, skipped = notifier.send(analyzer.findings)
+            print()
+            print(f'pushed {len(sent)}, held back {len(skipped)} for the digest')
+        if args.digest:
+            notifier.send_digest(analyzer)
+            print('digest sent')
+    except AlertingError as e:
+        print(f'alerting: {e}', file=sys.stderr)
+        return 1
+
+    if config.dry_run:
+        for message in notifier.sent:
+            print()
+            print(f'--- would POST to {message["url"]} ---')
+            print(message['body'])
+    if notifier.failures:
+        print(f'{len(notifier.failures)} could not be delivered', file=sys.stderr)
+        return 1
+    return 0
 
 
 if __name__ == '__main__':

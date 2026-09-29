@@ -176,7 +176,7 @@
     approved_remote_access: true
   device: src_name
   key: "{watched_name}"
-  describe: "{src_name} ({src_ip}) contacted {watched_name} — {name_seen}"
+  describe: "{src_name} ({src_ip}) contacted {watched_name}[ — {name_seen}]"
   evidence: [name_seen, dst_ip, dst_port, watched_name]
   escalate:
     when:
@@ -324,7 +324,7 @@
     bacnet_write_allowed: true
   device: dst_name
   key: "{src_ip}->{dst_ip}/{object}"
-  describe: "{src_name} ({src_ip}) sent {service} to {dst_name} ({dst_ip}), object {object}"
+  describe: "{src_name} ({src_ip}) sent {service} to {dst_name} ({dst_ip})[, object {object}]"
   evidence: [src_ip, dst_ip, service, object, value]
   next_check: "tshark -r <pcap> -Y 'bacapp.type == 0 && ip.src == {src_ip}' -T fields -e bacapp.confirmed_service"
 
@@ -347,7 +347,7 @@
     bacnet_write_allowed: true
   device: dst_name
   key: "{bvlc_function}/{peer}"
-  describe: "{src_name} performed {bvlc_function}{peer}"
+  describe: "{src_name} performed {bvlc_function}[ involving {peer}]"
   evidence: [src_ip, dst_ip, bvlc_function, peer, network]
   next_check: "tshark -r <pcap> -Y 'bvlc.function >= 0x01 && bvlc.function <= 0x07'"
 

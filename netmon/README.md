@@ -53,6 +53,8 @@ It binds to localhost and will not write anything without `--allow-edit`.
 | `sources/pcap.py` | capture files and live mirror ports |
 | `protocols/bacnet.py` | BACnet/IP: commands, objects, broadcast tables |
 | `analyze.py` | the offline analyzer |
+| `redact.py` | what may leave the building |
+| `alerting.py` | ntfy push and the daily digest |
 | `web.py` | the local UI |
 
 Each module's docstring explains what it is for and what will go wrong if you
@@ -78,6 +80,59 @@ python -m netmon.profile ~/.config/netmon/my-site.yaml     # validate it
 Captures are excluded too. Some segments carry credentials or cardholder data in
 the clear; a test fixture must be synthetic, and every fixture in
 `netmon_tests/` is.
+
+---
+
+## Alerting
+
+```
+export NETMON_NTFY_SERVER=https://ntfy.your-server.example
+export NETMON_NTFY_TOPIC=occ-alerts
+export NETMON_NTFY_TOKEN=tk_...          # or omit, for a server only you can reach
+
+python -m netmon.analyze --profile my-site.yaml --pcap capture.pcapng \
+                         --notify --digest
+```
+
+Add `--dry-run` to see what would be sent. Settings can also live in a JSON file
+passed with `--secrets`, which must be mode 600 — the environment overrides it.
+
+**Publishing to a public ntfy topic is refused.** ntfy.sh has no access control
+on a topic: anyone who guesses or overhears the name receives everything sent to
+it, forever. These alerts name devices, addresses and weaknesses, so a guessable
+topic is a live feed of the site's soft spots. Use an access token, or host your
+own server.
+
+Push is reserved for the `push` tier and, by default, `high` and above. A
+notification for something that can wait is how push gets muted, after which
+nothing gets through at all.
+
+---
+
+## What leaves, and where it goes
+
+Every outbound path goes through `redact.py`, which has two audiences because
+the rules differ:
+
+**Alerts** may name devices, addresses, VLANs and what happened — that is the
+alert. They may not carry payload, credential values, cookies, card or RFID
+data. Metadata from a restricted segment *is* allowed: "a door controller
+reached the internet at 3am" is exactly what those segments exist to produce,
+and contains nothing regulated.
+
+**A summary sent to a model** gets all of the above, and nothing at all from a
+restricted segment — not the addresses, not the device names, not the fact that
+something happened there. The count of what was withheld is included, so the
+omission cannot be read as "nothing happened there".
+
+Evidence fields are allowlisted, not denylisted. Rules are edited by site
+operators and can name any field they like, so the question has to be "is this
+known to be safe", not "is this known to be dangerous" — a denylist is a list of
+the mistakes someone already made.
+
+A test fires every shipped rule against an event stuffed with a password, a
+session cookie, a card number and a private key, then audits the redacted
+output. Adding a rule that names a value-bearing field fails there.
 
 ---
 
@@ -162,6 +217,11 @@ Nothing is evaluated as code.
 Everything the profile knows was resolved before the rule ran, so `src_role`,
 `src_zone`, `flow_expected`, `bacnet_write_allowed`, `quiet_hours` and
 `direction` are all just fields.
+
+In a description, `[...]` containing a `{field}` disappears when that field is
+empty — `[, object {object}]` for the BACnet services that have no object.
+Brackets with no placeholder are left alone, so a `next_check` carrying
+`ether[14:2]` survives intact.
 
 Validate before you rely on it:
 

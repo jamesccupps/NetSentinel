@@ -168,6 +168,46 @@ class TestRendering(unittest.TestCase):
         self.assertEqual(render('', self.e), '')
         self.assertEqual(render(None, self.e), '')
 
+    def test_an_optional_group_survives_when_its_field_is_present(self):
+        self.assertEqual(render('reached {sni}[ on {dst_port}]', self.e),
+                         'reached example.test on 443')
+
+    def test_an_optional_group_vanishes_when_its_field_is_empty(self):
+        """
+        A BACnet DeviceCommunicationControl has no object and a table write has
+        no peer. That is a service without one, not a missing value, and
+        rendering it as "object ?" reads like the parser failed.
+        """
+        self.assertEqual(render('sent {sni}[, object {object}]', self.e),
+                         'sent example.test')
+
+    def test_a_group_with_several_fields_needs_all_of_them(self):
+        self.assertEqual(render('x[ {sni} {missing}]', self.e), 'x')
+        self.assertEqual(render('x[ {sni} {dst_port}]', self.e),
+                         'x example.test 443')
+
+    def test_brackets_without_a_placeholder_are_ordinary_characters(self):
+        """
+        `next_check` carries commands to paste into a terminal, and brackets are
+        ordinary there — `tshark -Y 'ether[14:2] & 0x0fff == 5'`. A syntax that
+        ate them would corrupt exactly the field whose job is to be run.
+        """
+        template = "tshark -r <pcap> -Y 'ether[14:2] & 0x0fff == 5 && ip.src == {src_name}'"
+        self.assertEqual(
+            render(template, self.e),
+            "tshark -r <pcap> -Y 'ether[14:2] & 0x0fff == 5 && ip.src == hvac-pc'")
+
+    def test_a_bare_bracket_group_is_kept_verbatim(self):
+        self.assertEqual(render('a[ literal ]b', self.e), 'a[ literal ]b')
+
+    def test_a_group_containing_a_placeholder_is_optional(self):
+        self.assertEqual(render('tshark -Y [{sni}]', self.e),
+                         'tshark -Y example.test')
+        self.assertEqual(render('tshark -Y [{missing}]', self.e), 'tshark -Y ')
+
+    def test_unmatched_brackets_do_not_swallow_the_rest(self):
+        self.assertEqual(render('a [ b {sni}', self.e), 'a [ b example.test')
+
 
 # ─── Load-time validation ────────────────────────────────────────────────────
 

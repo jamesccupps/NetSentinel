@@ -234,9 +234,14 @@ class BacnetMessage:
     them. `is_write` and `is_topology` are the two questions rules actually ask.
     """
 
+    #: `vendor_service` rather than `private_service`, which is what the
+    #: standard calls it: the outbound redaction gate drops any field whose name
+    #: contains "private", for private keys. The BACnet sense of the word is
+    #: entirely benign, but narrowing that denylist to fix one field name is how
+    #: a hole gets made. Renaming the field costs nothing.
     __slots__ = ('bvlc_function', 'apdu_type', 'service', 'object',
                  'property', 'invoke_id', 'peer', 'network', 'vendor',
-                 'private_service', 'truncated', 'reinitialize_state',
+                 'vendor_service', 'truncated', 'reinitialize_state',
                  'device_instance', 'enable_disable')
 
     def __init__(self, **kw):
@@ -268,7 +273,7 @@ class BacnetMessage:
             'peer': self.peer,
             'network': self.network,
             'vendor': self.vendor,
-            'private_service': self.private_service,
+            'vendor_service': self.vendor_service,
             'device_instance': self.device_instance,
             'reinitialize_state': self.reinitialize_state,
             'enable_disable': self.enable_disable,
@@ -472,7 +477,7 @@ def _parse_parameters(reader, message):
         vendor = _context_uint(reader, expect_tag=0)
         private = _context_uint(reader, expect_tag=1)
         message.vendor = vendor
-        message.private_service = private
+        message.vendor_service = private
         known = KNOWN_PRIVATE_TRANSFERS.get((vendor, private))
         if known:
             message.object = known
