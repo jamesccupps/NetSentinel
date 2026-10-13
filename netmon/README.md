@@ -17,9 +17,13 @@ apply.
 ## Try it
 
 ```
-python -m netmon.analyze --profile netmon/profiles/example-site.yaml \
+python -m netmon                  # what there is
+python -m netmon analyze --profile netmon/profiles/example-site.yaml \
                          --unifi flows.csv --pcap capture.pcapng
 ```
+
+Every command is also a module — `python -m netmon.drift …` — which is what a
+unit file or a cron entry should use.
 
 Either source alone works. They answer different questions: a flow export covers
 every device for a day but carries no protocol detail, while a capture carries
@@ -61,7 +65,9 @@ It binds to localhost and will not write anything without `--allow-edit`.
 | `ringbuffer.py` | the rolling capture: what to run, keep and extract |
 | `alerting.py` | ntfy push and the daily digest |
 | `summarise.py` | asking a model to triage the findings |
+| `service.py` | the recurring work, as one process |
 | `web.py` | the local UI |
+| `deploy/` | two systemd units and what to check before trusting them |
 
 Each module's docstring explains what it is for and what will go wrong if you
 change it carelessly. Those are the real documentation; this file is the map.
@@ -457,15 +463,47 @@ is absent. Absence of a flow in an export is not evidence it did not happen.
 
 ---
 
+## Running it on a sensor
+
+```
+python -m netmon serve --profile /etc/netmon/site.yaml \
+    --ring /var/lib/netmon/capture --state /var/lib/netmon/state \
+    --canary-log /var/log/opencanary.log --secrets /etc/netmon/secrets.json \
+    --unifi-host https://unifi.example --fingerprint AA:BB:...
+```
+
+One process doing the recurring work: analyse each capture as it rotates, check
+the controller configuration every few hours, follow the canary log, prune the
+ring buffer, push what needs attention, send a daily digest, serve the UI.
+
+`--once` does a single pass and exits, for a cron entry.
+
+**It does not capture packets.** tcpdump does, under its own unit, with the
+filter `netmon capture --command` prints. Keeping them separate means a crash
+here loses analysis — which can be redone — and not the capture, which cannot.
+`deploy/` has both units and the checks worth doing before trusting them.
+
+Each job is independent. One failing — the controller unreachable, the canary
+log rotated out from under it — is logged, rescheduled, and does not stop the
+others; the alternative is a sensor that goes quiet for a reason nobody
+notices.
+
+Progress is kept on disk, so a restart does not re-analyse yesterday or
+re-alert on what was already sent. A service nobody dares restart is a service
+nobody updates.
+
+---
+
 ## Status
 
 Working: the profile, the rule engine and 21 rules, UniFi flow import, capture
 reading with BACnet / TLS / DNS / DHCP / ARP parsing, offline analysis, the web
 UI, and the capture-filter builder.
 
-Not built yet: ntfy alerting, the Claude API summariser, UniFi API device sync,
-a rolling capture ring buffer, and the remaining site protocols (Siemens P2,
-Otis, Gallagher, parking kiosks).
+Everything the spec listed is built: the profile, 23 rules, UniFi flow import,
+capture reading with BACnet / TLS / DNS / DHCP / ARP / site-protocol parsing,
+the rolling capture, configuration drift, canary hits, ntfy alerting, model
+triage, the web UI, the capture-filter builder, and the service that runs them.
 
 Test it with `python -m unittest discover -s netmon_tests -t .` from the
 repository root.

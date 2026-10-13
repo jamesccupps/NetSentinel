@@ -1,0 +1,36 @@
+# The capture. Replace the tcpdump line with exactly what
+#   python -m netmon capture --profile ... --dir ... --command
+# prints: it carries the VLAN-aware filter, the snap length and the rotation,
+# and the filter excludes any segment the profile marks metadata-only.
+#
+# Separate from netmon.service on purpose: a crash in the analysis loses
+# analysis, which can be redone, and not the capture, which cannot.
+[Unit]
+Description=netmon capture
+After=network-online.target
+
+[Service]
+Type=simple
+# Root to open the capture socket; tcpdump's -Z drops to netmon immediately
+# after, before it writes anything.
+ExecStartPre=/bin/mkdir -p /var/lib/netmon/capture
+ExecStartPre=/bin/chown netmon:netmon /var/lib/netmon/capture
+ExecStartPre=/bin/chmod 700 /var/lib/netmon/capture
+ExecStart=/usr/bin/tcpdump -i mirror0 \
+    -w /var/lib/netmon/capture/netmon-%%Y%%m%%d-%%H%%M%%S.pcap \
+    -G 900 -s 2048 -n -Z netmon --immediate-mode \
+    'REPLACE WITH THE FILTER netmon capture --command PRINTS'
+
+Restart=always
+RestartSec=10
+# Pruning is netmon.service's job: it knows the retention policy.
+
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/netmon/capture
+CapabilityBoundingSet=CAP_NET_RAW CAP_NET_ADMIN CAP_SETUID CAP_SETGID CAP_DAC_OVERRIDE
+
+[Install]
+WantedBy=multi-user.target

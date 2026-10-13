@@ -1,0 +1,54 @@
+# The analysis. Captures come from netmon-capture.service; see README.md.
+[Unit]
+Description=netmon — passive site network monitoring
+Documentation=https://github.com/jamesccupps/NetSentinel
+After=network-online.target netmon-capture.service
+Wants=netmon-capture.service
+
+[Service]
+Type=simple
+User=netmon
+Group=netmon
+WorkingDirectory=/opt/netmon
+
+# The profile is a map of the network; the secrets file holds tokens. Both are
+# read, neither is written.
+EnvironmentFile=-/etc/netmon/environment
+ExecStart=/usr/bin/python3 -m netmon serve \
+    --profile /etc/netmon/site.yaml \
+    --ring /var/lib/netmon/capture \
+    --state /var/lib/netmon/state \
+    --canary-log /var/log/opencanary.log \
+    --secrets /etc/netmon/secrets.json \
+    --unifi-host https://unifi.internal.example \
+    --fingerprint CHANGE_ME \
+    --web-host 127.0.0.1 --web-port 8788
+
+Restart=on-failure
+RestartSec=30
+# A restart must not re-analyse yesterday or re-alert on what was already
+# sent; progress is kept under --state, so this is safe.
+
+# This process reads captures and talks to two network services. It needs
+# nothing else.
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+CapabilityBoundingSet=
+ReadWritePaths=/var/lib/netmon
+ReadOnlyPaths=/etc/netmon
+
+[Install]
+WantedBy=multi-user.target
