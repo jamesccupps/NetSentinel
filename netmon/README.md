@@ -56,6 +56,7 @@ It binds to localhost and will not write anything without `--allow-edit`.
 | `protocols/site.py` | naming the systems a building runs |
 | `analyze.py` | the offline analyzer |
 | `redact.py` | what may leave the building |
+| `drift.py` | what the network is *allowed* to do, and what changed |
 | `ringbuffer.py` | the rolling capture: what to run, keep and extract |
 | `alerting.py` | ntfy push and the daily digest |
 | `summarise.py` | asking a model to triage the findings |
@@ -176,6 +177,47 @@ the mistakes someone already made.
 A test fires every shipped rule against an event stuffed with a password, a
 session cookie, a card number and a private key, then audits the redacted
 output. Adding a rule that names a value-bearing field fails there.
+
+---
+
+## Configuration drift
+
+The packet rules watch what the network does. This watches what it is *allowed*
+to do, which changes without any packet being unusual.
+
+```
+python -m netmon.drift --profile my-site.yaml --host https://unifi.example \
+    --fingerprint AA:BB:... --state ~/.local/state/netmon/unifi.json --notify
+```
+
+A port profile switched to "allow all" exposes every VLAN on that port and
+produces no odd traffic until something is plugged in. A new port forward opens
+a path from the internet and looks like nothing until it is used. A firewall
+rule disabled "temporarily" six months ago is now the configuration.
+
+Two kinds of finding:
+
+**Standing** — wrong now, reported until fixed. These need no baseline: a
+profile allowing every VLAN is wrong on the first run too, and a check that only
+fired the moment it changed would miss every site that was already
+misconfigured. Push the first time, digest after — reported either way, because
+a standing misconfiguration that stops being mentioned stops being fixed, but
+pushing the same one nightly is how push gets muted.
+
+**Drift** — what changed. Needs a baseline, so the first run records one and
+says so; reporting the whole configuration as new would be true and useless.
+
+When something is both newly wrong *and* a change, the change wins: "a port
+forward appeared" is strictly more informative than "a port forward exists", and
+reporting both would be two alerts for one event.
+
+A three-run sequence settles: the first run pushes what it found, the second
+pushes what changed, and the third pushes nothing while still listing every
+standing problem in the digest.
+
+The snapshot is the network's defences written down — every firewall rule, every
+forward, every port's VLAN membership — so it is kept owner-only, and the
+findings carry rule names and port numbers rather than the rules themselves.
 
 ---
 
