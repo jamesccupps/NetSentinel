@@ -56,6 +56,7 @@ It binds to localhost and will not write anything without `--allow-edit`.
 | `protocols/site.py` | naming the systems a building runs |
 | `analyze.py` | the offline analyzer |
 | `redact.py` | what may leave the building |
+| `canary.py` | hits on a host that has no legitimate users |
 | `drift.py` | what the network is *allowed* to do, and what changed |
 | `ringbuffer.py` | the rolling capture: what to run, keep and extract |
 | `alerting.py` | ntfy push and the daily digest |
@@ -177,6 +178,39 @@ the mistakes someone already made.
 A test fires every shipped rule against an event stuffed with a password, a
 session cookie, a card number and a private key, then audits the redacted
 output. Adding a rule that names a value-bearing field fails there.
+
+---
+
+## Canary hits
+
+```
+python -m netmon.canary --profile my-site.yaml --log /var/log/opencanary.log --notify
+```
+
+A canary has no legitimate users. Every other finding here needs a judgement
+about whether the traffic was normal; this one does not. Something connected to
+a service that exists only to be connected to, and that is the whole finding —
+always high, always push.
+
+**Read the log file if you can.** OpenCanary writes JSON lines, and reading them
+needs no listener, no open port and no shared secret. `--listen HOST:PORT` runs
+a webhook for when the canary cannot reach the sensor's disk: one route, one
+verb, a token compared with `compare_digest`, a capped body and a capped rate.
+A `GET` returns 405 rather than a status page — it listens on a network the
+canary is on, and anything it says is something an attacker learns for free.
+
+**The username is reported; the password never is.** A scanner using
+`admin/admin` and someone using your real service account are very different
+problems, and the username is how you tell. The password is not logged, alerted,
+stored, or counted beyond "a password was supplied" — and not even that when the
+field was blank, since a blank one is a scanner working through a list. If it
+happens to be a real password, writing it into an alert is the same mistake as
+finding one in a packet and keeping it.
+
+The fields of a canary's `logdata` are allowlisted, because OpenCanary's modules
+each add their own keys and the next version will add more. A test stuffs every
+plausible credential key into a record and checks none of it comes out, through
+the parser, the finding, and redaction into an alert.
 
 ---
 
