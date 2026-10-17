@@ -52,7 +52,7 @@ It binds to localhost and will not write anything without `--allow-edit`.
 | `events.py` | one event type for every source, plus enrichment |
 | `rules_engine.py` | the YAML rule language |
 | `handlers.py` | the rules that need memory |
-| `rules/core.yaml` | 21 detection rules |
+| `rules/core.yaml` | 24 detection rules |
 | `sources/unifi_csv.py` | UniFi flow exports |
 | `sources/pcap.py` | capture files and live mirror ports |
 | `sources/unifi_api.py` | bootstrapping a profile from the controller |
@@ -500,7 +500,7 @@ Working: the profile, the rule engine and 21 rules, UniFi flow import, capture
 reading with BACnet / TLS / DNS / DHCP / ARP parsing, offline analysis, the web
 UI, and the capture-filter builder.
 
-Everything the spec listed is built: the profile, 23 rules, UniFi flow import,
+Everything the spec listed is built: the profile, 24 rules, UniFi flow import,
 capture reading with BACnet / TLS / DNS / DHCP / ARP / site-protocol parsing,
 the rolling capture, configuration drift, canary hits, ntfy alerting, model
 triage, the web UI, the capture-filter builder, and the service that runs them.

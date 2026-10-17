@@ -128,7 +128,7 @@
   device: src_name
   key: "{dst_ip}"
   describe: "{src_name} sent {kind} to {dst_ip}, not the gateway"
-  evidence: [dst_ip, dst_port, query]
+  evidence: [dst_ip, dst_port, query, name_seen]
   escalate:
     when: {src_zone: [ot, restricted]}
     severity: high
@@ -441,3 +441,25 @@
     min_bytes: 52428800        # 50 MB before the baseline is worth consulting
     multiple: 4                # times its own median day
     quiet_hours_multiple: 2    # a lower bar when nobody is on site
+
+
+# ─── The gateway's own IPS ───────────────────────────────────────────────────
+
+- id: unifi_ips_behavioral
+  title: The gateway's IPS matched a behavioural signature
+  severity: high
+  tier: push
+  grounded_in: >
+    285 IPS hits in a day at the site this was written for, every one an
+    IP-reputation list. A reputation hit says an address is on someone's list;
+    a behavioural signature says the traffic looked like an attack. Drowning
+    the second in the first is how the one that matters gets missed.
+  when:
+    signature: {exists: true}
+  unless:
+    signature: {matches: 'ET (CINS|DROP|COMPROMISED|TOR|3CORESec)\b|Reputation|Dshield|Spamhaus|Block ?Listed'}
+  device: src_name
+  key: "{signature_id}"
+  describe: "{src_name} ({src_ip}) tripped an IPS signature[ {signature_id}]: {signature}"
+  evidence: [signature, signature_id, policy, action, src_ip, dst_ip, dst_port]
+  next_check: "Look up signature {signature_id}, then check {src_name} for what it matched — the capture around it, if the ring buffer was running."

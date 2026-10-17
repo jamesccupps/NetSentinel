@@ -244,9 +244,21 @@ def _protocol_events(packet, base, payload, src_port, dst_port, protocol, scapy)
     if 67 in ports or 68 in ports:
         return _dhcp_events(packet, base, scapy)
 
+    if protocol == 'tcp' and 853 in ports:
+        # DNS over TLS has its own port, so it is recognisable whether or not
+        # this packet carries the handshake.
+        events = _tls_events(base, payload) if payload else []
+        event = events[0] if events else Event(kind='flow', **base)
+        event.kind = 'dot'
+        return [event]
+
     if protocol == 'tcp' and payload:
         events = _tls_events(base, payload)
         if events:
+            if _is_doh(events[0].fields.get('sni')):
+                # DNS over HTTPS looks like any other HTTPS except for the
+                # server name, and is invisible to every DNS-based rule here.
+                events[0].kind = 'doh'
             return events
 
     if protocol == 'udp' and 443 in ports and payload:
@@ -276,6 +288,22 @@ def _protocol_events(packet, base, payload, src_port, dst_port, protocol, scapy)
         return [event]
 
     return []
+
+
+#: Public DNS-over-HTTPS endpoints. A device resolving through one is invisible
+#: to every DNS-based rule here, which is the finding. Matched on a label
+#: boundary, so a lookalike domain is not mistaken for one.
+DOH_HOSTNAMES = frozenset({
+    'dns.google', 'dns.google.com', 'cloudflare-dns.com', 'one.one.one.one',
+    'dns.quad9.net', 'doh.opendns.com', 'dns.adguard-dns.com', 'dns.nextdns.io',
+    'doh.cleanbrowsing.org', 'dns.alidns.com', 'doh.pub', 'doh.mullvad.net',
+})
+
+
+def _is_doh(server_name):
+    name = str(server_name or '').lower().rstrip('.')
+    return bool(name) and any(name == host or name.endswith('.' + host)
+                              for host in DOH_HOSTNAMES)
 
 
 def _bacnet_events(base, payload):

@@ -449,6 +449,17 @@ class TestEndToEnd(_FileTestCase):
                 'Dst. Ip': '203.0.113.70'}))
         self.assertNotIn('upload_anomaly', [f.rule_id for f in self.run_file(rows)])
 
+    def test_a_behavioural_ips_signature_in_an_export(self):
+        findings = self.run_file([row(Signature='ET SCAN Suspicious inbound to MSSQL port 1433',
+                                      **{'Signature ID': '2010935'})])
+        self.assertIn('unifi_ips_behavioral', [f.rule_id for f in findings])
+
+    def test_reputation_hits_in_an_export_stay_quiet(self):
+        findings = self.run_file([row(
+            Signature='ET CINS Active Threat Intelligence Poor Reputation IP group 42',
+            **{'Signature ID': '2403341'})])
+        self.assertNotIn('unifi_ips_behavioral', [f.rule_id for f in findings])
+
 
 if __name__ == '__main__':
     unittest.main(verbosity=2)

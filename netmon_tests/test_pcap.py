@@ -639,5 +639,39 @@ class TestReading(_PcapCase):
         self.assertAlmostEqual(self.one(packet).ts, 1_790_255_100.5, places=1)
 
 
+class TestEncryptedDns(_PcapCase):
+    """DNS through a resolver of the device's own choosing escapes every DNS check here."""
+
+    def hello(self, sni, port=443, dst='1.1.1.1'):
+        from netmon_tests._tls_fixture import build_client_hello
+        return (frame(vlan=60) / IP(src='10.10.60.50', dst=dst)
+                / TCP(sport=50000, dport=port) / Raw(build_client_hello(sni)))
+
+    def test_a_known_doh_server_is_marked(self):
+        event = self.one(self.hello('cloudflare-dns.com'))
+        self.assertEqual(event.kind, 'doh')
+        self.assertEqual(event.fields['sni'], 'cloudflare-dns.com')
+
+    def test_a_subdomain_of_one_counts(self):
+        self.assertEqual(self.one(self.hello('mozilla.cloudflare-dns.com')).kind, 'doh')
+
+    def test_a_lookalike_does_not(self):
+        """Matched on a label boundary, so notcloudflare-dns.com is just TLS."""
+        self.assertEqual(self.one(self.hello('notcloudflare-dns.com')).kind, 'tls')
+
+    def test_ordinary_tls_is_unchanged(self):
+        self.assertEqual(self.one(self.hello('www.example.test')).kind, 'tls')
+
+    def test_dns_over_tls_is_marked_by_port(self):
+        event = self.one(self.hello('dns.example.test', port=853))
+        self.assertEqual(event.kind, 'dot')
+        self.assertEqual(event.fields['sni'], 'dns.example.test')
+
+    def test_dot_without_a_handshake_is_still_dot(self):
+        packet = (frame(vlan=60) / IP(src='10.10.60.50', dst='1.1.1.1')
+                  / TCP(sport=50000, dport=853) / Raw(b'\x17\x03\x03\x00\x10' + bytes(16)))
+        self.assertEqual(self.one(packet).kind, 'dot')
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)

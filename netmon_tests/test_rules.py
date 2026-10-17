@@ -1087,5 +1087,41 @@ class TestRulesAreWellFormed(_RuleScenario):
                                  f'{rule.id} fired on an empty event')
 
 
+class TestRulesAddedLater(_RuleScenario):
+
+    def test_a_behavioural_ips_signature(self):
+        finding = self.assertFires('unifi_ips_behavioral', event(
+            src_ip='10.10.60.50', dst_ip='203.0.113.9', dst_port=1433,
+            fields={'signature': 'ET SCAN Suspicious inbound to MSSQL port 1433',
+                    'signature_id': '2010935', 'action': 'blocked'}))
+        self.assertEqual(finding.tier, Tier.PUSH)
+        self.assertIn('2010935', finding.description)
+
+    def test_reputation_hits_are_not_reported(self):
+        """285 a day at the site this was written for, all of them noise."""
+        for signature in ('ET CINS Active Threat Intelligence Poor Reputation IP group 42',
+                          'ET DROP Dshield Block Listed Source group 1',
+                          'ET COMPROMISED Known Compromised or Hostile Host Traffic group 7',
+                          'ET TOR Known Tor Exit Node Traffic group 3',
+                          'ET DROP Spamhaus DROP Listed Traffic Inbound group 12'):
+            with self.subTest(signature=signature):
+                self.assertQuiet('unifi_ips_behavioral', event(
+                    src_ip='203.0.113.9', dst_ip='10.10.60.50',
+                    fields={'signature': signature, 'signature_id': '1'}))
+
+    def test_no_signature_is_not_a_finding(self):
+        self.assertQuiet('unifi_ips_behavioral', event(
+            src_ip='10.10.60.50', dst_ip='203.0.113.9', fields={'signature': ''}))
+
+    def test_dns_over_https_to_an_outside_resolver(self):
+        self.assertFires('dns_bypass', event(
+            'doh', src_ip='10.10.60.50', dst_ip='1.1.1.1', dst_port=443,
+            fields={'sni': 'cloudflare-dns.com'}))
+
+    def test_dns_over_tls_to_an_outside_resolver(self):
+        self.assertFires('dns_bypass', event(
+            'dot', src_ip='10.10.60.50', dst_ip='9.9.9.9', dst_port=853))
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)
