@@ -252,7 +252,7 @@ class WebServer:
     max_drain_bytes = 16 * 1024 * 1024
 
     def __init__(self, profile_path, rules_path=None, analyzer=None,
-                 host='127.0.0.1', port=8788, allow_edit=False):
+                 host='127.0.0.1', port=8788, allow_edit=False, silences_path=''):
         self.profile_path = profile_path
         self.rules_path = rules_path or os.path.join(HERE, 'rules')
         self.analyzer = analyzer
@@ -260,6 +260,7 @@ class WebServer:
         self.port = port
         self.allow_edit = allow_edit
         self.token = secrets.token_urlsafe(32)
+        self.silences_path = silences_path
 
         self.profile = load_profile(profile_path)
         self.rules = load_rules(self.rules_path)
@@ -275,12 +276,15 @@ class WebServer:
             '/api/rules': self._rules_list,
             '/api/rule': self._rule_source,
             '/api/filter': self._build_filter,
+            '/api/silences': self._silences_list,
         }
         self.post_routes = {
             '/api/filter/verify': self._verify_filter,
             '/api/profile/save': self._save_profile,
             '/api/rules/save': self._save_rules,
             '/api/reload': self._reload,
+            '/api/silence': self._silence_add,
+            '/api/silence/clear': self._silence_clear,
         }
 
     # ─── Lifecycle ───────────────────────────────────────────────────────
@@ -524,6 +528,45 @@ class WebServer:
         self.rules = load_rules(self.rules_path)
         return {'ok': True, 'rules': candidate.summary(),
                 'backup': path + '.bak'}, 200
+
+    def _silences(self):
+        if not self.silences_path:
+            return None
+        from netmon.silence import Silences
+        return Silences(self.silences_path)
+
+    def _silences_list(self, params):
+        store = self._silences()
+        if store is None:
+            return {'silences': [], 'note': 'no state directory configured'}
+        return {'silences': store.active()}
+
+    def _silence_add(self, body):
+        """Writes, so it sits behind --allow-edit and the token like the editors."""
+        import time
+        from netmon.silence import SilenceError
+        store = self._silences()
+        if store is None:
+            return {'error': 'no state directory configured'}, 400
+        try:
+            hours = body.get('hours')
+            until = time.time() + float(hours) * 3600 if hours not in (None, '') else None
+            entry = store.add(str(body.get('kind') or ''),
+                              rule=str(body.get('rule') or ''),
+                              device=str(body.get('device') or ''),
+                              key=str(body.get('key') or ''), until=until,
+                              reason=str(body.get('reason') or ''))
+        except (SilenceError, TypeError, ValueError) as e:
+            return {'error': str(e)}, 400
+        return {'ok': True, 'silence': entry}, 200
+
+    def _silence_clear(self, body):
+        store = self._silences()
+        if store is None:
+            return {'error': 'no state directory configured'}, 400
+        if store.remove(str(body.get('id') or '')):
+            return {'ok': True}, 200
+        return {'error': 'no such silence'}, 404
 
     def _reload(self, body):
         try:

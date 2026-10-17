@@ -28,6 +28,8 @@ COMMANDS = {
     'canary': ('netmon.canary', 'turn canary hits into findings'),
     'sync': ('netmon.sources.unifi_api',
              'build a site profile from the UniFi controller'),
+    'silence': ('netmon.silence',
+                'ack, snooze or put a device or rule in maintenance'),
     'web': ('netmon.web', 'the local web UI'),
     'serve': ('netmon.service', 'run everything on a schedule, as a service'),
 }
@@ -73,6 +75,10 @@ def main(argv=None):
         from netmon import __version__
         print(f'netmon {__version__}')
         return 0
+
+    if argv[0] in ('ack', 'snooze', 'maintenance'):
+        from netmon.silence import _main as silence
+        return silence(argv)
 
     name = ALIASES.get(argv[0], argv[0])
     if name not in COMMANDS:

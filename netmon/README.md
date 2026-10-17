@@ -463,6 +463,28 @@ is absent. Absence of a flow in an export is not evidence it did not happen.
 
 ---
 
+## Telling it "I know"
+
+```
+python -m netmon ack         --rule bacnet_control --device ahu-controller-1 --key ...
+python -m netmon snooze      --device ahu-controller-1 --hours 4 --reason commissioning
+python -m netmon maintenance --device chiller-controller --reason "vendor on site"
+python -m netmon silence list
+```
+
+**ack** covers one finding. It stops that finding pushing for 30 days, and the
+finding stays in the digest. **maintenance** stops everything about a device or
+rule pushing, but it all still goes in the digest, so the work leaves a record.
+**snooze** hides a device or rule completely, so it must end, and it is capped
+at 30 days. Anything longer belongs in the profile with a note saying why.
+
+Nothing can silence everything, and a silence file that cannot be read applies
+no silences. Both choices err towards noise. A running service picks up a
+change on its next pass. The web server exposes the same operations as
+API routes behind `--allow-edit`.
+
+---
+
 ## Running it on a sensor
 
 ```

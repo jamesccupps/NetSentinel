@@ -87,6 +87,10 @@ class ServiceConfig:
     def canary_state_path(self):
         return os.path.join(self.state_dir, 'canary-position.json')
 
+    @property
+    def silences_path(self):
+        return os.path.join(self.state_dir, 'silences.json')
+
 
 class _Processed:
     """
@@ -284,6 +288,8 @@ class Service:
             from netmon.ringbuffer import RingBuffer
             self.ring = RingBuffer(config.ring_dir, self.profile)
 
+        from netmon.silence import Silences
+        self.silences = Silences(config.silences_path)
         self.notifier = self._build_notifier() if config.notify else None
         self.web = None
 
@@ -303,7 +309,8 @@ class Service:
         except AlertingError as e:
             logger.warning('alerting is off: %s', e)
             return None
-        return Notifier(alert_config, self.profile, ring=self.ring)
+        return Notifier(alert_config, self.profile, ring=self.ring,
+                        silences=self.silences)
 
     # ─── Jobs ────────────────────────────────────────────────────────────
 
@@ -436,6 +443,11 @@ class Service:
         """Push what needs attention now; keep the rest for the digest."""
         if not findings:
             return
+        # A snooze hides a finding entirely. Acks and maintenance only stop the
+        # push, so those findings still reach the digest and the UI.
+        findings = [f for f in findings if self.silences.decide(f) != 'drop']
+        if not findings:
+            return
         self.counts['findings'] += len(findings)
         self.recent.extend(findings)
         del self.recent[:-2000]
@@ -512,6 +524,7 @@ class Service:
         from netmon.web import WebServer
         self.web = WebServer(self.config.profile_path, self.config.rules_path,
                              analyzer=_LiveView(self),
+                             silences_path=self.config.silences_path,
                              host=self.config.web_host,
                              port=self.config.web_port)
         port = self.web.start()

@@ -174,7 +174,8 @@ def _read_secrets_file(path):
 class Notifier:
     """Sends findings. Holds no state beyond what it has already sent."""
 
-    def __init__(self, config, profile=None, opener=None, ring=None):
+    def __init__(self, config, profile=None, opener=None, ring=None,
+                 silences=None):
         self.config = config
         self.profile = profile
         # Injectable so tests exercise the real body-building and header logic
@@ -189,6 +190,10 @@ class Notifier:
         self.sent = []
         self.failures = []
         self.extracts = []
+        # Acks, snoozes and maintenance windows (netmon.silence). Anything they
+        # cover is held back from push; the digest still lists it.
+        self.silences = silences
+        self.silenced = []
 
     # ─── Sending ─────────────────────────────────────────────────────────
 
@@ -209,6 +214,10 @@ class Notifier:
         for finding in findings:
             if finding.tier != Tier.PUSH or Severity.rank(finding.severity) < floor:
                 skipped.append(finding)
+                continue
+            if self.silences is not None and self.silences.decide(finding) != 'push':
+                skipped.append(finding)
+                self.silenced.append(finding)
                 continue
             record = redact_finding(finding, self.profile, audience=ALERT)
             if record is None:                       # cannot happen for ALERT
