@@ -55,7 +55,7 @@ class ServiceConfig:
                  canary_log='', secrets='', web_host='127.0.0.1', web_port=0,
                  drift_interval=4 * 3600, prune_interval=3600,
                  digest_hour=7, poll_interval=30, notify=True, dry_run=False,
-                 allow_edit=False):
+                 allow_edit=False, allow_summarise=False):
         self.profile_path = profile_path
         self.rules_path = rules_path
         self.ring_dir = ring_dir
@@ -78,6 +78,10 @@ class ServiceConfig:
         # The UI's editors and its acknowledge/snooze/maintenance buttons. Off
         # by default, as for `netmon web`: the UI is read-only unless asked.
         self.allow_edit = bool(allow_edit)
+        # The model-triage button. Separate from editing: it writes nothing,
+        # but it sends a redacted summary off the sensor, which is its own
+        # decision.
+        self.allow_summarise = bool(allow_summarise)
 
     @property
     def processed_path(self):
@@ -302,7 +306,9 @@ class Service:
 
         self._stop = threading.Event()
         self._next = {'drift': 0.0, 'prune': 0.0, 'digest': 0.0}
-        self.counts = {'captures': 0, 'findings': 0, 'pushed': 0,
+        # `events` is packets and flows read, which is what every report means
+        # by events; `captures` is files. The two used to be the same number.
+        self.counts = {'captures': 0, 'events': 0, 'findings': 0, 'pushed': 0,
                        'canary': 0, 'drift': 0, 'errors': 0}
         self.recent = []
 
@@ -351,6 +357,7 @@ class Service:
             logger.warning('could not read %s: %s', os.path.basename(path), e)
             self.counts['errors'] += 1
             return []
+        self.counts['events'] += analyzer.events_seen
         logger.info('%s: %d events, %d findings', os.path.basename(path),
                     analyzer.events_seen, len(analyzer.findings))
         return analyzer.findings
@@ -418,7 +425,7 @@ class Service:
 
             def __init__(self, findings, counts):
                 self.findings = findings
-                self.events_seen = counts['captures']
+                self.events_seen = counts['events']
 
             def by_severity(self):
                 from netmon.events import Severity
@@ -534,7 +541,10 @@ class Service:
                              silences_path=self.config.silences_path,
                              host=self.config.web_host,
                              port=self.config.web_port,
-                             allow_edit=self.config.allow_edit)
+                             allow_edit=self.config.allow_edit,
+                             allow_summarise=self.config.allow_summarise,
+                             state_dir=self.config.state_dir,
+                             secrets_path=self.config.secrets)
         port = self.web.start()
         logger.info('UI on http://%s:%d/', self.config.web_host, port)
         return port
@@ -581,7 +591,7 @@ class _LiveView:
 
     @property
     def events_seen(self):
-        return self._service.counts['captures']
+        return self._service.counts['events']
 
     def by_severity(self):
         from netmon.events import Severity
@@ -590,7 +600,7 @@ class _LiveView:
 
     def report(self):
         return dict(self._service.counts, findings=len(self.findings),
-                    events=self._service.counts['captures'])
+                    events=self._service.counts['events'])
 
 
 def _next_occurrence(now, hour):
@@ -633,6 +643,11 @@ def _parser():
     web.add_argument('--allow-edit', action='store_true',
                      help='let the UI write: the profile and rule editors, and '
                           'the acknowledge, snooze and maintenance buttons')
+    web.add_argument('--allow-summarise', '--allow-summarize',
+                     action='store_true', dest='allow_summarise',
+                     help='offer the model-triage button: a preview of the '
+                          'exact redacted payload, then a second click sends '
+                          'it, within the daily budget kept under --state')
 
     timing = parser.add_argument_group('schedule')
     timing.add_argument('--drift-interval', type=int, default=4 * 3600,
@@ -660,7 +675,8 @@ def config_from_args(args):
         web_port=None if args.no_web or args.once else args.web_port,
         drift_interval=args.drift_interval, digest_hour=args.digest_hour,
         poll_interval=args.poll, notify=not args.no_notify,
-        dry_run=args.dry_run, allow_edit=args.allow_edit)
+        dry_run=args.dry_run, allow_edit=args.allow_edit,
+        allow_summarise=args.allow_summarise)
 
 
 def _main(argv=None):

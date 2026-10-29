@@ -33,13 +33,24 @@ async function get(path, params) {
   return response.json();
 }
 
-async function post(path, body) {
-  const response = await fetch(path, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'X-Netmon-Token': TOKEN },
-    body: JSON.stringify(body || {}),
-  });
-  return { status: response.status, data: await response.json() };
+async function post(path, body, timeoutMs) {
+  // A timeout so a stuck request does not leave a button pressed for ever.
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs || 30000);
+  try {
+    const response = await fetch(path, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Netmon-Token': TOKEN },
+      body: JSON.stringify(body || {}),
+      signal: controller.signal,
+    });
+    return { status: response.status, data: await response.json() };
+  } catch (e) {
+    return { status: 0, data: { error: e.name === 'AbortError'
+      ? 'no answer in time' : String(e) } };
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 function el(tag, className, text) {
@@ -457,6 +468,124 @@ $('#p-save').onclick = async () => {
   }
 };
 
+// ─── Model triage ──────────────────────────────────────────────────────
+// Two requests, deliberately. Prepare shows exactly what would leave the
+// sensor and sends nothing; Send sends that preview, once. Everything the
+// model returns is put on the page as text: it was written from findings
+// that carry names off the network.
+
+const triage = { previewId: null };
+
+function triageStatus(text, kind) {
+  const status = $('#t-status');
+  status.className = 'note ' + (kind || '');
+  status.textContent = text;
+}
+
+function budgetCards(budget) {
+  return [
+    card(budget.remaining_today, 'tokens left today'),
+    card(`${budget.sends_last_hour} / ${budget.hourly_cap}`, 'sent this hour'),
+  ];
+}
+
+function resetTriage() {
+  triage.previewId = null;
+  $('#t-send').disabled = true;
+  $('#t-discard').disabled = true;
+  $('#t-preview').style.display = 'none';
+}
+
+$('#t-prepare').onclick = async () => {
+  resetTriage();
+  $('#t-result').style.display = 'none';
+  triageStatus('preparing…');
+  const { status, data } = await post('/api/summarise/preview',
+                                      { device: $('#t-device').value.trim() });
+  if (status !== 200) {
+    triageStatus(`${data.error}${data.detail ? ': ' + data.detail : ''}`, 'err');
+    return;
+  }
+  triage.previewId = data.preview_id;
+  $('#t-cards').replaceChildren(
+    card(data.estimated_input_tokens, 'tokens in (estimated)'),
+    card(data.max_output_tokens, 'tokens out, at most'),
+    card(data.findings_included, 'findings included'),
+    card(data.withheld_from_restricted_segments, 'withheld, restricted'),
+    ...budgetCards(data.budget));
+  $('#t-note').textContent = `${data.note} Model: ${data.model}. ` +
+    `This preview can be sent for ${Math.round(data.expires_in / 60)} minutes.`;
+  $('#t-message').textContent = data.message;
+  $('#t-system').textContent = data.system;
+  $('#t-preview').style.display = '';
+  $('#t-send').disabled = false;
+  $('#t-discard').disabled = false;
+  triageStatus('nothing has been sent', 'ok');
+};
+
+$('#t-discard').onclick = () => {
+  resetTriage();
+  triageStatus('discarded; nothing was sent');
+};
+
+$('#t-send').onclick = async () => {
+  if (!triage.previewId) return;
+  const previewId = triage.previewId;
+  resetTriage();
+  triageStatus('sending — this can take a minute or two…');
+  const { status, data } = await post('/api/summarise/send',
+                                      { preview_id: previewId }, 120000);
+  if (status !== 200) {
+    triageStatus(`${data.error}${data.detail ? ': ' + data.detail : ''}`, 'err');
+    return;
+  }
+  triageStatus(`done — ${data.budget.remaining_today} tokens left today`, 'ok');
+  renderTriage(data.result);
+};
+
+function renderTriage(result) {
+  const body = $('#t-result-body');
+  body.replaceChildren();
+  body.append(el('p', null, result.assessment || ''));
+  for (const item of result.priorities || []) {
+    const node = el('div', 'finding ' + (item.likely_benign ? 'info' : 'high'));
+    const top = el('div', 'top');
+    top.append(el('span', 'rule', item.rule), el('span', 'note', item.device),
+               badge(item.confidence + ' confidence', 'info'));
+    if (item.likely_benign) top.append(badge('likely benign', 'digest'));
+    node.append(top);
+    if (item.why_it_matters) node.append(el('div', 'desc', item.why_it_matters));
+    if (item.reasoning) node.append(el('div', 'ev', item.reasoning));
+    if (item.what_to_check) {
+      node.append(el('div', 'next', 'check: ' + item.what_to_check));
+    }
+    body.append(node);
+  }
+  const lists = [['Accounted for by the profile', result.expected_by_profile],
+                 ['Open questions', result.questions]];
+  for (const [title, items] of lists) {
+    if (!items || !items.length) continue;
+    body.append(el('h3', null, title));
+    const pre = el('pre', 'out', items.map((x) => '· ' + x).join('\n'));
+    body.append(pre);
+  }
+  for (const capture of result.capture_filters || []) {
+    body.append(el('h3', null, 'Suggested capture — ' + capture.purpose));
+    body.append(el('pre', 'out', (capture.bpf || '(everything)') +
+      '\nunverified: check it against a sample on the sensor'));
+  }
+  if (result.dropped_suggestions) {
+    body.append(el('p', 'note', `${result.dropped_suggestions} suggestions ` +
+      'were dropped for looking like commands rather than descriptions.'));
+  }
+  const usage = result.usage || {};
+  if (usage.input_tokens != null) {
+    body.append(el('p', 'note', `${usage.input_tokens} in, ` +
+      `${usage.output_tokens} out — ${result.model || ''}`));
+  }
+  $('#t-result').style.display = '';
+}
+
 // ─── Startup ───────────────────────────────────────────────────────────
 
 async function loadAll() {
@@ -508,6 +637,7 @@ async function loadAll() {
     $('#rule-source').readOnly = true;
   }
   $('#silence-controls').style.display = SILENCES ? '' : 'none';
+  $('#nav-triage').style.display = SUMMARISE ? '' : 'none';
 
   await Promise.all([loadFindings(), loadSilences()]);
 }

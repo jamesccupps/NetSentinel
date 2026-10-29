@@ -181,6 +181,10 @@ def _main(argv=None):
                              'metadata-only segment — and prints its reasoning')
     parser.add_argument('--investigate', metavar='DEVICE',
                         help='ask about one device rather than the whole window')
+    parser.add_argument('--state', default='', metavar='DIR',
+                        help="where the summariser's daily token spend is kept "
+                             "(the service's --state). Default: under the home "
+                             'directory')
     parser.add_argument('--secrets', metavar='FILE',
                         help='JSON file with the ntfy settings. Must be mode '
                              '600; the environment overrides it')
@@ -277,7 +281,7 @@ def _summarise(analyzer, profile, args):
     from netmon.summarise import (Summariser, SummaryError,
                                   format_summary, load_summariser_config)
     try:
-        config = load_summariser_config(args.secrets)
+        config = load_summariser_config(args.secrets, state_dir=args.state)
     except Exception as e:
         print(f'summariser: {e}', file=sys.stderr)
         return 1
