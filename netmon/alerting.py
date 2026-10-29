@@ -51,7 +51,8 @@ from netmon.redact import ALERT, redact_finding
 logger = logging.getLogger("netmon.alerting")
 
 __all__ = ['Notifier', 'NotifierConfig', 'load_config', 'AlertingError',
-           'build_digest']
+           'build_digest', 'EmailConfig', 'load_email_config',
+           'send_email_digest', 'digest_title']
 
 
 class AlertingError(ValueError):
@@ -232,15 +233,16 @@ class Notifier:
                 skipped.append(finding)
         return sent, skipped
 
-    def send_digest(self, analyzer, title=None):
+    def send_digest(self, analyzer, title=None, open_items=None, body=None):
         """Send the daily report. One message, whatever it contains."""
         if not self.config.enabled:
             return False
         self.config.validate()
-        body = build_digest(analyzer, self.profile)
+        if body is None:
+            body = build_digest(analyzer, self.profile, open_items=open_items)
         return self._deliver({
             'rule': 'digest',
-            'title': title or f'{getattr(self.profile, "name", "site")} — daily report',
+            'title': title or digest_title(self.profile),
             'severity': Severity.INFO,
             'description': body,
         }, topic=self.config.digest_topic, priority=2, tags='memo')
@@ -357,14 +359,91 @@ def _format_message(record):
 
 # ─── The digest ──────────────────────────────────────────────────────────────
 
-def build_digest(analyzer, profile=None, limit=40):
+def digest_title(profile=None):
+    return f'{getattr(profile, "name", "site")} — daily report'
+
+
+#: How a silence is shown against a finding in the digest.
+_SILENCE_MARKS = {'ack': 'acknowledged', 'maintenance': 'maintenance',
+                  'snooze': 'snoozed'}
+
+
+def _silence_mark(finding):
+    silenced = getattr(finding, 'silenced', None)
+    if not silenced:
+        return ''
+    mark = _SILENCE_MARKS.get(silenced.get('kind'), str(silenced.get('kind')))
+    reason = str(silenced.get('reason') or '').strip()
+    return f'  [{mark}' + (f': {reason}' if reason else '') + ']'
+
+
+def _when(ts):
+    try:
+        return time.strftime('%Y-%m-%d %H:%M', time.localtime(float(ts)))
+    except (TypeError, ValueError, OverflowError):
+        return '?'
+
+
+def _open_items(open_items, limit=20):
+    """
+    The checklist: what is still waiting on a person.
+
+    First in the digest, because a list of what happened yesterday is history
+    and this is the part someone has to do something about.
+    """
+    if not open_items:
+        return []
+    pushes = open_items.get('pushes') or []
+    standing = open_items.get('standing') or []
+    silences = open_items.get('silences') or []
+    lines = ['', 'Open items']
+    if not (pushes or standing or silences):
+        lines.append('  [x] nothing waiting: every push answered, no standing '
+                     'configuration problems, nothing silenced')
+        return lines
+
+    if pushes:
+        lines.append(f'  Pushed and not yet acknowledged ({len(pushes)}):')
+        for item in pushes[:limit]:
+            count = int(item.get('count') or 1)
+            lines.append(
+                f'  [ ] {str(item.get("severity", "")).upper()} '
+                f'{item.get("rule")} — {item.get("description")}'
+                f' (pushed {_when(item.get("first_pushed"))}'
+                + (f', seen {count} times' if count > 1 else '') + ')')
+        if len(pushes) > limit:
+            lines.append(f'  … and {len(pushes) - limit} more')
+    if standing:
+        lines.append(f'  Configuration wrong now ({len(standing)}):')
+        for item in standing[:limit]:
+            lines.append(f'  [ ] {item.get("rule")} — {item.get("description")}')
+        if len(standing) > limit:
+            lines.append(f'  … and {len(standing) - limit} more')
+    if silences:
+        lines.append(f'  Silences in effect ({len(silences)}):')
+        for entry in silences[:limit]:
+            scope = ' '.join(f'{k}={entry[k]}' for k in ('rule', 'device', 'key')
+                             if entry.get(k))
+            until = (f'until {_when(entry["until"])}' if entry.get('until')
+                     else 'until cleared')
+            reason = f' — {entry["reason"]}' if entry.get('reason') else ''
+            lines.append(f'  [ ] {entry.get("kind")} {scope} {until}{reason}'
+                         f' (id {entry.get("id")})')
+    return lines
+
+
+def build_digest(analyzer, profile=None, limit=40, open_items=None):
     """
     The daily report, as plain text.
 
     Ordered worst first and grouped by rule rather than by time, because the
     question a digest answers is "what kinds of thing happened", not "in what
     order". Counts are the true counts, including everything deduplication
-    collapsed.
+    collapsed. A finding an ack or a maintenance window covers is marked as
+    such: it stopped pushing, and the digest is where that is on the record.
+
+    `open_items` is the service's checklist — unanswered pushes, standing
+    configuration problems, active silences — and leads the report.
     """
     findings = analyzer.by_severity()
     report = analyzer.report()
@@ -377,6 +456,11 @@ def build_digest(analyzer, profile=None, limit=40):
                                       for k, v in report['by_severity'].items()))
     if report.get('suppressed_repeats'):
         lines.append(f'  {report["suppressed_repeats"]} repeats collapsed')
+    silenced = sum(1 for f in findings if getattr(f, 'silenced', None))
+    if silenced:
+        lines.append(f'  {silenced} acknowledged or under maintenance, marked below')
+
+    lines += _open_items(open_items)
 
     if not findings:
         lines.append('')
@@ -402,7 +486,8 @@ def build_digest(analyzer, profile=None, limit=40):
             if record is None:
                 continue
             suffix = f'  ×{finding.count}' if finding.count > 1 else ''
-            lines.append(f'  · {record["description"]}{suffix}')
+            lines.append(f'  · {record["description"]}{suffix}'
+                         f'{_silence_mark(finding)}')
         if len(group) > 6:
             lines.append(f'  · … and {len(group) - 6} more')
 
@@ -410,3 +495,156 @@ def build_digest(analyzer, profile=None, limit=40):
         lines.append('')
         lines.append(f'{len(findings) - limit} further findings not listed.')
     return '\n'.join(lines)
+
+
+# ─── Email ───────────────────────────────────────────────────────────────────
+
+class EmailConfig:
+    """
+    Where the digest is emailed, if anywhere.
+
+    From the secrets file only — the same file, under the same owner-only
+    check, as the ntfy token. Never the environment for the credentials: a
+    unit file's Environment= is readable by anyone who can read the unit.
+    """
+
+    SECURITY = ('starttls', 'ssl', 'none')
+
+    def __init__(self, host='', port=0, security='starttls', username='',
+                 password='', sender='', recipients=(), timeout=30,
+                 enabled=True):
+        self.host = str(host or '').strip()
+        self.security = str(security or 'starttls').lower().strip()
+        self.port = int(port or (465 if self.security == 'ssl' else 587))
+        self.username = str(username or '')
+        self.password = str(password or '')
+        self.sender = str(sender or '').strip()
+        if isinstance(recipients, str):
+            recipients = [r for r in recipients.replace(';', ',').split(',')]
+        self.recipients = [str(r).strip() for r in (recipients or []) if str(r).strip()]
+        self.timeout = int(timeout)
+        self.enabled = bool(enabled)
+
+    @property
+    def configured(self):
+        return self.enabled and bool(self.host and self.recipients)
+
+    def validate(self):
+        """Raise AlertingError on anything that would fail or leak at send time."""
+        if self.security not in self.SECURITY:
+            raise AlertingError(
+                f'smtp_security must be one of {", ".join(self.SECURITY)}')
+        if not self.host:
+            raise AlertingError('no smtp_host configured')
+        if not self.recipients:
+            raise AlertingError('no smtp_to configured')
+        if not self.sender:
+            raise AlertingError('no smtp_from configured')
+        for address in [self.sender] + self.recipients:
+            # A newline in an address is a header injection; the rest is the
+            # mail server's to judge.
+            if '@' not in address or any(c in address for c in '\r\n<>,'):
+                raise AlertingError(f'not an email address: {address!r}')
+        if self.security == 'none':
+            # The digest names devices and weaknesses, and a password sent in
+            # the clear is a password given away. Plain SMTP is only for a
+            # relay on this machine, with nothing to log in with.
+            if self.host not in ('localhost', '127.0.0.1', '::1'):
+                raise AlertingError(
+                    'refusing to email the digest unencrypted to another host; '
+                    'use smtp_security "starttls" or "ssl"')
+            if self.username or self.password:
+                raise AlertingError(
+                    'refusing to send SMTP credentials without TLS; use '
+                    'smtp_security "starttls" or "ssl"')
+        return True
+
+    def describe(self):
+        """For logs and the UI. Never includes the password."""
+        return {'host': self.host, 'port': self.port, 'security': self.security,
+                'from': self.sender, 'to': list(self.recipients),
+                'authenticated': bool(self.username), 'enabled': self.enabled}
+
+
+def load_email_config(path=None, environ=None):
+    """
+    The email settings from the secrets file, or None when there are none.
+
+    Keys: smtp_host, smtp_port, smtp_security (starttls | ssl | none),
+    smtp_username, smtp_password, smtp_from, smtp_to (a list or a comma-
+    separated string), email_digest (false to turn it off).
+    """
+    environ = environ if environ is not None else os.environ
+    path = path or environ.get('NETMON_SECRETS')
+    if not path:
+        return None
+    data = _read_secrets_file(path)
+    if not data.get('smtp_host'):
+        return None
+    return EmailConfig(
+        host=data.get('smtp_host'), port=data.get('smtp_port') or 0,
+        security=data.get('smtp_security') or 'starttls',
+        username=data.get('smtp_username') or '',
+        password=data.get('smtp_password') or '',
+        sender=data.get('smtp_from') or data.get('smtp_username') or '',
+        recipients=data.get('smtp_to') or [],
+        timeout=data.get('smtp_timeout') or 30,
+        enabled=str(data.get('email_digest', 'true')).lower()
+        not in ('0', 'false', 'no', 'off'))
+
+
+def _smtp(security, host, port, timeout, context):
+    """The real connection. Replaced in tests by a fake with the same calls."""
+    import smtplib
+    if security == 'ssl':
+        return smtplib.SMTP_SSL(host, port, timeout=timeout, context=context)
+    return smtplib.SMTP(host, port, timeout=timeout)
+
+
+def send_email_digest(config, body, subject, smtp_factory=None):
+    """
+    Email the digest. Raises AlertingError, naming only the kind of failure.
+
+    The certificate is verified against the system's trust store: an SMTP
+    server that cannot prove who it is should not be handed a password or a
+    list of the site's weaknesses.
+    """
+    import smtplib
+    import ssl
+    from email.message import EmailMessage
+    from email.utils import formatdate, make_msgid
+
+    config.validate()
+    message = EmailMessage()
+    # The site name comes from the profile and may not be ASCII, which an
+    # email header can carry where an HTTP one cannot; a newline it cannot.
+    message['Subject'] = ' '.join(str(subject).split())[:200] or 'netmon'
+    message['From'] = config.sender
+    message['To'] = ', '.join(config.recipients)
+    message['Date'] = formatdate(localtime=True)
+    message['Message-ID'] = make_msgid(domain=config.sender.rsplit('@', 1)[-1])
+    message.set_content(body)
+
+    context = ssl.create_default_context()
+    factory = smtp_factory or _smtp
+    try:
+        connection = factory(config.security, config.host, config.port,
+                             config.timeout, context)
+        try:
+            if config.security == 'starttls':
+                connection.ehlo()
+                connection.starttls(context=context)
+                connection.ehlo()
+            if config.username:
+                connection.login(config.username, config.password)
+            connection.send_message(message)
+        finally:
+            try:
+                connection.quit()
+            except Exception:
+                pass
+    except (smtplib.SMTPException, OSError, ssl.SSLError) as e:
+        # The exception text can quote the server's reply to the login; only
+        # the kind of failure is kept.
+        raise AlertingError(f'could not email the digest: {type(e).__name__}') from e
+    return True

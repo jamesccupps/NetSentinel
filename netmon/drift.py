@@ -573,6 +573,11 @@ def check(client, profile=None, state_path='', save=True):
 
     standing = audit(current, profile, previous)
     drift_findings = diff(previous, current, profile)
+    # Everything wrong now, whether or not it also changed this run — the
+    # digest's open-items checklist lists it until it is fixed.
+    problems = [{'rule': f.rule_id, 'key': f.key, 'device': f.device,
+                 'severity': f.severity, 'description': f.description}
+                for f in standing]
 
     # When something is both newly wrong and a change, the change is strictly
     # more informative: "a port forward appeared" beats "a port forward
@@ -591,6 +596,7 @@ def check(client, profile=None, state_path='', save=True):
         'previous_at': (previous or {}).get('taken_at'),
         'standing': len(standing),
         'changed': len(drift_findings),
+        'standing_problems': problems,
         'counts': {name: len(current.get(name) or [])
                    for name in CONFIG_ENDPOINTS},
         'errors': current.get('errors') or {},

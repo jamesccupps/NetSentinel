@@ -99,6 +99,10 @@ class ServiceConfig:
     def silences_path(self):
         return os.path.join(self.state_dir, 'silences.json')
 
+    @property
+    def window_path(self):
+        return os.path.join(self.state_dir, 'findings.json')
+
 
 class _Processed:
     """
@@ -300,17 +304,26 @@ class Service:
             self.ring = RingBuffer(config.ring_dir, self.profile)
 
         from netmon.silence import Silences
+        from netmon.window import FindingWindow
         self.silences = Silences(config.silences_path)
         self.notifier = self._build_notifier() if config.notify else None
+        self.email = self._build_email() if config.notify else None
         self.web = None
+        # The day's findings, on disk, deduplicated across capture files and
+        # restarts. See netmon.window.
+        self.window = FindingWindow(config.window_path, clock=clock)
 
         self._stop = threading.Event()
         self._next = {'drift': 0.0, 'prune': 0.0, 'digest': 0.0}
         # `events` is packets and flows read, which is what every report means
         # by events; `captures` is files. The two used to be the same number.
-        self.counts = {'captures': 0, 'events': 0, 'findings': 0, 'pushed': 0,
-                       'canary': 0, 'drift': 0, 'errors': 0}
-        self.recent = []
+        self.counts = {'captures': 0, 'events': 0, 'findings': 0, 'repeats': 0,
+                       'pushed': 0, 'canary': 0, 'drift': 0, 'errors': 0}
+
+    @property
+    def recent(self):
+        """The findings since the last digest, one per identity."""
+        return self.window.findings()
 
     def _build_notifier(self):
         from netmon.alerting import AlertingError, Notifier, load_config
@@ -324,6 +337,19 @@ class Service:
             return None
         return Notifier(alert_config, self.profile, ring=self.ring,
                         silences=self.silences)
+
+    def _build_email(self):
+        """The email digest, if the secrets file configures one."""
+        from netmon.alerting import AlertingError, load_email_config
+        try:
+            config = load_email_config(self.config.secrets or None)
+            if config is None or not config.configured:
+                return None
+            config.validate()
+        except AlertingError as e:
+            logger.warning('the email digest is off: %s', e)
+            return None
+        return config
 
     # ─── Jobs ────────────────────────────────────────────────────────────
 
@@ -358,6 +384,7 @@ class Service:
             self.counts['errors'] += 1
             return []
         self.counts['events'] += analyzer.events_seen
+        self.window.add_events(analyzer.events_seen)
         logger.info('%s: %d events, %d findings', os.path.basename(path),
                     analyzer.events_seen, len(analyzer.findings))
         return analyzer.findings
@@ -387,6 +414,8 @@ class Service:
             self.counts['errors'] += 1
             return []
         self.counts['drift'] += report['changed']
+        self.window.set_standing(report.get('standing_problems') or [])
+        self.window.save()
         logger.info('configuration: %d standing, %d changed',
                     report['standing'], report['changed'])
         return findings
@@ -415,46 +444,62 @@ class Service:
                         len(result['removed']),
                         result['freed_bytes'] // (1024 * 1024))
 
-    def send_digest(self):
-        if self.notifier is None:
-            return
+    def digest_view(self):
+        """The day's findings, with silences applied, for the digest."""
+        return _Window(self.silences.visible(self.window.findings()),
+                       self.window.events)
+
+    def digest_body(self, now=None):
         from netmon.alerting import build_digest
+        return build_digest(self.digest_view(), self.profile,
+                            open_items=self.window.open_items(self.silences, now))
 
-        class _Window:
-            """The day's findings, in the shape the digest builder expects."""
+    def send_digest(self, now=None):
+        """
+        The daily report, by ntfy and email, whichever are configured.
 
-            def __init__(self, findings, counts):
-                self.findings = findings
-                self.events_seen = counts['events']
+        The window starts again only once one of them has it; a digest nobody
+        received should not take the day's findings with it.
+        """
+        if self.notifier is None and self.email is None:
+            return False
+        from netmon.alerting import digest_title, send_email_digest
 
-            def by_severity(self):
-                from netmon.events import Severity
-                return sorted(self.findings,
-                              key=lambda f: -Severity.rank(f.severity))
-
-            def report(self):
-                from netmon.events import Severity
-                by_severity = {}
-                for finding in self.findings:
-                    by_severity[finding.severity] = \
-                        by_severity.get(finding.severity, 0) + 1
-                return {'events': self.events_seen,
-                        'findings': len(self.findings),
-                        'by_severity': by_severity, 'suppressed_repeats': 0}
-
-        window = _Window(list(self.recent), self.counts)
-        try:
-            self.notifier.send_digest(window)
-            logger.info('digest sent: %d findings', len(window.findings))
-        except Exception as e:
-            logger.warning('could not send the digest: %s', e)
-            self.counts['errors'] += 1
-        self.recent.clear()
+        body = self.digest_body(now)
+        delivered = False
+        if self.notifier is not None:
+            try:
+                delivered |= bool(self.notifier.send_digest(None, body=body))
+            except Exception as e:
+                logger.warning('could not send the digest: %s', e)
+                self.counts['errors'] += 1
+        if self.email is not None:
+            try:
+                if self.config.dry_run:
+                    logger.info('would email the digest to %s',
+                                ', '.join(self.email.recipients))
+                else:
+                    send_email_digest(self.email, body, digest_title(self.profile))
+                delivered = True
+            except Exception as e:
+                logger.warning('could not email the digest: %s', e)
+                self.counts['errors'] += 1
+        if delivered:
+            logger.info('digest sent: %d findings', len(self.window))
+            self.window.rollover(now)
+        return delivered
 
     # ─── Delivery ────────────────────────────────────────────────────────
 
     def deliver(self, findings):
-        """Push what needs attention now; keep the rest for the digest."""
+        """
+        Push what needs attention now; keep the rest for the digest.
+
+        Each finding identity pushes once. A repeat — the same finding in the
+        next capture file, or after a restart — adds to the count of the one
+        already kept, and an earlier push still waiting for an answer is on
+        the digest's checklist rather than pushed again.
+        """
         if not findings:
             return
         # A snooze hides a finding entirely. Acks and maintenance only stop the
@@ -462,20 +507,26 @@ class Service:
         findings = [f for f in findings if self.silences.decide(f) != 'drop']
         if not findings:
             return
-        self.counts['findings'] += len(findings)
-        self.recent.extend(findings)
-        del self.recent[:-2000]
+        fresh = [f for f in findings if self.window.admit(f)]
+        self.counts['findings'] += len(fresh)
+        self.counts['repeats'] += len(findings) - len(fresh)
 
-        if self.notifier is None:
-            for finding in findings:
-                logger.info('[%s] %s', finding.severity, finding.description)
-            return
         try:
-            sent, _ = self.notifier.send(findings)
+            if self.notifier is None:
+                for finding in fresh:
+                    logger.info('[%s] %s', finding.severity, finding.description)
+                return
+            try:
+                sent, _ = self.notifier.send(fresh)
+            except Exception as e:
+                logger.warning('could not deliver: %s', e)
+                self.counts['errors'] += 1
+                return
             self.counts['pushed'] += len(sent)
-        except Exception as e:
-            logger.warning('could not deliver: %s', e)
-            self.counts['errors'] += 1
+            for finding in sent:
+                self.window.mark_pushed(finding)
+        finally:
+            self.window.save()
 
     # ─── The loop ────────────────────────────────────────────────────────
 
@@ -518,12 +569,13 @@ class Service:
         self.deliver(findings)
 
         if self._due_for_digest(now):
-            self.send_digest()
+            self.send_digest(now)
             self._next['digest'] = now + 23 * 3600
         return findings
 
     def _due_for_digest(self, now):
-        if self.notifier is None or now < self._next['digest']:
+        if (self.notifier is None and self.email is None) \
+                or now < self._next['digest']:
             return False
         if self._next['digest'] == 0.0:
             # Not on the first tick: a restart at 07:05 should not send a second
@@ -570,6 +622,7 @@ class Service:
             if self.web is not None:
                 self.web.stop()
             self.processed.save()
+            self.window.save()
         logger.info('stopped: %s', self.counts)
         return self.counts
 
@@ -591,7 +644,9 @@ class _LiveView:
 
     @property
     def events_seen(self):
-        return self._service.counts['events']
+        # Since the last digest, like the findings beside it — and kept across
+        # restarts with them.
+        return self._service.window.events
 
     def by_severity(self):
         from netmon.events import Severity
@@ -600,7 +655,27 @@ class _LiveView:
 
     def report(self):
         return dict(self._service.counts, findings=len(self.findings),
-                    events=self._service.counts['events'])
+                    events=self._service.window.events)
+
+
+class _Window:
+    """The day's findings, in the shape the digest builder expects."""
+
+    def __init__(self, findings, events):
+        self.findings = findings
+        self.events_seen = events
+
+    def by_severity(self):
+        from netmon.events import Severity
+        return sorted(self.findings, key=lambda f: -Severity.rank(f.severity))
+
+    def report(self):
+        by_severity = {}
+        for finding in self.by_severity():
+            by_severity[finding.severity] = by_severity.get(finding.severity, 0) + 1
+        repeats = sum(max(0, int(f.count or 1) - 1) for f in self.findings)
+        return {'events': self.events_seen, 'findings': len(self.findings),
+                'by_severity': by_severity, 'suppressed_repeats': repeats}
 
 
 def _next_occurrence(now, hour):
