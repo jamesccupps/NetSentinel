@@ -297,7 +297,7 @@ class TestConfigAndRules(unittest.TestCase):
         import re
         import glob
         root = os.path.dirname(os.path.abspath(__file__))
-        with open(os.path.join(root, 'src', 'config.py')) as f:
+        with open(os.path.join(root, 'src', 'config.py'), encoding='utf-8') as f:
             cfg_src = f.read()
         default = next(ast.literal_eval(n.value) for n in ast.parse(cfg_src).body
                        if isinstance(n, ast.Assign)
@@ -305,7 +305,7 @@ class TestConfigAndRules(unittest.TestCase):
         sources = glob.glob(os.path.join(root, 'src', '*.py')) + [os.path.join(root, 'main.py')]
         code = ''
         for path in sources:
-            with open(path) as f:
+            with open(path, encoding='utf-8') as f:
                 code += f.read()
 
         dead = []

@@ -438,6 +438,8 @@ class TestStateFile(unittest.TestCase):
         It is the network's defences written down: every firewall rule, every
         forward, every port's VLAN membership.
         """
+        if os.name == 'nt':
+            self.skipTest('POSIX permission model only')
         save_state(state(), self.path)
         self.assertEqual(os.stat(self.path).st_mode & 0o077, 0)
 

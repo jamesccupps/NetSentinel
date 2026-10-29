@@ -417,7 +417,9 @@ class PcapAnalyzer:
 
         elif format == 'csv':
             if self.alerts:
-                with open(filepath, 'w', newline='') as f:
+                # As the alert export does: the Windows default code page cannot
+                # hold every domain or file name an alert can carry.
+                with open(filepath, 'w', newline='', encoding='utf-8') as f:
                     writer = csv.DictWriter(f, fieldnames=self.alerts[0].to_dict().keys())
                     writer.writeheader()
                     for alert in self.alerts:

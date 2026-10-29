@@ -112,6 +112,12 @@ class TestOpenTopicsAreRefused(unittest.TestCase):
 
 class TestSecrets(unittest.TestCase):
 
+    def owner_only_files(self):
+        # Windows reports any writable file as 0o666 and chmod only toggles
+        # read-only, so no file there passes the check; netmon runs on Linux.
+        if os.name == 'nt':
+            self.skipTest('POSIX permission model only')
+
     def write_secrets(self, data, mode=0o600):
         handle, path = tempfile.mkstemp(suffix='.json')
         with os.fdopen(handle, 'w') as f:
@@ -121,6 +127,7 @@ class TestSecrets(unittest.TestCase):
         return path
 
     def test_a_secrets_file_is_read(self):
+        self.owner_only_files()
         path = self.write_secrets({'ntfy_server': 'https://a.example',
                                    'ntfy_topic': 't', 'ntfy_token': 'tk'})
         config = load_config(path, environ={})
@@ -141,6 +148,7 @@ class TestSecrets(unittest.TestCase):
 
     def test_the_error_does_not_echo_the_file(self):
         """The message about a broken secrets file must not quote it."""
+        self.owner_only_files()             # else it is refused before it is parsed
         handle, path = tempfile.mkstemp(suffix='.json')
         with os.fdopen(handle, 'w') as f:
             f.write('{"ntfy_token": "tk_verysecret", broken')
@@ -152,6 +160,7 @@ class TestSecrets(unittest.TestCase):
 
     def test_the_environment_wins_over_the_file(self):
         """So a unit file or a container can set it without editing disk."""
+        self.owner_only_files()
         path = self.write_secrets({'ntfy_token': 'from-file'})
         config = load_config(path, environ={'NETMON_NTFY_TOKEN': 'from-env'})
         self.assertEqual(config.token, 'from-env')

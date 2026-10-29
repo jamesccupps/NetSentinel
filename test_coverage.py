@@ -401,6 +401,18 @@ class TestPcapRoundTrip(unittest.TestCase):
         writer = PcapWriter(cfg(), output_dir=self.tmp)
         self.assertIsNone(writer.export_buffer(filename='empty.pcap'))
 
+    def test_csv_export_holds_any_domain_name(self):
+        """It was written in the Windows code page, which has no room for most."""
+        from src.pcap_analyzer import PcapAnalyzer
+        analyzer = PcapAnalyzer(cfg())
+        analyzer.alerts = [Alert('DNS-IDN', Severity.LOW, 'Lookup',
+                                 'lookup of 日本.example', category='Test')]
+        path = os.path.join(self.tmp, 'alerts.csv')
+        analyzer.export_results(path, format='csv')
+        with open(path, encoding='utf-8', newline='') as f:
+            rows = list(csv.DictReader(f))
+        self.assertEqual(rows[0]['description'], 'lookup of 日本.example')
+
     def test_recording_rotates_and_prunes(self):
         from src.pcap_writer import PcapWriter
         c = cfg()

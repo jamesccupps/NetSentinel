@@ -8,11 +8,16 @@ headers — is covered too.
 
 import json
 import os
+import shutil
+import socket
+import subprocess
 import sys
+import tempfile
 import time
 import unittest
 import urllib.error
 import urllib.request
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -77,13 +82,15 @@ class _ApiTestCase(unittest.TestCase):
 
     def setUp(self):
         self.app = _StubApp()
-        for rule, sev in [('SYN-FLOOD', Severity.CRITICAL),
-                          ('PORT-SCAN', Severity.HIGH),
-                          ('DNS-FAST-FLUX', Severity.HIGH),
-                          ('ODD-HOURS', Severity.LOW)]:
+        for n, (rule, sev) in enumerate([('SYN-FLOOD', Severity.CRITICAL),
+                                         ('PORT-SCAN', Severity.HIGH),
+                                         ('DNS-FAST-FLUX', Severity.HIGH),
+                                         ('ODD-HOURS', Severity.LOW)]):
             alert = Alert(rule, sev, f'{rule} test', 'demo',
                           src_ip='203.0.113.9', dst_ip='192.168.1.50',
                           category='Test')
+            # Explicit, because Windows' clock can give all four the same time.
+            alert.timestamp = 1_700_000_000.0 + n
             self.app.alert_manager.items.append(alert)
 
         # Port 0 lets the OS pick, so tests never collide with a real service.
@@ -353,6 +360,42 @@ class TestDashboard(_ApiTestCase):
     def test_an_unknown_scan_is_404(self):
         self.assertEqual(self.request('/api/scan?id=nope')[0], 404)
 
+    def test_a_refused_upload_still_gets_its_answer(self):
+        """
+        A refusal is sent before the body is read, and closing with the body
+        unread made Windows reset the connection: the browser lost the answer
+        and showed a network error instead.
+        """
+        body = b'x' * (16 * 1024 * 1024)       # more than the socket buffers hold
+        for path, token, expected in [('/api/status', None, 405),
+                                      ('/api/nowhere', None, 404),
+                                      ('/api/scan/new', 'wrong', 403)]:
+            with self.subTest(path=path):
+                status, reply = self.post(path, body, token=token)
+                self.assertEqual(status, expected)
+                self.assertIn('error', json.loads(reply))
+
+    def test_a_refusal_does_not_wait_for_the_body(self):
+        """
+        Clients may hold a large body back until they hear the server will take
+        it (curl's Expect: 100-continue). Reading the body before answering
+        would leave both sides waiting for the other.
+        """
+        with socket.create_connection(('127.0.0.1', self.port), timeout=5) as s:
+            s.sendall(b'POST /api/nowhere HTTP/1.1\r\nHost: 127.0.0.1\r\n'
+                      b'Content-Length: 1000000\r\n\r\n')
+            self.assertEqual(s.recv(64).split()[1], b'404')
+
+    def test_a_silent_client_is_not_waited_on_forever(self):
+        from src import headless
+        quiet, peer = socket.socketpair()
+        self.addCleanup(quiet.close)
+        self.addCleanup(peer.close)
+        with mock.patch.object(headless, 'LINGER_SECONDS', 0.2):
+            started = time.monotonic()
+            headless._drain(quiet)
+        self.assertLess(time.monotonic() - started, 2)
+
 
 class TestUploadNames(unittest.TestCase):
     def test_names_cannot_leave_the_folder(self):
@@ -373,7 +416,7 @@ class TestCommandLine(unittest.TestCase):
         args = main.parse_args([])
         self.assertFalse(args.headless)
         self.assertEqual(args.host, '127.0.0.1')
-        self.assertEqual(args.port, 8787)
+        self.assertEqual(args.port, 8737)
 
     def test_headless_flags_parse(self):
         import main
@@ -401,11 +444,39 @@ class TestCommandLine(unittest.TestCase):
         for path in glob.glob(os.path.join(root, 'src', '*.py')):
             if os.path.basename(path) == 'gui.py':
                 continue
-            with open(path) as f:
+            with open(path, encoding='utf-8') as f:
                 source = f.read()
             with self.subTest(module=os.path.basename(path)):
                 self.assertNotIn('import tkinter', source)
                 self.assertNotIn('from tkinter', source)
+
+
+class TestLogFile(unittest.TestCase):
+
+    def test_the_log_file_is_utf8(self):
+        """
+        Windows opened it in its ANSI code page, and logging drops a line it
+        cannot encode, so a lookup of an international domain never reached it.
+        In a fresh interpreter, because only the first logging setup applies.
+        """
+        home = tempfile.mkdtemp(prefix='ns_log_')
+        self.addCleanup(shutil.rmtree, home, True)
+        script = (
+            "import logging, main\n"
+            "handler = next(h for h in logging.getLogger().handlers\n"
+            "               if isinstance(h, logging.FileHandler))\n"
+            "logging.getLogger('t').warning('lookup of \\u65e5\\u672c.example')\n"
+            "print(handler.encoding)\n"
+            "print(handler.baseFilename)\n")
+        env = dict(os.environ, HOME=home, USERPROFILE=home, PYTHONIOENCODING='utf-8')
+        done = subprocess.run([sys.executable, '-c', script], capture_output=True,
+                              text=True, encoding='utf-8', env=env, timeout=120,
+                              cwd=os.path.dirname(os.path.abspath(__file__)))
+        self.assertEqual(done.returncode, 0, done.stderr)
+        encoding, path = done.stdout.splitlines()[-2:]
+        self.assertEqual(encoding, 'utf-8')
+        with open(path, encoding='utf-8') as f:
+            self.assertIn('lookup of 日本.example', f.read())
 
 
 if __name__ == '__main__':

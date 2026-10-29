@@ -55,6 +55,7 @@ import json
 import logging
 import os
 import secrets
+import socket
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -79,6 +80,41 @@ __all__ = ['HeadlessServer', 'run_headless']
 # Anything above this is almost certainly a mistake rather than a request.
 MAX_ALERT_LIMIT = 1000
 
+# Not 8787, the first choice: localcast and RStudio Server default to it, so
+# whichever started second either failed or pushed the dashboard to a random port.
+DEFAULT_PORT = 8737
+
+# How long, and how much, to read of a refused POST's body after answering it.
+LINGER_SECONDS = 2.0
+LINGER_BYTES = 64 * 1024 * 1024
+
+
+def _drain(sock):
+    """
+    Finish the reply, then read and discard what the client is still sending.
+
+    A refused POST is answered before its body is read. Closing a socket with
+    unread data makes Windows reset the connection, and the reset throws away
+    the reply the browser has not read yet: it showed a network error instead
+    of "another scan is running". Answering first and reading afterwards also
+    means a client that waits for the answer before sending is never stuck.
+    """
+    try:
+        sock.shutdown(socket.SHUT_WR)
+        deadline = time.monotonic() + LINGER_SECONDS
+        received = 0
+        while received < LINGER_BYTES:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            sock.settimeout(remaining)
+            chunk = sock.recv(65536)
+            if not chunk:
+                break
+            received += len(chunk)
+    except OSError:
+        pass
+
 
 class _Handler(BaseHTTPRequestHandler):
     """Routes are resolved against the table in HeadlessServer."""
@@ -86,9 +122,25 @@ class _Handler(BaseHTTPRequestHandler):
     server_version = "NetSentinel"
     sys_version = ""          # Do not advertise the Python version.
 
+    _body_unread = False
+
     # BaseHTTPRequestHandler logs every request to stderr by default.
     def log_message(self, fmt, *args):
         logger.debug("%s - %s", self.address_string(), fmt % args)
+
+    def send_response(self, code, message=None):
+        # Every refusal of a POST, from a wrong Host header to a route raising,
+        # may leave the body unread, so the connection cannot be reused safely
+        # and must be drained before it is closed.
+        if getattr(self, 'command', None) == 'POST' and code >= 400:
+            self._body_unread = True
+            self.close_connection = True
+        super().send_response(code, message)
+
+    def finish(self):
+        super().finish()
+        if self._body_unread:
+            _drain(self.connection)
 
     def _host_allowed(self):
         allowed = self.server.netsentinel_allowed_hosts
@@ -165,8 +217,6 @@ class _Handler(BaseHTTPRequestHandler):
             status = getattr(e, 'status', 500)
             if status == 500:
                 logger.exception("Error serving POST %s", parsed.path)
-            # The body may be unread; the connection cannot be reused safely.
-            self.close_connection = True
             self._send_json({'error': str(e)}, status=status)
             return
         self._send_json(payload, status=status)
@@ -196,7 +246,7 @@ class _Handler(BaseHTTPRequestHandler):
 class HeadlessServer:
     """Serves a read-only view of a running NetSentinelApp."""
 
-    def __init__(self, app, host='127.0.0.1', port=8787):
+    def __init__(self, app, host='127.0.0.1', port=DEFAULT_PORT):
         self.app = app
         self.host = host
         self.port = port
@@ -534,7 +584,7 @@ def _str_param(params, name):
     return values[0].strip().upper() if name == 'severity' else values[0].strip()
 
 
-def run_headless(app, host='127.0.0.1', port=8787, serve_api=True):
+def run_headless(app, host='127.0.0.1', port=DEFAULT_PORT, serve_api=True):
     """
     Start monitoring with no GUI and block until interrupted.
 

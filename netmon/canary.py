@@ -40,6 +40,7 @@ import json
 import logging
 import os
 import re
+import socket
 import time
 from collections import deque
 
@@ -322,6 +323,37 @@ def findings_from_log(path, profile=None, since=None, limit=None):
 
 # ─── The listener ────────────────────────────────────────────────────────────
 
+#: After refusing a request without reading its body, how long and how much of
+#: it to read before closing. Small, because this listens on a network an
+#: attacker may be on, and a real canary event is far under the body cap.
+_LINGER_SECONDS = 2.0
+_LINGER_BYTES = 1024 * 1024
+
+
+def _drain(sock):
+    """
+    Finish the reply, then read and discard what the client is still sending.
+
+    Closing a socket with unread data makes Windows reset the connection, and a
+    reset throws away a reply the client has not read yet.
+    """
+    try:
+        sock.shutdown(socket.SHUT_WR)
+        deadline = time.monotonic() + _LINGER_SECONDS
+        received = 0
+        while received < _LINGER_BYTES:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            sock.settimeout(remaining)
+            chunk = sock.recv(65536)
+            if not chunk:
+                break
+            received += len(chunk)
+    except OSError:
+        pass
+
+
 class CanaryListener:
     """
     An inbound webhook, for when the canary cannot reach the sensor's disk.
@@ -407,9 +439,22 @@ class CanaryListener:
             server_version = 'netmon-canary'
             sys_version = ''
             protocol_version = 'HTTP/1.1'
+            body_unread = False
 
             def log_message(self, fmt, *args):
                 logger.debug('%s - %s', self.address_string(), fmt % args)
+
+            def _refuse(self, status, payload):
+                # Answered without reading the body. Kept alive, the body would
+                # be parsed as the next request; so close, draining it first.
+                self.close_connection = True
+                self.body_unread = True
+                return self._send(status, payload)
+
+            def finish(self):
+                super().finish()
+                if self.body_unread:
+                    _drain(self.connection)
 
             def _send(self, status, payload):
                 body = json.dumps(payload).encode()
@@ -425,14 +470,13 @@ class CanaryListener:
 
             def do_POST(self):
                 if self.path.rstrip('/') not in ('', '/canary'):
-                    return self._send(404, {'error': 'not found'})
+                    return self._refuse(404, {'error': 'not found'})
                 try:
                     length = int(self.headers.get('Content-Length') or 0)
                 except ValueError:
-                    return self._send(400, {'error': 'bad content length'})
+                    return self._refuse(400, {'error': 'bad content length'})
                 if length > listener.max_body_bytes:
-                    self.close_connection = True
-                    return self._send(413, {'error': 'too large'})
+                    return self._refuse(413, {'error': 'too large'})
                 body = self.rfile.read(length) if length else b''
                 token = (self.headers.get('X-Netmon-Token')
                          or self.headers.get('Authorization', '').removeprefix('Bearer '))

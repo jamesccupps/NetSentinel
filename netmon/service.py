@@ -236,14 +236,17 @@ class _Tail:
         if stat.st_size == self._offset:
             return
 
+        # Bytes, not text: the offset is a position in the file, and text mode
+        # turns "\r\n" into "\n" and a bad byte into a three-byte U+FFFD, so
+        # counting decoded lines fell behind or ran ahead of the file.
         try:
-            with open(self.path, encoding='utf-8', errors='replace') as handle:
+            with open(self.path, 'rb') as handle:
                 handle.seek(self._offset)
                 for line in handle:
-                    if not line.endswith('\n'):
+                    if not line.endswith(b'\n'):
                         break                  # a half-written last line
-                    self._offset += len(line.encode('utf-8', 'replace'))
-                    yield line.strip()
+                    self._offset += len(line)
+                    yield line.decode('utf-8', 'replace').strip()
         except OSError as e:
             logger.warning('could not read %s: %s', self.path, e)
         finally:

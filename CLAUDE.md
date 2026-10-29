@@ -6,7 +6,7 @@ questions with answers so far, and the task list.
 ## What this is
 
 - **NetSentinel** (`main.py`, `src/`): a Windows-first network monitor and IDS with
-  a Tk desktop GUI, a browser dashboard served at `http://127.0.0.1:8787/`, and a
+  a Tk desktop GUI, a browser dashboard served at `http://127.0.0.1:8737/`, and a
   headless mode (`--headless`). Packet capture via Scapy + Npcap, signature IDS
   (`src/ids_engine.py`, `rules/`), ML anomaly detection, threat feeds, forensics,
   PCAP analysis, and file/folder/zip scanning for leaked secrets and indicators.
@@ -26,7 +26,9 @@ python main.py --headless                          # dashboard/API only
 python -m src.batch_scan PATH... [--skip GLOB] [--json]
 ```
 
-CI (`.github/workflows/test.yml`) runs the tests on Python 3.10, 3.11 and 3.12.
+CI (`.github/workflows/test.yml`) runs the tests on Python 3.10, 3.11 and 3.12 on
+Linux, and on 3.12 on Windows, where the exe runs. On Windows, pass `encoding=` to
+every text `open()` and `FileHandler`, and skip tests of POSIX file modes there.
 Code must work on 3.10: no multi-line expressions inside f-strings, and remember
 3.10's `fromisoformat` only takes 3 or 6 fractional digits.
 
