@@ -160,6 +160,9 @@ class Finding:
     event: Event | None = None
     count: int = 1
     evidence: dict = field(default_factory=dict)
+    # Set by netmon.silence when an ack, snooze or maintenance window covers
+    # this finding: {'kind', 'id', 'reason'}. None when nothing does.
+    silenced: dict | None = None
 
     def __post_init__(self):
         self.severity = Severity.normalise(self.severity)
@@ -177,6 +180,9 @@ class Finding:
             'device': self.device, 'key': self.key,
             'next_check': self.next_check, 'count': self.count,
             'evidence': dict(self.evidence),
+            # Without this the UI cannot say a finding was acknowledged, nor
+            # offer to clear the silence that covers it.
+            'silenced': dict(self.silenced) if self.silenced else None,
         }
         if include_event and self.event is not None:
             data['event'] = self.event.as_dict()

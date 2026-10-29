@@ -175,10 +175,9 @@ class _Handler(BaseHTTPRequestHandler):
         if not self._host_allowed():
             return
 
-        if not app.allow_edit:
-            return self._send_json(
-                {'error': 'editing is off',
-                 'detail': 'start with --allow-edit to enable the editors'}, 403)
+        refusal = app.permission_refusal(parsed.path)
+        if refusal is not None:
+            return self._send_json(refusal, 403)
 
         # Another page in this browser must not be able to drive this one. The
         # token is issued with the page; the Origin check catches the
@@ -254,11 +253,15 @@ class _Handler(BaseHTTPRequestHandler):
         content_type = _STATIC_TYPES.get(os.path.splitext(path)[1],
                                          'application/octet-stream')
         if relative == 'index.html':
-            data = data.replace(b'{{TOKEN}}',
-                                self.server.netmon_app.token.encode())
+            app = self.server.netmon_app
+            data = data.replace(b'{{TOKEN}}', app.token.encode())
             data = data.replace(b'{{EDITABLE}}',
-                                b'true' if self.server.netmon_app.allow_edit
+                                b'true' if app.allow_edit else b'false')
+            data = data.replace(b'{{SILENCES}}',
+                                b'true' if app.allow_edit and app.silences_path
                                 else b'false')
+            data = data.replace(b'{{SUMMARISE}}',
+                                b'true' if app.allow_summarise else b'false')
         self._send_bytes(data, content_type, 200)
 
     def _send_json(self, payload, status=200, close=False):
@@ -301,13 +304,15 @@ class WebServer:
     max_drain_bytes = 16 * 1024 * 1024
 
     def __init__(self, profile_path, rules_path=None, analyzer=None,
-                 host='127.0.0.1', port=8788, allow_edit=False, silences_path=''):
+                 host='127.0.0.1', port=8788, allow_edit=False, silences_path='',
+                 allow_summarise=False):
         self.profile_path = profile_path
         self.rules_path = rules_path or os.path.join(HERE, 'rules')
         self.analyzer = analyzer
         self.host = host
         self.port = port
         self.allow_edit = allow_edit
+        self.allow_summarise = bool(allow_summarise)
         self.token = secrets.token_urlsafe(32)
         self.silences_path = silences_path
 
@@ -335,6 +340,21 @@ class WebServer:
             '/api/silence': self._silence_add,
             '/api/silence/clear': self._silence_clear,
         }
+        #: Which switch each POST route sits behind. Anything not listed is an
+        #: editor route, so a route added without thinking about it is behind
+        #: --allow-edit rather than open.
+        self.post_permissions = {}
+
+    def permission_refusal(self, path):
+        """None if this POST route is switched on, else the refusal to send."""
+        needs = self.post_permissions.get(path, 'edit')
+        if needs == 'summarise' and not self.allow_summarise:
+            return {'error': 'the summariser is off',
+                    'detail': 'start with --allow-summarise to enable the button'}
+        if needs == 'edit' and not self.allow_edit:
+            return {'error': 'editing is off',
+                    'detail': 'start with --allow-edit to enable the editors'}
+        return None
 
     # ─── Lifecycle ───────────────────────────────────────────────────────
 
@@ -383,9 +403,30 @@ class WebServer:
             'rules': self.rules.summary(),
             'analysis': report,
             'editable': self.allow_edit,
+            'silences': bool(self.silences_path),
+            'summarise': self.allow_summarise,
             'profile_path': self.profile_path,
             'rules_path': self.rules_path,
         }
+
+    def _visible(self, findings, include_snoozed=False):
+        """
+        Findings with the silences applied as they stand now.
+
+        Applied on every request rather than once when the finding arrived, so
+        a snooze added a minute ago hides what it covers and an ack shows as
+        one straight away.
+        """
+        store = self._silences()
+        if store is None:
+            return list(findings)
+        shown = store.visible(findings)
+        if not include_snoozed:
+            return shown
+        # Asked for explicitly, so a snooze can be found and cleared. The
+        # snoozed ones are marked by the same pass that left them out.
+        kept = {id(f) for f in shown}
+        return shown + [f for f in findings if id(f) not in kept]
 
     def _findings(self, params):
         if self.analyzer is None:
@@ -394,12 +435,15 @@ class WebServer:
         tier = _one(params, 'tier')
         rule_id = _one(params, 'rule')
         device = _one(params, 'device')
+        include_snoozed = _one(params, 'snoozed') in ('1', 'true', 'yes')
 
-        findings = [f for f in self.analyzer.by_severity()
+        findings = [f for f in self._visible(self.analyzer.by_severity(),
+                                             include_snoozed)
                     if Severity.rank(f.severity) >= floor
                     and (not tier or f.tier == tier)
                     and (not rule_id or f.rule_id == rule_id)
                     and (not device or f.device == device)]
+        findings.sort(key=lambda f: (-Severity.rank(f.severity), f.ts))
         limit = _int(params, 'limit', 500, 5000)
         return {'count': len(findings),
                 'findings': [f.as_dict() for f in findings[:limit]]}
@@ -414,7 +458,7 @@ class WebServer:
         """
         seen, findings_by_device = {}, {}
         if self.analyzer is not None:
-            for finding in self.analyzer.findings:
+            for finding in self._visible(self.analyzer.findings):
                 findings_by_device.setdefault(finding.device, []).append(
                     {'rule_id': finding.rule_id, 'severity': finding.severity,
                      'description': finding.description, 'count': finding.count})
@@ -664,10 +708,26 @@ def _int(params, name, default, maximum):
     return max(1, min(value, maximum))
 
 
+def make_server(profile_path, rules_path=None, analyzer=None, host='127.0.0.1',
+                port=8788, allow_edit=False, state_dir=''):
+    """
+    The UI as `netmon web` builds it, not yet listening.
+
+    `state_dir` is the service's state directory. The silences live there, so
+    pointing the UI at the same one shows — and, with editing on, changes — the
+    acknowledgements and snoozes the running service applies.
+    """
+    silences_path = os.path.join(state_dir, 'silences.json') if state_dir else ''
+    return WebServer(profile_path, rules_path, analyzer, host, port, allow_edit,
+                     silences_path=silences_path)
+
+
 def run_web(profile_path, rules_path=None, analyzer=None, host='127.0.0.1',
-            port=8788, allow_edit=False, open_browser=False):
+            port=8788, allow_edit=False, open_browser=False, state_dir=''):
     """Start the UI and block until interrupted."""
-    server = WebServer(profile_path, rules_path, analyzer, host, port, allow_edit)
+    server = make_server(profile_path, rules_path, analyzer, host, port,
+                         allow_edit, state_dir)
+    silences_path = server.silences_path
     server.start()
 
     print(f'netmon UI on {server.url()}')
@@ -678,6 +738,10 @@ def run_web(profile_path, rules_path=None, analyzer=None, host='127.0.0.1',
               f'{report["findings"]} findings')
     if allow_edit:
         print('  editing is ON — the profile and rules can be written from the browser')
+        if silences_path:
+            print(f'  acknowledge, snooze and maintenance write to {silences_path}')
+    if silences_path and not allow_edit:
+        print('  silences are shown; add --allow-edit to change them')
     if host not in ('127.0.0.1', 'localhost', '::1'):
         print()
         print(f'  WARNING: bound to {host}, not localhost.')
@@ -701,9 +765,8 @@ def run_web(profile_path, rules_path=None, analyzer=None, host='127.0.0.1',
     return 0
 
 
-def _main(argv=None):
+def _parser():
     import argparse
-    import sys
 
     parser = argparse.ArgumentParser(
         prog='python -m netmon.web',
@@ -725,10 +788,21 @@ def _main(argv=None):
                              'has no login')
     parser.add_argument('--port', type=int, default=8788)
     parser.add_argument('--allow-edit', action='store_true',
-                        help='let the profile and rule editors write to disk')
+                        help='let the profile and rule editors write to disk, '
+                             'and the acknowledge, snooze and maintenance '
+                             'buttons write silences under --state')
+    parser.add_argument('--state', default='', metavar='DIR',
+                        help="the service's state directory (its --state), "
+                             'where silences are kept')
     parser.add_argument('--open', action='store_true', help='open a browser')
     parser.add_argument('-v', '--verbose', action='store_true')
-    args = parser.parse_args(argv)
+    return parser
+
+
+def _main(argv=None):
+    import sys
+
+    args = _parser().parse_args(argv)
 
     logging.basicConfig(level=logging.INFO if args.verbose else logging.WARNING,
                         format='%(levelname)s: %(message)s')
@@ -752,7 +826,7 @@ def _main(argv=None):
 
     try:
         return run_web(args.profile, args.rules, analyzer, args.host, args.port,
-                       args.allow_edit, args.open)
+                       args.allow_edit, args.open, state_dir=args.state)
     except (ProfileError, RuleError) as e:
         print(f'{e}', file=sys.stderr)
         return 1
