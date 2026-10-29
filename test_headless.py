@@ -45,6 +45,17 @@ class _StubApp:
         def get_alerts(self, limit=100, **kw):
             return self.items[:limit]
 
+        def acknowledge_alert(self, alert_id):
+            for alert in self.items:
+                if alert.id == alert_id:
+                    alert.acknowledged = True
+                    return True
+            return False
+
+        def acknowledge_all(self):
+            for alert in self.items:
+                alert.acknowledged = True
+
     class _Correlator:
         _all_incidents = []
 
@@ -60,6 +71,18 @@ class _StubApp:
         self.alert_manager = self._Alerts()
         self.alert_correlator = self._Correlator()
         self.device_learner = self._Devices()
+        self.can_start = True
+        self.last_start_error = ''
+
+    def start_monitoring(self):
+        if not self.can_start:
+            self.last_start_error = 'Packet capture failed to start.'
+            return False
+        self.capture_engine.is_running = True
+        return True
+
+    def stop_monitoring(self):
+        self.capture_engine.is_running = False
 
     def get_dashboard_data(self):
         return {
@@ -73,7 +96,7 @@ class _StubApp:
             'ml_result': {'anomaly_score': 0.82},
             'correlator': {'active_incidents': 1},
             'device_learner': {'total_devices': 2},
-            'is_monitoring': True,
+            'is_monitoring': self.capture_engine.is_running,
             'score_history': [{'t': i} for i in range(1000)],
         }
 
@@ -107,6 +130,19 @@ class _ApiTestCase(unittest.TestCase):
 
     def get_json(self, path):
         return json.loads(self.get(path)[2])
+
+    def request(self, path, data=None, headers=None, method=None):
+        req = urllib.request.Request(self.base + path, data=data, method=method,
+                                     headers=headers or {})
+        try:
+            with urllib.request.urlopen(req, timeout=10) as r:
+                return r.status, r.read().decode()
+        except urllib.error.HTTPError as e:
+            return e.code, e.read().decode()
+
+    def post(self, path, data=b'', token=None, **headers):
+        headers['X-NetSentinel-Token'] = self.server.token if token is None else token
+        return self.request(path, data=data, headers=headers, method='POST')
 
 
 class TestServerLifecycle(_ApiTestCase):
@@ -255,7 +291,7 @@ class TestResponseHardening(_ApiTestCase):
         self.assertNotIn('Python', headers.get('Server', ''))
 
     def test_api_is_read_only(self):
-        """No endpoint may change state; POST must not be accepted."""
+        """A read endpoint does not take a POST; the controls are their own routes."""
         request = urllib.request.Request(self.base + '/api/status', data=b'{}',
                                          method='POST')
         with self.assertRaises(urllib.error.HTTPError) as ctx:
@@ -274,19 +310,6 @@ class TestResponseHardening(_ApiTestCase):
 
 class TestDashboard(_ApiTestCase):
     """The browser dashboard, and what keeps other web pages from driving it."""
-
-    def request(self, path, data=None, headers=None, method=None):
-        req = urllib.request.Request(self.base + path, data=data, method=method,
-                                     headers=headers or {})
-        try:
-            with urllib.request.urlopen(req, timeout=10) as r:
-                return r.status, r.read().decode()
-        except urllib.error.HTTPError as e:
-            return e.code, e.read().decode()
-
-    def post(self, path, data=b'', token=None, **headers):
-        headers['X-NetSentinel-Token'] = self.server.token if token is None else token
-        return self.request(path, data=data, headers=headers, method='POST')
 
     def test_the_page_carries_the_token_and_a_strict_policy(self):
         status, headers, body = self.get('/')
@@ -395,6 +418,65 @@ class TestDashboard(_ApiTestCase):
             started = time.monotonic()
             headless._drain(quiet)
         self.assertLess(time.monotonic() - started, 2)
+
+
+class TestControls(_ApiTestCase):
+    """Start, stop and acknowledge: token-gated, and on loopback binds only."""
+
+    def test_monitoring_starts_and_stops_from_the_browser(self):
+        self.assertEqual(self.post('/api/monitoring/stop')[0], 200)
+        self.assertFalse(self.get_json('/api/overview')['monitoring'])
+        status, reply = self.post('/api/monitoring/start')
+        self.assertEqual((status, json.loads(reply)), (200, {'monitoring': True}))
+        self.assertTrue(self.get_json('/api/overview')['monitoring'])
+
+    def test_a_failed_start_says_why(self):
+        self.app.can_start = False
+        status, reply = self.post('/api/monitoring/start')
+        self.assertEqual(status, 503)
+        self.assertIn('failed to start', json.loads(reply)['error'])
+
+    def test_one_alert_or_all_can_be_acknowledged(self):
+        first, rest = self.app.alert_manager.items[0], self.app.alert_manager.items[1:]
+        self.assertEqual(self.post(f'/api/alerts/ack?id={first.id}')[0], 200)
+        self.assertTrue(first.acknowledged)
+        self.assertFalse(any(a.acknowledged for a in rest))
+        self.assertTrue(self.get_json('/api/alerts')['alerts'][-1]['acknowledged'])
+
+        self.assertEqual(self.post('/api/alerts/ack?id=999999')[0], 404)
+        self.assertEqual(self.post('/api/alerts/ack?id=nope')[0], 400)
+        self.assertEqual(self.post('/api/alerts/ack-all')[0], 200)
+        self.assertTrue(all(a.acknowledged for a in rest))
+
+    def test_controls_need_the_token(self):
+        for token in ('', 'wrong'):
+            with self.subTest(token=token):
+                self.assertEqual(self.post('/api/monitoring/stop', token=token)[0], 403)
+        self.assertTrue(self.app.capture_engine.is_running)
+
+    def test_controls_take_no_body(self):
+        self.assertEqual(self.post('/api/monitoring/stop', b'{}')[0], 400)
+        self.assertTrue(self.app.capture_engine.is_running)
+
+    def test_the_overview_says_whether_controls_work(self):
+        self.assertTrue(self.get_json('/api/overview')['controls'])
+
+    def test_controls_are_refused_off_loopback(self):
+        """
+        Bound to a network, the token is all that stands between that network and
+        turning monitoring off. Called directly, so no test binds a public address.
+        """
+        from src.headless import RequestRefused
+        public = HeadlessServer(self.app, host='0.0.0.0', port=0)
+        self.assertFalse(public.controls_allowed)
+        for route in (public._post_monitoring_stop, public._post_monitoring_start,
+                      public._post_alerts_ack_all):
+            with self.subTest(route=route.__name__), \
+                    self.assertRaises(RequestRefused) as ctx:
+                route({}, None, 0)
+            self.assertEqual(ctx.exception.status, 403)
+        self.assertTrue(self.app.capture_engine.is_running)
+        self.assertFalse(public._route_overview({})[0]['controls'])
 
 
 class TestUploadNames(unittest.TestCase):

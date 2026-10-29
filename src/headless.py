@@ -13,13 +13,18 @@ a window.
 
 Design notes
 ------------
-**Read-only.** There is no way to change configuration, acknowledge an alert or
-stop monitoring through this API. A sensor that can be reconfigured over the
-network is a liability, and the failure modes of getting authentication wrong
-are worse than the inconvenience of editing config.json. The one thing a POST
-can do is upload files to be scanned, and it needs the token embedded in the
-dashboard page: a custom header no other site can send without a CORS
-preflight this server never answers, so no web page can drive it.
+**No configuration.** There is no way to change configuration through this API.
+A sensor that can be reconfigured over the network is a liability, and the
+failure modes of getting authentication wrong are worse than the inconvenience
+of editing config.json.
+
+**Controls on loopback only.** A POST can upload files to be scanned and, only
+while the server is bound to a loopback address, start or stop monitoring and
+acknowledge alerts. Every POST needs the token embedded in the dashboard page: a
+custom header no other site can send without a CORS preflight this server never
+answers, so no web page can drive it. Bound to anything else, the controls are
+refused, because then the token is the only thing between a network and turning
+monitoring off.
 
 **Only its own name.** Requests whose Host header is not a loopback name are
 refused while bound to loopback, which stops DNS rebinding from turning a
@@ -48,6 +53,9 @@ Endpoints
     POST /api/scan/new, /api/scan/upload?id=&name=, /api/scan/upload-batch?id=,
          /api/scan/start?id=, /api/scan/cancel?id=
                           upload files and scan them (token required)
+    POST /api/monitoring/start, /api/monitoring/stop, /api/alerts/ack?id=,
+         /api/alerts/ack-all
+                          controls (token required, loopback binds only)
 """
 
 import hmac
@@ -79,6 +87,14 @@ __all__ = ['HeadlessServer', 'run_headless']
 
 # Anything above this is almost certainly a mistake rather than a request.
 MAX_ALERT_LIMIT = 1000
+
+
+class RequestRefused(Exception):
+    """A POST the server understood and will not do. `status` is the HTTP code."""
+
+    def __init__(self, message, status=403):
+        super().__init__(message)
+        self.status = status
 
 # Not 8787, the first choice: localcast and RStudio Server default to it, so
 # whichever started second either failed or pushed the dashboard to a random port.
@@ -244,7 +260,7 @@ class _Handler(BaseHTTPRequestHandler):
 
 
 class HeadlessServer:
-    """Serves a read-only view of a running NetSentinelApp."""
+    """Serves a running NetSentinelApp to the browser, with controls on loopback."""
 
     def __init__(self, app, host='127.0.0.1', port=DEFAULT_PORT):
         self.app = app
@@ -274,7 +290,15 @@ class HeadlessServer:
             '/api/scan/upload-batch': self._post_scan_upload_batch,
             '/api/scan/start': self._post_scan_start,
             '/api/scan/cancel': self._post_scan_cancel,
+            '/api/monitoring/start': self._post_monitoring_start,
+            '/api/monitoring/stop': self._post_monitoring_stop,
+            '/api/alerts/ack': self._post_alert_ack,
+            '/api/alerts/ack-all': self._post_alerts_ack_all,
         }
+
+    @property
+    def controls_allowed(self):
+        return self.host in LOOPBACK_NAMES
 
     @property
     def url(self):
@@ -364,6 +388,7 @@ class HeadlessServer:
         return {
             'version': __version__,
             'monitoring': bool(data.get('is_monitoring')),
+            'controls': self.controls_allowed,
             'uptime_sec': int(time.time() - start) if start and data.get('is_monitoring') else 0,
             'capture': {k: cap.get(k, 0) for k in (
                 'packets_captured', 'bytes_captured', 'packets_per_sec', 'bytes_per_sec',
@@ -424,6 +449,44 @@ class HeadlessServer:
 
     def _post_scan_cancel(self, params, body, length):
         return self._scan_sessions().cancel(_str_param(params, 'id')), 200
+
+    # ─── Controls ────────────────────────────────────────────────────────
+
+    def _control(self, length):
+        if not self.controls_allowed:
+            raise RequestRefused(
+                'Controls are only available while the dashboard is bound to '
+                'localhost. Use the desktop app, or the machine itself.')
+        if length:
+            raise RequestRefused('This request takes no body.', 400)
+
+    def _post_monitoring_start(self, params, body, length):
+        self._control(length)
+        if not self.app.start_monitoring():
+            raise RequestRefused(
+                getattr(self.app, 'last_start_error', '') or 'Monitoring did not start.',
+                503)
+        return {'monitoring': True}, 200
+
+    def _post_monitoring_stop(self, params, body, length):
+        self._control(length)
+        self.app.stop_monitoring()
+        return {'monitoring': False}, 200
+
+    def _post_alert_ack(self, params, body, length):
+        self._control(length)
+        try:
+            alert_id = int(_str_param(params, 'id') or '')
+        except ValueError:
+            raise RequestRefused('Which alert? Pass ?id=.', 400) from None
+        if not self.app.alert_manager.acknowledge_alert(alert_id):
+            raise RequestRefused('No alert with that id.', 404)
+        return {'acknowledged': alert_id}, 200
+
+    def _post_alerts_ack_all(self, params, body, length):
+        self._control(length)
+        self.app.alert_manager.acknowledge_all()
+        return {'acknowledged': 'all'}, 200
 
     # ─── Routes ──────────────────────────────────────────────────────────
 
@@ -594,9 +657,9 @@ def run_headless(app, host='127.0.0.1', port=DEFAULT_PORT, serve_api=True):
     try:
         if not app.start_monitoring():
             logger.error(
-                "Capture failed to start. Check that this process has the "
-                "privileges required for packet capture (Administrator on "
-                "Windows, root or CAP_NET_RAW on Linux).")
+                "%s Packet capture needs Administrator on Windows, root or "
+                "CAP_NET_RAW on Linux.",
+                getattr(app, 'last_start_error', '') or "Capture failed to start.")
             return 1
 
         if serve_api:

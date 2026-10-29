@@ -81,12 +81,9 @@ class FeatureStore:
         self.total_rows_written = 0
         self.total_rows_loaded = 0
 
-        # Start background flush thread
-        self._running = True
-        self._flush_thread = threading.Thread(
-            target=self._flush_loop, daemon=True, name="FeatureFlush"
-        )
-        self._flush_thread.start()
+        self._flush_thread = None
+        self._stop = threading.Event()
+        self.start()
 
         # Cleanup old files on startup
         self._cleanup_old_files()
@@ -182,10 +179,27 @@ class FeatureStore:
             except Exception:
                 self._close_current_file()
 
-    def _flush_loop(self):
+    def start(self):
+        """
+        Start the background flush, again after shutdown() if need be.
+
+        Stopping monitoring shuts the store down, and it used to stay down: after a
+        restart, rows piled up in the 100-row buffer and the oldest were dropped.
+        """
+        if self._flush_thread is not None and self._flush_thread.is_alive() \
+                and not self._stop.is_set():
+            return
+        # A fresh event per run, so the last run's thread, still in its sleep, sees
+        # its own event set and exits instead of flushing alongside the new one.
+        self._stop = threading.Event()
+        self._flush_thread = threading.Thread(
+            target=self._flush_loop, args=(self._stop,), daemon=True,
+            name="FeatureFlush")
+        self._flush_thread.start()
+
+    def _flush_loop(self, stop):
         """Background thread that flushes the buffer periodically."""
-        while self._running:
-            time.sleep(10)  # Flush every 10 seconds
+        while not stop.wait(10):  # Flush every 10 seconds
             self._flush_buffer()
 
     def _close_current_file(self):
@@ -363,7 +377,7 @@ class FeatureStore:
 
     def shutdown(self):
         """Flush remaining data and close files."""
-        self._running = False
+        self._stop.set()
         self._flush_buffer()
         self._close_current_file()
         logger.info("Feature store shut down. Total rows written: %d", self.total_rows_written)

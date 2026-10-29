@@ -579,6 +579,8 @@ class NetSentinelGUI:
 
         # State
         self._monitoring = False
+        self._lifecycle_thread = None
+        self._lifecycle_was_start = False
         self._alert_widgets = []
         # gui.max_log_lines was declared in config but never read.
         self._max_log_lines = max(20, int(
@@ -2664,22 +2666,52 @@ class NetSentinelGUI:
         ).place(x=w//2 - 40, y=650, width=80)
 
     def _toggle_monitoring(self):
-        if not self._monitoring:
-            self._monitoring = True
-            self.app.start_monitoring()
+        # Off the Tk thread: starting runs the IOC scan and may wait for the last
+        # capture to exit, and the window froze for all of it.
+        if self._lifecycle_thread is not None:
+            return
+        stopping = self._monitoring
+        self._lifecycle_was_start = not stopping
+        self._start_btn.config(text="…  STOPPING" if stopping else "…  STARTING",
+                               state='disabled')
+        self._lifecycle_thread = threading.Thread(
+            target=self.app.stop_monitoring if stopping else self.app.start_monitoring,
+            daemon=True, name="MonitoringToggle")
+        self._lifecycle_thread.start()
+
+    def _sync_monitoring(self):
+        """
+        Show what the engine is doing, not what the button last asked for.
+
+        The browser dashboard can start and stop monitoring too, and a start that
+        failed used to leave the window saying it was monitoring.
+        """
+        finished = False
+        if self._lifecycle_thread is not None:
+            if self._lifecycle_thread.is_alive():
+                return
+            self._lifecycle_thread = None
+            finished = True
+        running = self.app.is_monitoring
+        if running == self._monitoring and not finished:
+            return
+        self._monitoring = running
+        if running:
             self._start_btn.config(text="■  STOP MONITORING",
-                                   bg=COLORS['red_dim'])
+                                   bg=COLORS['red_dim'], state='normal')
             self._status_label.config(text="MONITORING", fg=COLORS['green'])
             self._status_dot.config(fg=COLORS['green'])
             self._statusbar_text.config(text="Monitoring active. Capturing packets...")
         else:
-            self._monitoring = False
-            self.app.stop_monitoring()
             self._start_btn.config(text="▶  START MONITORING",
-                                   bg=COLORS['green_dim'])
+                                   bg=COLORS['green_dim'], state='normal')
             self._status_label.config(text="STOPPED", fg=COLORS['text_dim'])
             self._status_dot.config(fg=COLORS['text_dim'])
-            self._statusbar_text.config(text="Monitoring stopped.")
+            error = (self.app.last_start_error
+                     if finished and self._lifecycle_was_start else '')
+            self._statusbar_text.config(text=error or "Monitoring stopped.")
+            if error:
+                messagebox.showwarning("Monitoring did not start", error)
 
     def _on_new_alert(self, alert):
         """Called from background thread when new alert arrives."""
@@ -2752,6 +2784,7 @@ class NetSentinelGUI:
 
     def _schedule_update(self):
         """Periodic GUI update."""
+        self._sync_monitoring()
         self._update_dashboard()
         refresh = self.app.config.get('gui', 'refresh_rate_ms', default=1000)
         self.root.after(refresh, self._schedule_update)
@@ -3158,8 +3191,9 @@ class NetSentinelGUI:
         except Exception as e:
             logger.debug("Devices refresh error: %s", e)
 
-        if self._monitoring:
-            self.root.after(5000, self._devices_refresh)
+        # Always rescheduled: gated on monitoring, the loop ran once at startup,
+        # before anyone pressed Start, and never again.
+        self.root.after(5000, self._devices_refresh)
 
     # ──────────────────────────────────────────────────────────────────────────
     # Tab: Incidents (correlated alerts)
@@ -3271,8 +3305,7 @@ class NetSentinelGUI:
         except Exception as e:
             logger.debug("Incidents refresh error: %s", e)
 
-        if self._monitoring:
-            self.root.after(5000, self._incidents_refresh)
+        self.root.after(5000, self._incidents_refresh)   # see _devices_refresh
 
     # ──────────────────────────────────────────────────────────────────────────
     # Tab: PCAP Capture (live capture export)
@@ -3378,8 +3411,7 @@ class NetSentinelGUI:
         except Exception as e:
             logger.debug("Capture refresh error: %s", e)
 
-        if self._monitoring:
-            self.root.after(5000, self._capture_refresh)
+        self.root.after(5000, self._capture_refresh)   # see _devices_refresh
 
     # ──────────────────────────────────────────────────────────────────────────
     # Helpers
@@ -3397,6 +3429,7 @@ class NetSentinelGUI:
 
     def _on_close(self):
         """Clean shutdown."""
-        if self._monitoring:
-            self.app.stop_monitoring()
+        # Unconditionally: monitoring may have been started from the browser, and
+        # stopping saves alerts and learned data either way.
+        self.app.stop_monitoring()
         self.root.destroy()
