@@ -24,6 +24,7 @@
     <a href="#scan" data-page="scan">Scan Files</a>
   </nav>
   <div class="status" id="status"><span class="dot"></span><span class="label">Connecting…</span></div>
+  <button type="button" id="monitor-toggle" hidden>Start</button>
 </header>
 
 <main>
@@ -48,6 +49,7 @@
     <div class="toolbar">
       <div class="chips" id="severity-chips"></div>
       <input type="search" id="alert-search" placeholder="Filter by title, IP or rule">
+      <button type="button" id="ack-all" class="secondary" hidden>Acknowledge all</button>
     </div>
     <div id="alert-list" class="alert-list"></div>
   </section>

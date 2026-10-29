@@ -130,13 +130,25 @@ function bars(container, rows, format) {
 
 const expanded = new Set();   // survives the list being redrawn on every refresh
 
+function ackButton(a) {
+  if (a.acknowledged) return h('span', { class: 'acked-tag' }, 'acknowledged');
+  if (!overview || !overview.controls || a.id == null) return null;
+  return h('button', {
+    type: 'button', class: 'ack secondary',
+    onclick: (e) => {
+      e.stopPropagation();   // the row's own click opens the evidence
+      control(`/api/alerts/ack?id=${encodeURIComponent(a.id)}`, refreshCurrent);
+    },
+  }, 'Acknowledge');
+}
+
 function alertItem(a) {
   const key = a.id || `${a.timestamp}|${a.rule_id}|${a.title}`;
   const evidence = h('pre', { hidden: !expanded.has(key) }, JSON.stringify(a.evidence || {}, null, 2));
   const where = [a.src_ip, a.dst_ip ? `→ ${a.dst_ip}${a.dst_port ? ':' + a.dst_port : ''}` : null]
     .filter(Boolean).join(' ');
   return h('div', {
-    class: `alert sev-${a.severity}`,
+    class: `alert sev-${a.severity}${a.acknowledged ? ' acked' : ''}`,
     onclick: (e) => {
       if (e.target === evidence) return;
       evidence.hidden = !evidence.hidden;
@@ -146,7 +158,8 @@ function alertItem(a) {
   h('div', { class: 'head' },
     h('span', { class: `badge ${a.severity}` }, a.severity),
     h('span', { class: 'title' }, a.title),
-    h('span', { class: 'time' }, a.time_str || '')),
+    h('span', { class: 'time' }, a.time_str || ''),
+    ackButton(a)),
   a.description ? h('div', { class: 'desc' }, a.description) : null,
   h('div', { class: 'meta' }, [where, a.rule_id, a.category].filter(Boolean).join('  ·  ')),
   evidence);
@@ -174,6 +187,7 @@ async function refreshOverview() {
   const o = overview;
   status.className = o.monitoring ? 'status live' : 'status';
   status.querySelector('.label').textContent = o.monitoring ? `Monitoring · ${fmtDuration(o.uptime_sec)}` : 'Stopped';
+  renderControls(o);
 
   const sev = o.alerts.by_severity || {};
   $('cards').replaceChildren(
@@ -578,6 +592,47 @@ function setUpScan() {
   $('cancel-scan').addEventListener('click', cancelScan);
 }
 
+// ─── Controls (only while the server is bound to localhost) ─────────────
+
+let busy = false;
+
+async function control(path, after) {
+  if (busy) return;
+  busy = true;
+  try {
+    await api(path, { method: 'POST' });
+    if (after) await after();
+  } catch (e) {
+    toast(e.message);
+  } finally {
+    busy = false;
+    await refreshOverview();
+  }
+}
+
+function renderControls(o) {
+  $('ack-all').hidden = !o.controls;
+  const toggle = $('monitor-toggle');
+  toggle.hidden = !o.controls;
+  if (busy) return;   // keeps "Starting…" up until the request returns
+  toggle.disabled = false;
+  toggle.textContent = o.monitoring ? 'Stop' : 'Start';
+  toggle.className = o.monitoring ? 'secondary' : '';
+}
+
+function toggleMonitoring() {
+  const stopping = Boolean(overview && overview.monitoring);
+  if (stopping && !confirm('Stop monitoring? Nothing is captured or detected until it starts again.')) return;
+  const toggle = $('monitor-toggle');
+  toggle.disabled = true;
+  toggle.textContent = stopping ? 'Stopping…' : 'Starting…';
+  control(stopping ? '/api/monitoring/stop' : '/api/monitoring/start');
+}
+
+function refreshCurrent() {
+  return PAGES[current].refresh();
+}
+
 // ─── Pages and polling ───────────────────────────────────────────────────
 
 const PAGES = {
@@ -615,6 +670,8 @@ document.addEventListener('DOMContentLoaded', () => {
   window.addEventListener('resize', () => { charts.pps.draw(); charts.bw.draw(); });
   $('alert-search').addEventListener('input', (e) => { alertView.search = e.target.value; renderAlerts(); });
   $('device-search').addEventListener('input', (e) => { deviceView.search = e.target.value; renderDevices(); });
+  $('monitor-toggle').addEventListener('click', toggleMonitoring);
+  $('ack-all').addEventListener('click', () => control('/api/alerts/ack-all', refreshCurrent));
   setUpScan();
   window.addEventListener('hashchange', show);
   show();

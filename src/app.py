@@ -13,6 +13,9 @@ from src.ids_engine import Severity
 
 logger = logging.getLogger("NetSentinel.App")
 
+# How long a restart waits for the last run's capture threads to exit.
+CAPTURE_EXIT_WAIT = 6
+
 # Human-readable names and units for ML feature vector elements.
 # Defined at module level to avoid rebuilding on every alert.
 _FEATURE_INFO = {
@@ -233,10 +236,23 @@ class NetSentinelApp:
         self._pcap_alert_cooldown = 60
         self._pcap_alert_cooldowns = {}
 
+        # Alerts raised outside the IDS engine (IOC, ML) skip its cooldown, so a rule
+        # that matches every packet of a connection alerted on every packet.
+        self._alert_cooldown = self.config.get('alerts', 'cooldown_sec', default=30)
+        self._alert_cooldowns = {}
+
         # Packet window for ML analysis
         self._packet_window = deque(maxlen=5000)
         self._analysis_interval = self.config.get('analysis', 'stats_interval_sec', default=5)
         self._running = False
+        # The desktop window and the browser dashboard can both start and stop
+        # monitoring, from different threads; one change at a time.
+        self._lifecycle_lock = threading.Lock()
+        # Each run's threads wait on their own event. A shared flag let a quick
+        # stop-then-start leave the last run's loops going beside the new ones.
+        self._stop_event = threading.Event()
+        self._stop_event.set()
+        self.last_start_error = ''
 
         # ML analysis results
         self.last_ml_result = {}
@@ -280,6 +296,24 @@ class NetSentinelApp:
         except Exception as e:
             logger.debug("Alert capture error: %s", e)
 
+    def _cooldown_ok(self, alert):
+        """
+        The IDS engine's cooldown, for alerts that are raised outside it.
+
+        Keyed the same way (rule, source, destination), so one connection that keeps
+        matching alerts once per cooldown rather than once per packet.
+        """
+        now = time.time()
+        key = f"{alert.rule_id}:{alert.src_ip}:{alert.dst_ip}"
+        if now - self._alert_cooldowns.get(key, 0) < self._alert_cooldown:
+            return False
+        self._alert_cooldowns[key] = now
+        if len(self._alert_cooldowns) > 2000:
+            cutoff = now - self._alert_cooldown
+            self._alert_cooldowns = {
+                k: t for k, t in self._alert_cooldowns.items() if t >= cutoff}
+        return True
+
     def _emit_alert(self, alert):
         """Deliver a finished alert to storage, the GUI and the correlator."""
         self._capture_alert_evidence(alert)
@@ -289,10 +323,10 @@ class NetSentinelApp:
         except Exception as e:
             logger.debug("Alert correlation error: %s", e)
 
-    def _verification_loop(self):
+    def _verification_loop(self, stop):
         """Run slow verification off the packet path and update alerts in place."""
         import queue
-        while self._running:
+        while not stop.is_set():
             try:
                 alert = self._verify_queue.get(timeout=0.5)
             except queue.Empty:
@@ -342,7 +376,8 @@ class NetSentinelApp:
                         evidence=f.get('evidence', {}),
                         category="IOC",
                     )
-                    self._alert_gateway(alert)
+                    if self._cooldown_ok(alert):
+                        self._alert_gateway(alert)
         except Exception as e:
             logger.debug("IOC check error: %s", e)
 
@@ -507,10 +542,12 @@ class NetSentinelApp:
                 )
                 self._alert_gateway(alert)
 
-    def _analysis_loop(self):
+    def _analysis_loop(self, stop):
         """Periodic ML analysis of traffic windows."""
-        while self._running:
-            time.sleep(self._analysis_interval)
+        while not stop.wait(self._analysis_interval):
+            # Alerts reached disk only when monitoring stopped cleanly, so a crash
+            # or a killed process lost the whole session. At most once a minute.
+            self.alert_manager.maybe_autosave()
             try:
                 # Only packets from the interval just elapsed. _packet_window is a
                 # rolling buffer that is never cleared, so passing all of it while
@@ -558,7 +595,8 @@ class NetSentinelApp:
                             category="ML Anomaly",
                             evidence=evidence,
                         )
-                        self._alert_gateway(alert)
+                        if self._cooldown_ok(alert):
+                            self._alert_gateway(alert)
             except Exception as e:
                 logger.debug("Analysis error: %s", e)
 
@@ -672,50 +710,87 @@ class NetSentinelApp:
 
         return evidence
 
+    @property
+    def is_monitoring(self):
+        return self._running and self.capture_engine.is_running
+
     def start_monitoring(self):
-        """Start all monitoring components."""
-        self._running = True
+        """
+        Start all monitoring components. Calling it while running does nothing.
 
-        # Prune stale learned data on startup
-        try:
-            self.device_learner.prune_stale(max_age_days=30)
-            self.baseline_whitelist.prune_stale(max_age_days=30)
-        except Exception as e:
-            logger.debug("Stale data pruning error: %s", e)
+        Returns whether monitoring is running afterwards; when it is not,
+        last_start_error says why, in words fit for the user.
+        """
+        with self._lifecycle_lock:
+            if self._running:
+                return self.capture_engine.is_running
 
-        # Run IOC scan BEFORE starting capture and ML baseline training
-        # This catches pre-existing compromise indicators
-        logger.info("Running pre-monitoring IOC scan...")
-        try:
-            findings = self.ioc_scanner.run_startup_scan()
-            if findings:
-                logger.warning(
-                    "IOC scan found %d indicators BEFORE monitoring started. "
-                    "ML baseline may be compromised — review alerts.",
-                    len(findings)
-                )
-        except Exception as e:
-            logger.error("IOC startup scan failed: %s", e)
+            # Scapy checks its stop condition only when a packet arrives, so on a
+            # quiet interface the last run's capture thread can still be waiting,
+            # and its watchdog sleeps for 5 seconds. Starting beside them would put
+            # two captures on the interface.
+            for name in ('_thread', '_watchdog_thread'):
+                previous = getattr(self.capture_engine, name, None)
+                if previous is not None and previous.is_alive():
+                    previous.join(timeout=CAPTURE_EXIT_WAIT)
+                    if previous.is_alive():
+                        self.last_start_error = (
+                            'The previous capture is still shutting down. '
+                            'Try again in a few seconds.')
+                        logger.warning(self.last_start_error)
+                        return False
 
-        success = self.capture_engine.start()
-        if success:
+            # Prune stale learned data on startup
+            try:
+                self.device_learner.prune_stale(max_age_days=30)
+                self.baseline_whitelist.prune_stale(max_age_days=30)
+            except Exception as e:
+                logger.debug("Stale data pruning error: %s", e)
+
+            # Run IOC scan BEFORE starting capture and ML baseline training
+            # This catches pre-existing compromise indicators
+            logger.info("Running pre-monitoring IOC scan...")
+            try:
+                findings = self.ioc_scanner.run_startup_scan()
+                if findings:
+                    logger.warning(
+                        "IOC scan found %d indicators BEFORE monitoring started. "
+                        "ML baseline may be compromised — review alerts.",
+                        len(findings)
+                    )
+            except Exception as e:
+                logger.error("IOC startup scan failed: %s", e)
+
+            if not self.capture_engine.start():
+                self.last_start_error = (
+                    'Packet capture failed to start. Check that Npcap is installed '
+                    'and that NetSentinel has permission to capture.')
+                logger.warning("Capture engine failed to start.")
+                return False
+
+            self.last_start_error = ''
+            self._running = True
+            stop = self._stop_event = threading.Event()
+            self.feature_store.start()
             self._analysis_thread = threading.Thread(
-                target=self._analysis_loop, daemon=True, name="AnalysisThread"
-            )
+                target=self._analysis_loop, args=(stop,), daemon=True,
+                name="AnalysisThread")
             self._analysis_thread.start()
-
             self._verify_thread = threading.Thread(
-                target=self._verification_loop, daemon=True, name="VerifyThread"
-            )
+                target=self._verification_loop, args=(stop,), daemon=True,
+                name="VerifyThread")
             self._verify_thread.start()
             logger.info("Monitoring started.")
-        else:
-            logger.warning("Capture engine failed to start. Running in demo mode.")
-        return success
+            return True
 
     def stop_monitoring(self):
-        """Stop all monitoring."""
+        """Stop all monitoring and save what was learned. Safe to call twice."""
+        with self._lifecycle_lock:
+            self._stop_monitoring()
+
+    def _stop_monitoring(self):
         self._running = False
+        self._stop_event.set()
         self.capture_engine.stop()
         self.alert_manager.save_alerts()
         self.ml_engine.baseline.save()
