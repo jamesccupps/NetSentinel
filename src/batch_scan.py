@@ -1,43 +1,51 @@
 """
-NetSentinel - Batch Capture Scan
-Runs every capture in a folder, a zip, or a list of files through the PCAP
-analyzer and combines the results into one report: what leaked, where, and
-which captures it was in.
+NetSentinel - Batch Scan
+Scans everything in a folder, a zip, or a list of files and combines the
+results into one report. Packet captures go through the PCAP analyzer; every
+other file has its contents searched by src.file_scan. The report lists each
+exposed credential or secret (masked), every IP address, domain, URL, email and
+MAC address found and which files held it, and flags any the threat feeds know.
 
 Zip members are never extracted under their own names. Each one is streamed,
-size-capped, to a numbered file in a private temporary directory, analysed,
-and deleted before the next, so a hostile archive cannot write outside that
-directory and only one capture is on disk at a time. Nested archives and
+size-capped, to a numbered file in a private temporary directory, scanned, and
+deleted before the next, so a hostile archive cannot write outside that
+directory and only one member is on disk at a time. Nested archives and
 password-protected members are skipped and reported, not opened.
 
-Credential values in the report are the masked forms the forensics engine
-produces for display; the raw values never enter it.
+Secret values in the report are masked; the raw values never enter it.
 """
 
 import fnmatch
+import ipaddress
 import logging
 import os
 import tempfile
 import zipfile
 
+from src import file_scan
+
 logger = logging.getLogger(__name__)
 
 CAPTURE_EXTS = ('.pcap', '.pcapng', '.cap')
-MAX_FILES = 1000
-MAX_MEMBER_BYTES = 2 * 1024 ** 3   # per capture taken out of a zip
+MAX_FILES = 5000
+MAX_MEMBER_BYTES = 2 * 1024 ** 3   # per file taken out of a zip
+SKIP_DIRS = {'.git', '.svn', '.hg', 'node_modules', '__pycache__', '.venv', 'venv'}
+INDICATOR_KINDS = ('ipv4', 'ipv6', 'domain', 'url', 'email', 'mac')
 
 
-class _Capture:
-    """One capture to analyse: a file on disk, or a member of a zip."""
+class _Item:
+    """One thing to scan: a file on disk, or a member of a zip."""
 
     def __init__(self, name, path=None, archive=None, member=None):
         self.name = name
         self.path = path
         self.archive = archive
         self.member = member
+        source = member.filename if member is not None else path
+        self.is_capture = os.path.splitext(source)[1].lower() in CAPTURE_EXTS
 
     def materialise(self, workdir, index, max_bytes):
-        """Return a path to analyse, extracting a zip member if need be."""
+        """Return a path to scan, extracting a zip member if need be."""
         if self.path:
             return self.path
         ext = os.path.splitext(self.member.filename)[1].lower()
@@ -84,14 +92,14 @@ def _from_zip(path, label, skip, found, skipped):
             ext = os.path.splitext(info.filename)[1].lower()
             if ext == '.zip':
                 skipped.append({'file': name, 'reason': 'nested archive'})
-            elif ext not in CAPTURE_EXTS:
-                continue
+            elif ext in file_scan.MEDIA_EXTS:
+                skipped.append({'file': name, 'reason': 'media file'})
             elif _skipped(info.filename, skip):
                 skipped.append({'file': name, 'reason': 'excluded by --skip'})
             elif info.flag_bits & 0x1:
                 skipped.append({'file': name, 'reason': 'password-protected'})
             else:
-                found.append(_Capture(name, archive=path, member=info))
+                found.append(_Item(name, archive=path, member=info))
 
 
 def _add_file(path, label, skip, found, skipped):
@@ -100,23 +108,25 @@ def _add_file(path, label, skip, found, skipped):
         skipped.append({'file': label, 'reason': 'excluded by --skip'})
     elif ext == '.zip':
         _from_zip(path, label, skip, found, skipped)
-    elif ext in CAPTURE_EXTS:
-        found.append(_Capture(label, path=path))
+    elif ext in file_scan.MEDIA_EXTS:
+        skipped.append({'file': label, 'reason': 'media file'})
+    else:
+        found.append(_Item(label, path=path))
 
 
 def collect(paths, skip=(), max_files=MAX_FILES):
     """
-    Expand files, folders and zips into the captures to analyse.
+    Expand files, folders and zips into the items to scan.
 
-    Returns (captures, skipped). Folders are walked without following
-    symlinks; files that are neither captures nor zips are ignored.
+    Returns (items, skipped). Folders are walked without following symlinks,
+    and version-control and dependency folders are left out.
     """
     found, skipped = [], []
     for path in paths:
         if os.path.isdir(path):
             root_label = os.path.basename(os.path.normpath(path)) or path
             for root, dirs, files in os.walk(path, followlinks=False):
-                dirs.sort()
+                dirs[:] = sorted(d for d in dirs if d not in SKIP_DIRS)
                 for fname in sorted(files):
                     full = os.path.join(root, fname)
                     label = os.path.join(root_label, os.path.relpath(full, path))
@@ -125,108 +135,210 @@ def collect(paths, skip=(), max_files=MAX_FILES):
                         continue
                     _add_file(full, label, skip, found, skipped)
         elif os.path.isfile(path):
-            before = len(found) + len(skipped)
             _add_file(path, os.path.basename(path), skip, found, skipped)
-            if len(found) + len(skipped) == before:
-                skipped.append({'file': os.path.basename(path),
-                                'reason': 'not a capture or zip'})
         else:
             skipped.append({'file': path, 'reason': 'not found'})
     if len(found) > max_files:
-        for cap in found[max_files:]:
-            skipped.append({'file': cap.name, 'reason': f'over the {max_files}-file limit'})
+        for item in found[max_files:]:
+            skipped.append({'file': item.name, 'reason': f'over the {max_files}-file limit'})
         found = found[:max_files]
     return found, skipped
 
 
-def scan(paths, analyzer, skip=(), on_alert=None, on_progress=None, cancelled=None,
-         max_files=MAX_FILES, max_member_bytes=MAX_MEMBER_BYTES):
-    """
-    Analyse every capture under `paths` with `analyzer` (a PcapAnalyzer).
+class _Indicators:
+    """Indicators across every file, with the files each was found in."""
 
-    on_alert(alert) is called for each alert as it is found, tagged with the
-    capture it came from; on_progress(index, total, name) before each capture;
-    cancelled() is checked between captures. Leaves analyzer.alerts holding
-    every capture's alerts and analyzer.stats the scan summary, so the
-    analyzer's own export covers the whole scan.
+    def __init__(self):
+        self.kinds = {k: {} for k in INDICATOR_KINDS}
+
+    def add(self, kind, value, source, count=1, **info):
+        entry = self.kinds[kind].get(value)
+        if entry is None:
+            entry = self.kinds[kind][value] = dict(info, value=value, count=0, files=[])
+        entry['count'] += count
+        if source not in entry['files'] and len(entry['files']) < 50:
+            entry['files'].append(source)
+
+    def add_ip(self, ip, source, count=1):
+        try:
+            addr = ipaddress.ip_address(ip)
+        except ValueError:
+            return
+        kind = 'ipv4' if addr.version == 4 else 'ipv6'
+        self.add(kind, addr.compressed, source, count, scope=file_scan.ip_scope(addr))
+
+    def as_lists(self):
+        return {k: sorted(v.values(), key=lambda e: (-e['count'], e['value']))
+                for k, v in self.kinds.items()}
+
+
+def _alert(rule_id, severity, title, description, category, evidence):
+    from src.ids_engine import Alert
+    return Alert(rule_id=rule_id, severity=severity, title=title, description=description,
+                 category=category, evidence=evidence)
+
+
+def scan(paths, analyzer, skip=(), on_alert=None, on_progress=None, cancelled=None,
+         max_files=MAX_FILES, max_member_bytes=MAX_MEMBER_BYTES, threat_intel=None):
     """
-    captures, skipped = collect(paths, skip, max_files)
+    Scan everything under `paths`. Captures go to `analyzer` (a PcapAnalyzer).
+
+    on_alert(alert) is called for each alert, tagged with the file it came
+    from; on_progress(index, total, name) before each file; cancelled() is
+    checked between files. threat_intel defaults to the analyzer's. Leaves
+    analyzer.alerts holding every alert and analyzer.stats the summary and
+    indicators, so the analyzer's own export covers the whole scan.
+    """
+    if threat_intel is None:
+        threat_intel = getattr(analyzer, 'threat_intel', None)
+    items, skipped = collect(paths, skip, max_files)
     report = {'files': [], 'skipped': skipped, 'alerts': [], 'credentials': [],
-              'cancelled': False}
+              'secrets': [], 'cancelled': False}
     alert_objects = []
     creds = {}
+    indicators = _Indicators()
+
+    def emit(alert, key=None, name=None):
+        if key and isinstance(getattr(alert, 'evidence', None), dict):
+            alert.evidence[key] = name
+        alert_objects.append(alert)
+        report['alerts'].append(alert.to_dict())
+        if on_alert:
+            on_alert(alert)
 
     with tempfile.TemporaryDirectory(prefix='netsentinel_scan_',
                                      ignore_cleanup_errors=True) as workdir:
-        for index, cap in enumerate(captures):
+        for index, item in enumerate(items):
             if cancelled and cancelled():
                 report['cancelled'] = True
                 break
             if on_progress:
-                on_progress(index, len(captures), cap.name)
+                on_progress(index, len(items), item.name)
 
-            def tag(alert, name=cap.name):
-                if isinstance(getattr(alert, 'evidence', None), dict):
-                    alert.evidence['capture'] = name
-                if on_alert:
-                    on_alert(alert)
-
-            entry = {'file': cap.name}
+            entry = {'file': item.name, 'type': 'capture' if item.is_capture else 'file'}
             path = None
             try:
-                path = cap.materialise(workdir, index, max_member_bytes)
-                result = analyzer.analyze_file(path, callback=tag)
+                path = item.materialise(workdir, index, max_member_bytes)
+                if item.is_capture:
+                    _scan_capture(item, path, analyzer, entry, emit, creds, indicators)
+                else:
+                    _scan_file(item, path, entry, emit, report, indicators)
             except Exception as e:
-                logger.warning("Batch scan: %s failed: %s", cap.name, e)
+                logger.warning("Batch scan: %s failed: %s", item.name, e)
                 analyzer.is_analyzing = False   # a raise leaves it set
                 entry['error'] = str(e)
-                report['files'].append(entry)
-                continue
             finally:
-                if path and not cap.path and os.path.exists(path):
+                if path and not item.path and os.path.exists(path):
                     os.remove(path)
-
-            for obj in getattr(analyzer, 'alerts', []) or []:
-                if isinstance(getattr(obj, 'evidence', None), dict):
-                    obj.evidence['capture'] = cap.name
-                alert_objects.append(obj)
-            alerts = result.get('alerts', [])
-            found = 0
-            for alert in alerts:
-                alert.setdefault('evidence', {})['capture'] = cap.name
-                report['alerts'].append(alert)
-                if alert.get('rule_id') != 'FORENSICS-CREDENTIAL':
-                    continue
-                found += 1
-                ev = alert['evidence']
-                key = (ev.get('protocol'), ev.get('credential_type'),
-                       ev.get('value'), ev.get('source'))
-                cred = creds.setdefault(key, {
-                    'protocol': ev.get('protocol', ''),
-                    'credential_type': ev.get('credential_type', ''),
-                    'value': ev.get('value', ''),
-                    'source': ev.get('source', ''),
-                    'captures': [],
-                })
-                if cap.name not in cred['captures']:
-                    cred['captures'].append(cap.name)
-            stats = result.get('stats', {})
-            entry.update(packets=stats.get('packets_analyzed', 0),
-                         alerts=len(alerts), credentials=found)
             report['files'].append(entry)
 
+    found = indicators.as_lists()
+    threats = _check_threats(found, threat_intel)
+    for hit in threats:
+        emit(_alert('FILESCAN-THREAT-INTEL', 'HIGH',
+                    f"Known-bad {hit['kind']} found: {hit['value']}",
+                    f"{hit['value']} is listed by {hit.get('feed') or 'a threat feed'}.",
+                    'Threat Intelligence',
+                    {'indicator': hit['value'], 'kind': hit['kind'],
+                     'feed': hit.get('feed', ''), 'category': hit.get('category', ''),
+                     'files': hit['files']}))
+
     report['credentials'] = list(creds.values())
-    report['summary'] = {
-        'captures': len(captures),
+    report['indicators'] = found
+    report['threats'] = threats
+    report['summary'] = dict({
+        'items': len(items),
+        'captures': sum(1 for i in items if i.is_capture),
+        'files': sum(1 for i in items if not i.is_capture),
         'scanned': sum(1 for f in report['files'] if 'error' not in f),
         'failed': sum(1 for f in report['files'] if 'error' in f),
         'skipped': len(skipped),
         'alerts': len(report['alerts']),
         'credentials': len(report['credentials']),
-    }
+        'secrets': len(report['secrets']),
+        'threats': len(threats),
+    }, **{k: len(v) for k, v in found.items()})
     analyzer.alerts = alert_objects
-    analyzer.stats = dict(report['summary'], file='batch scan')
+    analyzer.stats = dict(report['summary'], file='batch scan', indicators=found)
     return report
+
+
+def _scan_capture(item, path, analyzer, entry, emit, creds, indicators):
+    result = analyzer.analyze_file(path)
+    alerts = list(getattr(analyzer, 'alerts', []) or [])
+    found = 0
+    for obj in alerts:
+        emit(obj, 'capture', item.name)
+        if obj.rule_id != 'FORENSICS-CREDENTIAL':
+            continue
+        found += 1
+        ev = obj.evidence
+        key = (ev.get('protocol'), ev.get('credential_type'), ev.get('value'), ev.get('source'))
+        cred = creds.setdefault(key, {
+            'protocol': ev.get('protocol', ''),
+            'credential_type': ev.get('credential_type', ''),
+            'value': ev.get('value', ''),
+            'source': ev.get('source', ''),
+            'captures': [],
+        })
+        if item.name not in cred['captures']:
+            cred['captures'].append(item.name)
+    stats = result.get('stats', {})
+    for key in ('top_talkers', 'top_destinations'):
+        for ip, _bytes in stats.get(key) or []:
+            indicators.add_ip(ip, item.name)
+    for name, count in stats.get('top_dns_queries') or []:
+        if name:
+            indicators.add('domain', str(name).lower().rstrip('.'), item.name, count)
+    entry.update(packets=stats.get('packets_analyzed', 0), alerts=len(alerts),
+                 credentials=found)
+
+
+def _scan_file(item, path, entry, emit, report, indicators):
+    with open(path, 'rb') as f:
+        data = f.read(file_scan.MAX_TEXT_BYTES + 1)
+    result = file_scan.scan_bytes(item.name, data)
+    for kind, values in result['indicators'].items():
+        for value, info in values.items():
+            info = dict(info)
+            count = info.pop('count', 1)
+            indicators.add(kind, value, item.name, count, **info)
+    for secret in result['secrets']:
+        secret = dict(secret, file=item.name)
+        report['secrets'].append(secret)
+        emit(_alert('FILESCAN-SECRET', secret['severity'],
+                    f"{secret['label']} in {os.path.basename(item.name)}",
+                    f"{secret['label']} found on line {secret['line']} of {item.name}. "
+                    "If it is real, treat it as exposed: rotate or revoke it.",
+                    'Secret Exposure',
+                    {'kind': secret['kind'], 'value': secret['value'],
+                     'line': secret['line']}), 'file', item.name)
+    entry.update(secrets=len(result['secrets']),
+                 indicators=sum(len(v) for v in result['indicators'].values()))
+    if result['truncated']:
+        entry['note'] = f'only the first {file_scan.MAX_TEXT_BYTES // 1024 ** 2} MB searched'
+
+
+def _check_threats(found, threat_intel):
+    """Look up public addresses and domains in the threat feeds."""
+    if threat_intel is None:
+        return []
+    hits = []
+    for kind, check in (('ipv4', 'check_ip'), ('ipv6', 'check_ip'), ('domain', 'check_domain')):
+        lookup = getattr(threat_intel, check, None)
+        if lookup is None:
+            continue
+        for entry in found[kind]:
+            if entry.get('scope', 'public') != 'public':
+                continue
+            try:
+                info = lookup(entry['value'])
+            except Exception:
+                continue
+            if info:
+                entry['threat'] = info
+                hits.append(dict(info, kind=kind, value=entry['value'], files=entry['files']))
+    return hits
 
 
 def main(argv=None):
@@ -235,11 +347,11 @@ def main(argv=None):
 
     parser = argparse.ArgumentParser(
         prog='python -m src.batch_scan',
-        description='Scan captures in folders and zips for leaked credentials '
-                    'and insecure protocols.')
-    parser.add_argument('paths', nargs='+', help='capture files, folders or zips')
+        description='Scan files, folders and zips for leaked secrets and network '
+                    'indicators; packet captures get the full PCAP analysis.')
+    parser.add_argument('paths', nargs='+', help='files, folders or zips')
     parser.add_argument('--skip', action='append', default=[], metavar='GLOB',
-                        help="leave out captures whose name matches, e.g. 'flash*'")
+                        help="leave out files whose name matches, e.g. 'flash*'")
     parser.add_argument('--json', action='store_true', help='print the report as JSON')
     args = parser.parse_args(argv)
 
@@ -251,11 +363,19 @@ def main(argv=None):
         print(json.dumps(report, indent=2, default=str))
         return 0
     s = report['summary']
-    print(f"{s['scanned']} of {s['captures']} captures scanned, {s['alerts']} alerts, "
-          f"{s['credentials']} exposed credentials")
+    print(f"{s['scanned']} of {s['items']} files scanned ({s['captures']} captures), "
+          f"{s['credentials'] + s['secrets']} exposed secrets, {s['alerts']} alerts")
     for cred in report['credentials']:
         print(f"  {cred['protocol']} {cred['credential_type']} {cred['value']}  "
               f"{cred['source']}  in {', '.join(cred['captures'])}")
+    for sec in report['secrets']:
+        print(f"  {sec['label']}: {sec['value']}  {sec['file']}:{sec['line']}")
+    for kind in INDICATOR_KINDS:
+        values = report['indicators'][kind]
+        if values:
+            shown = ', '.join(v['value'] for v in values[:10])
+            more = f' and {len(values) - 10} more' if len(values) > 10 else ''
+            print(f"  {kind}: {shown}{more}")
     for f in report['files']:
         if 'error' in f:
             print(f"  failed: {f['file']}: {f['error']}")

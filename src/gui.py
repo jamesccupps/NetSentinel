@@ -15,7 +15,7 @@ from tkinter import ttk, messagebox, filedialog
 from collections import deque
 from datetime import datetime
 
-from src import presentation
+from src import presentation, __version__
 
 logger = logging.getLogger("NetSentinel.GUI")
 
@@ -628,7 +628,7 @@ class NetSentinelGUI:
         tk.Label(logo_frame, text=" NETSENTINEL",
                 font=('Segoe UI Semibold', 14),
                 fg=COLORS['text'], bg=COLORS['bg_panel']).pack(side='left')
-        tk.Label(logo_frame, text="  v1.0",
+        tk.Label(logo_frame, text=f"  v{__version__}",
                 font=('Consolas', 8),
                 fg=COLORS['text_dim'], bg=COLORS['bg_panel']).pack(side='left', padx=(4,0))
 
@@ -708,7 +708,7 @@ class NetSentinelGUI:
 
         # Tab 6: PCAP Analyzer
         self._tab_pcap = StyledFrame(self.notebook)
-        self.notebook.add(self._tab_pcap, text='  📁  PCAP Analyzer  ')
+        self.notebook.add(self._tab_pcap, text='  📁  File Analyzer  ')
         self._build_pcap_tab(self._tab_pcap)
 
         # Tab 7: Forensics Vault
@@ -1068,11 +1068,14 @@ class NetSentinelGUI:
     def _build_pcap_tab(self, parent):
         # Top controls
         ctrl_frame = tk.Frame(parent, bg=COLORS['bg_dark'])
-        ctrl_frame.pack(fill='x', padx=8, pady=8)
-
-        tk.Label(ctrl_frame, text="Analyze PCAP/PCAPNG capture files from Wireshark or tcpdump",
-                font=('Segoe UI', 9), fg=COLORS['text_dim'],
-                bg=COLORS['bg_dark']).pack(side='left')
+        ctrl_frame.pack(fill='x', padx=8, pady=(8, 0))
+        # The buttons get the row to themselves so a narrow or scaled window
+        # cannot squeeze them out; the description sits underneath.
+        tk.Label(parent, text="Scan any files, folders or zips for IP addresses, domains, "
+                              "emails and leaked passwords or keys. Packet captures "
+                              "(.pcap, .pcapng) get the full traffic analysis.",
+                 font=('Segoe UI', 9), fg=COLORS['text_dim'], bg=COLORS['bg_dark'],
+                 anchor='w', justify='left').pack(fill='x', padx=10, pady=(4, 6))
 
         self._pcap_export_btn = tk.Button(
             ctrl_frame, text="📤  Export Results",
@@ -1090,29 +1093,29 @@ class NetSentinelGUI:
         )
         self._pcap_cancel_btn.pack(side='right', padx=4)
 
-        self._pcap_btn = tk.Button(
-            ctrl_frame, text="📂  Open PCAP File",
+        self._pcap_many_btn = tk.Button(
+            ctrl_frame, text="📦  Scan Files / Zips",
             font=('Segoe UI', 10, 'bold'), bg=COLORS['accent'],
             fg=COLORS['bg_dark'], relief='flat', padx=16, pady=6,
-            cursor='hand2', command=self._pcap_open_file
+            cursor='hand2', command=self._pcap_open_many
         )
-        self._pcap_btn.pack(side='right', padx=4)
+        self._pcap_many_btn.pack(side='left', padx=4)
 
         self._pcap_folder_btn = tk.Button(
             ctrl_frame, text="📁  Scan Folder",
-            font=('Segoe UI', 9), bg=COLORS['bg_input'],
-            fg=COLORS['text'], relief='flat', padx=10, pady=6,
+            font=('Segoe UI', 10, 'bold'), bg=COLORS['accent'],
+            fg=COLORS['bg_dark'], relief='flat', padx=16, pady=6,
             cursor='hand2', command=self._pcap_open_folder
         )
-        self._pcap_folder_btn.pack(side='right', padx=4)
+        self._pcap_folder_btn.pack(side='left', padx=4)
 
-        self._pcap_many_btn = tk.Button(
-            ctrl_frame, text="📦  Scan Zip / Files",
+        self._pcap_btn = tk.Button(
+            ctrl_frame, text="📂  Open One Capture",
             font=('Segoe UI', 9), bg=COLORS['bg_input'],
             fg=COLORS['text'], relief='flat', padx=10, pady=6,
-            cursor='hand2', command=self._pcap_open_many
+            cursor='hand2', command=self._pcap_open_file
         )
-        self._pcap_many_btn.pack(side='right', padx=4)
+        self._pcap_btn.pack(side='left', padx=4)
 
         # Progress bar
         prog_frame = tk.Frame(parent, bg=COLORS['bg_dark'])
@@ -1150,8 +1153,10 @@ class NetSentinelGUI:
             "Click 'Open PCAP File' to load a capture from Wireshark,\n"
             "tcpdump, or any other packet capture tool.\n\n"
             "Supported formats: .pcap, .pcapng, .cap\n"
-            "'Scan Folder' and 'Scan Zip / Files' run many captures at once\n"
-            "and list every exposed credential (masked) and where it was.\n\n"
+            "'Scan Files / Zips' and 'Scan Folder' take anything: logs, configs,\n"
+            "documents, exports, zips. They list every IP address, domain, URL,\n"
+            "email and MAC address found, and every password, key or token that\n"
+            "looks leaked (masked), with the file and line it was on.\n\n"
             "The analyzer runs every packet through:\n"
             "  - IDS signature rules (port scan, brute force, etc.)\n"
             "  - Threat intelligence feeds (malicious IPs/domains)\n"
@@ -1191,12 +1196,11 @@ class NetSentinelGUI:
     def _pcap_open_many(self):
         """Pick zips and/or capture files to scan together."""
         paths = filedialog.askopenfilenames(
-            title="Select Zips or Capture Files",
+            title="Select Files or Zips to Scan",
             filetypes=[
-                ('Zips and captures', '*.zip *.pcap *.pcapng *.cap'),
+                ('All files', '*.*'),
                 ('Zip archives', '*.zip'),
                 ('Packet Captures', '*.pcap *.pcapng *.cap'),
-                ('All files', '*.*'),
             ]
         )
         if paths:
@@ -1204,7 +1208,7 @@ class NetSentinelGUI:
 
     def _pcap_open_folder(self):
         """Pick a folder; every capture and zip under it is scanned."""
-        folder = filedialog.askdirectory(title="Select a Folder of Captures")
+        folder = filedialog.askdirectory(title="Select a Folder to Scan")
         if folder:
             self._pcap_start_batch([folder])
 
@@ -1213,7 +1217,7 @@ class NetSentinelGUI:
         from src.batch_scan import scan
 
         self._pcap_stats_text.delete('1.0', 'end')
-        self._pcap_stats_text.insert('end', "Collecting captures...\n")
+        self._pcap_stats_text.insert('end', "Collecting files...\n")
         for w in self._pcap_alert_widgets:
             w.destroy()
         self._pcap_alert_widgets.clear()
@@ -1256,31 +1260,65 @@ class NetSentinelGUI:
             st.insert('end', f"Scan failed: {report['error']}\n", 'alert_high')
             return
         s = report['summary']
-        st.insert('end', 'BATCH SCAN\n', 'header')
-        st.insert('end', f"  Captures:  {s['scanned']} scanned of {s['captures']}"
+        st.insert('end', 'SCAN SUMMARY\n', 'header')
+        st.insert('end', f"  Scanned:   {s['scanned']} of {s['items']} files "
+                         f"({s['captures']} packet captures)"
                          f"{' (cancelled)' if report.get('cancelled') else ''}\n")
-        st.insert('end', f"  Alerts:    {s['alerts']}\n")
+        st.insert('end', f"  Found:     {s['ipv4'] + s['ipv6']} IP addresses, {s['domain']} domains, "
+                         f"{s['url']} URLs, {s['email']} emails, {s['mac']} MAC addresses\n")
+        exposed = s['credentials'] + s['secrets']
+        st.insert('end', f"  Exposed:   {exposed} passwords, keys or tokens\n",
+                  'alert_high' if exposed else 'safe')
+        if s['threats']:
+            st.insert('end', f"  Known bad: {s['threats']} indicators on threat feeds\n", 'alert_high')
         if s['failed']:
             st.insert('end', f"  Failed:    {s['failed']}\n", 'alert_med')
         if s['skipped']:
             st.insert('end', f"  Skipped:   {s['skipped']}\n")
 
-        st.insert('end', '\nEXPOSED CREDENTIALS\n', 'header')
-        if not report['credentials']:
-            st.insert('end', "  None found in plaintext.\n", 'safe')
+        if report['threats']:
+            st.insert('end', '\nON THREAT FEEDS\n', 'header')
+            for t in report['threats']:
+                st.insert('end', f"  {t['value']}  ({t.get('feed', '')} {t.get('category', '')})\n"
+                                 f"      in {', '.join(t['files'][:5])}\n", 'alert_high')
+
+        st.insert('end', '\nEXPOSED PASSWORDS, KEYS AND TOKENS\n', 'header')
+        if not exposed:
+            st.insert('end', "  None found.\n", 'safe')
         for cred in report['credentials']:
             st.insert('end', f"  {cred['protocol']} {cred['credential_type']}: "
                              f"{cred['value']}\n", 'alert_high')
             st.insert('end', f"      {cred['source']}\n"
                              f"      in {', '.join(cred['captures'])}\n")
+        for sec in report['secrets']:
+            st.insert('end', f"  {sec['label']}: {sec['value']}\n", 'alert_high')
+            st.insert('end', f"      {sec['file']}, line {sec['line']}\n")
 
-        st.insert('end', '\nCAPTURES\n', 'header')
+        titles = {'ipv4': 'IPv4 ADDRESSES', 'ipv6': 'IPv6 ADDRESSES', 'domain': 'DOMAINS',
+                  'url': 'URLS', 'email': 'EMAIL ADDRESSES', 'mac': 'MAC ADDRESSES'}
+        for kind, title in titles.items():
+            entries = report['indicators'][kind]
+            if not entries:
+                continue
+            st.insert('end', f"\n{title} ({len(entries)})\n", 'header')
+            for e in entries[:100]:
+                scope = f"  [{e['scope']}]" if e.get('scope') else ''
+                where = ', '.join(e['files'][:3]) + (' ...' if len(e['files']) > 3 else '')
+                st.insert('end', f"  {e['value']}{scope}  x{e['count']}  ", 'value')
+                st.insert('end', f"{where}\n")
+            if len(entries) > 100:
+                st.insert('end', f"  ... and {len(entries) - 100} more (Export Results has them all)\n")
+
+        st.insert('end', '\nFILES\n', 'header')
         for f in report['files']:
             if 'error' in f:
                 st.insert('end', f"  {f['file']}: failed ({f['error']})\n", 'alert_med')
-            else:
+            elif f.get('type') == 'capture':
                 st.insert('end', f"  {f['file']}: {f['packets']} packets, "
                                  f"{f['alerts']} alerts, {f['credentials']} credentials\n")
+            else:
+                st.insert('end', f"  {f['file']}: {f['indicators']} indicators, "
+                                 f"{f['secrets']} secrets{'  (' + f['note'] + ')' if f.get('note') else ''}\n")
         for f in report['skipped']:
             st.insert('end', f"  {f['file']}: skipped ({f['reason']})\n")
 
@@ -1339,8 +1377,8 @@ class NetSentinelGUI:
             done = batch['index'] + (analyzer.progress / 100 if analyzer.is_analyzing else 0)
             self._pcap_progress_var.set(min(done / total * 100, 100))
             self._pcap_progress_label.config(
-                text=f"Capture {batch['index'] + 1} of {batch['total']}: {batch['name']}"
-                if batch['total'] else "Collecting captures...")
+                text=f"File {batch['index'] + 1} of {batch['total']}: {batch['name']}"
+                if batch['total'] else "Collecting files...")
             self.root.after(200, self._pcap_update_progress)
         elif analyzer.is_analyzing:
             self._pcap_progress_var.set(analyzer.progress)
@@ -1349,7 +1387,7 @@ class NetSentinelGUI:
         else:
             self._pcap_progress_var.set(100)
             self._pcap_progress_label.config(
-                text="Batch scan complete" if batch else analyzer.progress_text)
+                text="Scan complete" if batch else analyzer.progress_text)
             self._pcap_set_busy(False)
 
     def _pcap_add_alert(self, alert):

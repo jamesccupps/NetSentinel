@@ -53,7 +53,9 @@ class FakeAnalyzer:
             if callback:
                 callback(a)
         self.is_analyzing = False
-        return {'stats': {'packets_analyzed': 3},
+        return {'stats': {'packets_analyzed': 3,
+                          'top_talkers': [('10.0.0.5', 900)],
+                          'top_dns_queries': [('Update.Example.COM.', 4)]},
                 'alerts': [a.to_dict() for a in self.alerts]}
 
 
@@ -85,8 +87,18 @@ class TestCollecting(_Case):
         self.zip('caps/more.zip', {'c.cap': b'ok', 'readme.md': b'x'})
         found, skipped = batch_scan.collect([os.path.join(self.tmp, 'caps')])
         names = [c.name.replace('\\', '/') for c in found]
-        self.assertEqual(names, ['caps/a.pcap', 'caps/more.zip/c.cap', 'caps/sub/b.pcapng'])
+        self.assertEqual(names, ['caps/a.pcap', 'caps/more.zip/c.cap', 'caps/more.zip/readme.md',
+                                 'caps/notes.txt', 'caps/sub/b.pcapng'])
+        self.assertEqual([c.is_capture for c in found], [True, True, False, False, True])
         self.assertEqual(skipped, [])
+
+    def test_media_and_version_control_are_left_out(self):
+        self.file('d/photo.JPG')
+        self.file('d/.git/config', b'[remote] url = https://x:y@example.com')
+        self.file('d/keep.log')
+        found, skipped = batch_scan.collect([os.path.join(self.tmp, 'd')])
+        self.assertEqual([os.path.basename(c.name) for c in found], ['keep.log'])
+        self.assertEqual([s['reason'] for s in skipped], ['media file'])
 
     def test_skip_patterns_apply_on_disk_and_inside_zips(self):
         a = self.file('flash_0925.pcap')
@@ -130,13 +142,11 @@ class TestCollecting(_Case):
         self.assertIn('limit', skipped[0]['reason'])
 
     def test_unknown_inputs_are_reported(self):
-        txt = self.file('notes.txt')
         bad = self.file('bad.zip', b'not a zip')
-        _, skipped = batch_scan.collect([txt, bad, os.path.join(self.tmp, 'gone')])
+        _, skipped = batch_scan.collect([bad, os.path.join(self.tmp, 'gone')])
         reasons = [s['reason'] for s in skipped]
-        self.assertEqual(reasons[0], 'not a capture or zip')
-        self.assertTrue(reasons[1].startswith('unreadable zip'))
-        self.assertEqual(reasons[2], 'not found')
+        self.assertTrue(reasons[0].startswith('unreadable zip'))
+        self.assertEqual(reasons[1], 'not found')
 
 
 class TestScanning(_Case):
@@ -201,8 +211,106 @@ class TestScanning(_Case):
         with unittest.mock.patch('src.pcap_analyzer.PcapAnalyzer', lambda cfg: FakeAnalyzer()), \
                 redirect_stdout(out):
             self.assertEqual(batch_scan.main([a]), 0)
-        self.assertIn('1 of 1 captures scanned', out.getvalue())
+        self.assertIn('1 of 1 files scanned (1 captures), 1 exposed secrets', out.getvalue())
         self.assertIn('FTP password pas*****', out.getvalue())
+
+
+class FakeThreatIntel:
+    def check_ip(self, ip):
+        return {'feed': 'test-feed', 'category': 'c2'} if ip == '198.51.100.7' else None
+
+    def check_domain(self, domain):
+        return {'feed': 'test-feed', 'category': 'phish'} if domain == 'evil.example.com' else None
+
+
+class TestFileContents(_Case):
+    CONFIG = (b'# app.conf\n'
+              b'upstream = 198.51.100.7\n'
+              b'db_url = postgres://app:Pg-Pass-991@db.internal:5432/app\n'
+              b'password = "Tr0ub4dor&3"\n'
+              b'notify https://evil.example.com/hook admin@corp.example.com\n'
+              b'aws = AKIAIOSFODNN7EXAMPLE\n')
+
+    def test_secrets_are_masked_with_their_line(self):
+        z = self.zip('leak.zip', {'etc/app.conf': self.CONFIG})
+        live = []
+        report = batch_scan.scan([z], FakeAnalyzer(), on_alert=live.append)
+        found = {(s['kind'], s['line']) for s in report['secrets']}
+        self.assertEqual(found, {('url_password', 3), ('password', 4), ('aws_access_key', 6)})
+        dumped = json.dumps(report, default=str)
+        for raw in ('Pg-Pass-991', 'Tr0ub4dor&3', 'AKIAIOSFODNN7EXAMPLE'):
+            self.assertNotIn(raw, dumped)
+        self.assertTrue(all(a.evidence['file'] == 'leak.zip/etc/app.conf' for a in live))
+        self.assertEqual({a.rule_id for a in live}, {'FILESCAN-SECRET'})
+
+    def test_indicators_combine_files_and_captures(self):
+        a = self.file('a.log', b'from 10.0.0.5 to 198.51.100.7 via update.example.com\n')
+        b = self.file('b.pcap', b'ok')
+        report = batch_scan.scan([a, b], FakeAnalyzer())
+        ips = {e['value']: e for e in report['indicators']['ipv4']}
+        self.assertEqual(ips['10.0.0.5']['files'], ['a.log', 'b.pcap'])
+        self.assertEqual(ips['10.0.0.5']['scope'], 'private')
+        self.assertEqual(ips['198.51.100.7']['files'], ['a.log'])
+        domains = {e['value']: e['count'] for e in report['indicators']['domain']}
+        self.assertEqual(domains['update.example.com'], 5)
+        self.assertEqual(report['summary']['ipv4'], 2)
+
+    def test_threat_feeds_flag_known_bad_indicators(self):
+        a = self.file('app.conf', self.CONFIG)
+        analyzer = FakeAnalyzer()
+        report = batch_scan.scan([a], analyzer, threat_intel=FakeThreatIntel())
+        # 198.51.100.0/24 is documentation space, never public, so never looked up
+        self.assertEqual({t['value'] for t in report['threats']}, {'evil.example.com'})
+        analyzer.threat_intel = FakeThreatIntel()
+        with unittest.mock.patch('src.file_scan.ip_scope', return_value='public'):
+            report = batch_scan.scan([a], analyzer)
+        self.assertEqual({t['value'] for t in report['threats']},
+                         {'198.51.100.7', 'evil.example.com'})
+        self.assertIn('FILESCAN-THREAT-INTEL', {a['rule_id'] for a in report['alerts']})
+
+    def test_an_office_document_is_read_not_unpacked(self):
+        doc = io.BytesIO()
+        with zipfile.ZipFile(doc, 'w') as zf:
+            zf.writestr('word/document.xml', '<w:t>Contact</w:t> <w:t>ops@corp.example.com</w:t>'
+                                             '<w:t>password: Sup3rS3cret</w:t>')
+        path = self.file('handover.docx', doc.getvalue())
+        report = batch_scan.scan([path], FakeAnalyzer())
+        self.assertEqual(report['summary']['files'], 1)
+        self.assertEqual([e['value'] for e in report['indicators']['email']], ['ops@corp.example.com'])
+        self.assertEqual([s['kind'] for s in report['secrets']], ['password'])
+
+
+class TestFileScanPatterns(unittest.TestCase):
+    def scan(self, text):
+        from src.file_scan import scan_bytes
+        return scan_bytes('x.txt', text.encode('utf-8'))
+
+    def test_only_luhn_valid_card_numbers_count(self):
+        r = self.scan('4111 1111 1111 1111 and 4111 1111 1111 1112')
+        self.assertEqual([s['value'] for s in r['secrets']], ['**** **** **** 1111'])
+
+    def test_placeholders_and_code_are_not_passwords(self):
+        r = self.scan("password = None\npassword: str\npwd = os.environ['PWD']\n"
+                      "api_key=${API_KEY}\npassword = '********'\nsecret = get_secret()\n"
+                      "password = self.config.password\n")
+        self.assertEqual(r['secrets'], [])
+
+    def test_code_is_not_full_of_domains_and_addresses(self):
+        r = self.scan('logger.info("x")\nself.site = 1\nstd::vector<int> a::b\nrun.py notes.md\n')
+        self.assertEqual(r['indicators']['domain'], {})
+        self.assertEqual(r['indicators']['ipv6'], {})
+
+    def test_a_password_in_a_url_never_reaches_the_indicators(self):
+        r = self.scan('see https://bob:Pa55word@site.example.com/a and smb://u:Hidden9@nas.lan/x')
+        dumped = json.dumps(r)
+        self.assertNotIn('Pa55word', dumped)
+        self.assertNotIn('Hidden9', dumped.replace('hidden9', 'Hidden9'))
+        self.assertIn('https://bob:****@site.example.com/a', r['indicators']['url'])
+
+    def test_utf16_text_is_searched(self):
+        from src.file_scan import scan_bytes
+        r = scan_bytes('export.txt', 'server 8.8.8.8 ok'.encode('utf-16-le'))
+        self.assertIn('8.8.8.8', r['indicators']['ipv4'])
 
 
 @unittest.skipUnless(SCAPY_REAL, 'needs real scapy')
