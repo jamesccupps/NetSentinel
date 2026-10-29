@@ -10,7 +10,7 @@ REM Check PyInstaller
 pyinstaller --version >nul 2>&1
 if errorlevel 1 (
     echo [*] Installing PyInstaller...
-    pip install pyinstaller>=6.0.0
+    pip install "pyinstaller>=6.0.0"
 )
 
 REM Build the executable
@@ -58,4 +58,5 @@ if errorlevel 1 (
 )
 
 echo.
-pause
+REM CI runs this unattended; a pause there would wait forever
+if not defined CI pause

@@ -1,5 +1,49 @@
 # NetSentinel Changelog
 
+## v1.8.0 — Scan a folder of captures, a Windows download, and netmon
+
+**1426 unit tests** (up from 384) plus 14 integration checks.
+
+### Scan a folder or a zip for leaked credentials
+
+The PCAP tab has two new buttons, **Scan Folder** and **Scan Zip / Files**. Every
+capture under a folder, inside the zips you pick, or in the files you select runs
+through the same analyzer as a single file, and the results come back as one
+report: each exposed credential (masked, as the forensics engine shows it), the
+connection it crossed, and every capture it appeared in, followed by a line per
+capture and a list of what was skipped and why. Export Results covers the whole
+scan. The same scan runs headless with `python -m src.batch_scan PATH... [--skip GLOB]
+[--json]`; `--skip 'flash*'` keeps captures you should not be opening out of it.
+
+A hostile zip cannot write outside the scan: members are never extracted under
+their own names, but streamed into numbered files in a private temporary folder,
+capped at 2 GB each, analysed and deleted one at a time. Nested archives and
+password-protected members are reported, not opened. Folders are walked without
+following symlinks.
+
+### A Windows build on every release
+
+Pushing a `v*` tag now builds `NetSentinel.exe` on a Windows runner and attaches it,
+with a SHA-256 checksum, to that tag's GitHub release. Install Npcap first. A
+manual run of the `release` workflow builds the exe without releasing it.
+`build_exe.bat` no longer waits for a key press under CI, and quotes the PyInstaller
+version so cmd does not read `>=` as a redirect.
+
+### netmon, a site monitor
+
+`netmon/` is a new, separate tool for watching one site's network from a Linux
+sensor: a YAML site profile, a VLAN-aware capture filter, a rule engine with 24
+rules, UniFi flow and API import, BACnet and site-protocol parsing, configuration
+drift, canary hits, ntfy alerting behind a redaction gate, optional model triage,
+a rolling capture, a web UI, and acknowledge, snooze and maintenance mode. See
+`netmon/README.md`. It ships with a fictional example profile only.
+
+### Fixes
+
+- A UniFi timestamp with one or two fractional digits (`13:05:01.5Z`) did not parse
+  on Python 3.10, and the row fell back to the local-time column, four hours out.
+- CI never installed PyYAML, so netmon's tests could not run there.
+
 ## v1.7.0 — Detection that survives evasion, and a sensor you can deploy
 
 Three items the v1.6.0 review named as next. One of them, run for real, found

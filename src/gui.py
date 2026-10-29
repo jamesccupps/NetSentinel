@@ -7,6 +7,7 @@ Built with tkinter + ttk for zero extra dependencies.
 """
 
 import os
+import threading
 import time
 import logging
 import tkinter as tk
@@ -1097,6 +1098,22 @@ class NetSentinelGUI:
         )
         self._pcap_btn.pack(side='right', padx=4)
 
+        self._pcap_folder_btn = tk.Button(
+            ctrl_frame, text="📁  Scan Folder",
+            font=('Segoe UI', 9), bg=COLORS['bg_input'],
+            fg=COLORS['text'], relief='flat', padx=10, pady=6,
+            cursor='hand2', command=self._pcap_open_folder
+        )
+        self._pcap_folder_btn.pack(side='right', padx=4)
+
+        self._pcap_many_btn = tk.Button(
+            ctrl_frame, text="📦  Scan Zip / Files",
+            font=('Segoe UI', 9), bg=COLORS['bg_input'],
+            fg=COLORS['text'], relief='flat', padx=10, pady=6,
+            cursor='hand2', command=self._pcap_open_many
+        )
+        self._pcap_many_btn.pack(side='right', padx=4)
+
         # Progress bar
         prog_frame = tk.Frame(parent, bg=COLORS['bg_dark'])
         prog_frame.pack(fill='x', padx=8)
@@ -1132,7 +1149,9 @@ class NetSentinelGUI:
         self._pcap_stats_text.insert('end', "No analysis results yet.\n\n"
             "Click 'Open PCAP File' to load a capture from Wireshark,\n"
             "tcpdump, or any other packet capture tool.\n\n"
-            "Supported formats: .pcap, .pcapng, .cap\n\n"
+            "Supported formats: .pcap, .pcapng, .cap\n"
+            "'Scan Folder' and 'Scan Zip / Files' run many captures at once\n"
+            "and list every exposed credential (masked) and where it was.\n\n"
             "The analyzer runs every packet through:\n"
             "  - IDS signature rules (port scan, brute force, etc.)\n"
             "  - Threat intelligence feeds (malicious IPs/domains)\n"
@@ -1161,6 +1180,109 @@ class NetSentinelGUI:
         pcap_alert_canvas.bind_all("<MouseWheel>", _pcap_mousewheel, add='+')
 
         self._pcap_alert_widgets = []
+        self._pcap_batch = None
+
+    def _pcap_set_busy(self, busy):
+        state = 'disabled' if busy else 'normal'
+        for btn in (self._pcap_btn, self._pcap_folder_btn, self._pcap_many_btn):
+            btn.config(state=state)
+        self._pcap_cancel_btn.config(state='normal' if busy else 'disabled')
+
+    def _pcap_open_many(self):
+        """Pick zips and/or capture files to scan together."""
+        paths = filedialog.askopenfilenames(
+            title="Select Zips or Capture Files",
+            filetypes=[
+                ('Zips and captures', '*.zip *.pcap *.pcapng *.cap'),
+                ('Zip archives', '*.zip'),
+                ('Packet Captures', '*.pcap *.pcapng *.cap'),
+                ('All files', '*.*'),
+            ]
+        )
+        if paths:
+            self._pcap_start_batch(list(paths))
+
+    def _pcap_open_folder(self):
+        """Pick a folder; every capture and zip under it is scanned."""
+        folder = filedialog.askdirectory(title="Select a Folder of Captures")
+        if folder:
+            self._pcap_start_batch([folder])
+
+    def _pcap_start_batch(self, paths):
+        """Scan many captures in the background and show one combined report."""
+        from src.batch_scan import scan
+
+        self._pcap_stats_text.delete('1.0', 'end')
+        self._pcap_stats_text.insert('end', "Collecting captures...\n")
+        for w in self._pcap_alert_widgets:
+            w.destroy()
+        self._pcap_alert_widgets.clear()
+        self._pcap_set_busy(True)
+        self._pcap_progress_var.set(0)
+
+        batch = {'running': True, 'cancel': False, 'index': 0, 'total': 0, 'name': ''}
+        self._pcap_batch = batch
+
+        def on_alert(alert):
+            try:
+                self.root.after(0, self._pcap_add_alert, alert)
+            except Exception:
+                pass
+
+        def on_progress(index, total, name):
+            batch.update(index=index, total=total, name=name)
+
+        def run():
+            try:
+                report = scan(paths, self.app.pcap_analyzer, on_alert=on_alert,
+                              on_progress=on_progress, cancelled=lambda: batch['cancel'])
+            except Exception as e:
+                logger.error("Batch scan failed: %s", e)
+                report = {'error': str(e)}
+            batch['running'] = False
+            try:
+                self.root.after(0, self._pcap_show_batch, report)
+            except Exception:
+                pass
+
+        threading.Thread(target=run, daemon=True, name="PcapBatchScan").start()
+        self._pcap_update_progress()
+
+    def _pcap_show_batch(self, report):
+        """Display the combined report from a folder or zip scan."""
+        st = self._pcap_stats_text
+        st.delete('1.0', 'end')
+        if 'error' in report:
+            st.insert('end', f"Scan failed: {report['error']}\n", 'alert_high')
+            return
+        s = report['summary']
+        st.insert('end', 'BATCH SCAN\n', 'header')
+        st.insert('end', f"  Captures:  {s['scanned']} scanned of {s['captures']}"
+                         f"{' (cancelled)' if report.get('cancelled') else ''}\n")
+        st.insert('end', f"  Alerts:    {s['alerts']}\n")
+        if s['failed']:
+            st.insert('end', f"  Failed:    {s['failed']}\n", 'alert_med')
+        if s['skipped']:
+            st.insert('end', f"  Skipped:   {s['skipped']}\n")
+
+        st.insert('end', '\nEXPOSED CREDENTIALS\n', 'header')
+        if not report['credentials']:
+            st.insert('end', "  None found in plaintext.\n", 'safe')
+        for cred in report['credentials']:
+            st.insert('end', f"  {cred['protocol']} {cred['credential_type']}: "
+                             f"{cred['value']}\n", 'alert_high')
+            st.insert('end', f"      {cred['source']}\n"
+                             f"      in {', '.join(cred['captures'])}\n")
+
+        st.insert('end', '\nCAPTURES\n', 'header')
+        for f in report['files']:
+            if 'error' in f:
+                st.insert('end', f"  {f['file']}: failed ({f['error']})\n", 'alert_med')
+            else:
+                st.insert('end', f"  {f['file']}: {f['packets']} packets, "
+                                 f"{f['alerts']} alerts, {f['credentials']} credentials\n")
+        for f in report['skipped']:
+            st.insert('end', f"  {f['file']}: skipped ({f['reason']})\n")
 
     def _pcap_open_file(self):
         """Open file dialog and start PCAP analysis."""
@@ -1184,8 +1306,8 @@ class NetSentinelGUI:
         self._pcap_alert_widgets.clear()
 
         # Update UI state
-        self._pcap_btn.config(state='disabled')
-        self._pcap_cancel_btn.config(state='normal')
+        self._pcap_batch = None
+        self._pcap_set_busy(True)
         self._pcap_progress_var.set(0)
 
         # Start analysis in background
@@ -1211,15 +1333,24 @@ class NetSentinelGUI:
     def _pcap_update_progress(self):
         """Update progress bar during analysis."""
         analyzer = self.app.pcap_analyzer
-        if analyzer.is_analyzing:
+        batch = self._pcap_batch
+        if batch and batch['running']:
+            total = max(batch['total'], 1)
+            done = batch['index'] + (analyzer.progress / 100 if analyzer.is_analyzing else 0)
+            self._pcap_progress_var.set(min(done / total * 100, 100))
+            self._pcap_progress_label.config(
+                text=f"Capture {batch['index'] + 1} of {batch['total']}: {batch['name']}"
+                if batch['total'] else "Collecting captures...")
+            self.root.after(200, self._pcap_update_progress)
+        elif analyzer.is_analyzing:
             self._pcap_progress_var.set(analyzer.progress)
             self._pcap_progress_label.config(text=analyzer.progress_text)
             self.root.after(200, self._pcap_update_progress)
         else:
             self._pcap_progress_var.set(100)
-            self._pcap_progress_label.config(text=analyzer.progress_text)
-            self._pcap_btn.config(state='normal')
-            self._pcap_cancel_btn.config(state='disabled')
+            self._pcap_progress_label.config(
+                text="Batch scan complete" if batch else analyzer.progress_text)
+            self._pcap_set_busy(False)
 
     def _pcap_add_alert(self, alert):
         """Add a single alert to the PCAP results panel."""
@@ -1372,6 +1503,8 @@ class NetSentinelGUI:
 
     def _pcap_cancel(self):
         """Cancel ongoing analysis."""
+        if self._pcap_batch:
+            self._pcap_batch['cancel'] = True
         self.app.pcap_analyzer.cancel()
         self._pcap_cancel_btn.config(state='disabled')
 

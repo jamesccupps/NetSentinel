@@ -34,6 +34,8 @@ TLS stack stands out even when everything it sends is encrypted.
 
 **PCAP Export** — Ring buffer of raw packets with on-demand "save last 5 minutes" export and continuous recording with auto-rotation. Serious alerts automatically save the traffic that triggered them, narrowed to the hosts involved, so every CRITICAL finding opens in Wireshark.
 
+**Scan a folder or zip of captures** — the PCAP tab's **Scan Folder** and **Scan Zip / Files** run every capture they find through the analyzer and return one report: each plaintext credential (masked), where it crossed the network, and which captures it was in. Headless: `python -m src.batch_scan PATH... [--skip GLOB] [--json]`.
+
 ## Quick Start
 
 ### Prerequisites
@@ -44,6 +46,10 @@ TLS stack stands out even when everything it sends is encrypted.
 - **Administrator privileges** (required for packet capture)
 
 ### Install
+
+The easy way: download `NetSentinel.exe` from the
+[latest release](https://github.com/jamesccupps/NetSentinel/releases/latest), install
+Npcap, and run it. Or from source:
 
 ```bash
 git clone https://github.com/jamesccupps/NetSentinel.git

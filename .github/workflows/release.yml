@@ -1,0 +1,60 @@
+name: release
+
+# Builds NetSentinel.exe on Windows. Pushing a v* tag publishes it, with a
+# SHA-256 checksum, on that tag's GitHub release; a manual run only keeps it
+# as a workflow artifact, for trying a build without releasing it.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  windows-exe:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Build
+        shell: cmd
+        run: call build_exe.bat
+
+      - name: Check the build and write its checksum
+        shell: pwsh
+        run: |
+          if (-not (Test-Path dist\NetSentinel.exe)) { throw "the build produced no dist\NetSentinel.exe" }
+          $hash = (Get-FileHash dist\NetSentinel.exe -Algorithm SHA256).Hash.ToLower()
+          "$hash  NetSentinel.exe" | Out-File -Encoding ascii dist\NetSentinel.exe.sha256
+          Get-Item dist\NetSentinel.exe | Format-Table Name, Length
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: NetSentinel-exe
+          path: |
+            dist/NetSentinel.exe
+            dist/NetSentinel.exe.sha256
+
+      - name: Publish the release
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          PYTHONIOENCODING: utf-8
+        run: |
+          python tools/release_notes.py "$TAG" > notes.md
+          gh release view "$TAG" >/dev/null 2>&1 || \
+            gh release create "$TAG" --title "NetSentinel $TAG" --notes-file notes.md
+          gh release upload "$TAG" dist/NetSentinel.exe dist/NetSentinel.exe.sha256 --clobber
