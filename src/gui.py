@@ -2428,7 +2428,9 @@ class NetSentinelGUI:
         ml_card.pack(fill='x', padx=8, pady=(0, 8))
 
         ml_settings = [
-            ('ml.anomaly_threshold', 'Anomaly Threshold (0-1)', '0.15'),
+            # alert_threshold, not the pre-1.5 anomaly_threshold this used to
+            # write: the engine prefers alert_threshold, so edits here did nothing.
+            ('ml.alert_threshold', 'Anomaly Threshold (0-1)', '0.25'),
             ('ml.min_samples_for_training', 'Min Training Samples', '200'),
             ('ml.retrain_interval_min', 'Retrain Interval (min)', '60'),
             ('ml.feature_history_days', 'Feature History Retention (days)', '90'),
@@ -2447,6 +2449,12 @@ class NetSentinelGUI:
         ]
         for key, label, default in alert_settings:
             self._add_setting_row(alert_card, key, label, default)
+
+        perf_card = Card(scroll_frame, title="PERFORMANCE (applies at next start)")
+        perf_card.pack(fill='x', padx=8, pady=(0, 8))
+        self._add_setting_toggle(
+            perf_card, 'performance.low_priority',
+            'Run at lower priority, so your work comes first', False)
 
         # Blacklist management
         bl_card = Card(scroll_frame, title="BLACKLISTED IPs (one per line)")
@@ -2483,11 +2491,24 @@ class NetSentinelGUI:
         entry.pack(side='left', padx=8)
         self._setting_widgets[key] = entry
 
+    def _add_setting_toggle(self, parent, key, label, default):
+        # A checkbox, because a text box saved "False" as a string, which is true.
+        var = tk.BooleanVar(value=bool(self.app.config.get(*key.split('.'), default=default)))
+        tk.Checkbutton(parent, text=label, variable=var, font=('Segoe UI', 9),
+                       fg=COLORS['text'], bg=COLORS['bg_card'],
+                       activebackground=COLORS['bg_card'], activeforeground=COLORS['text'],
+                       selectcolor=COLORS['bg_input'], anchor='w'
+                       ).pack(fill='x', pady=3)
+        self._setting_widgets[key] = var
+
     def _save_settings(self):
         """Save all settings from the UI to config."""
         for key, entry in self._setting_widgets.items():
             parts = key.split('.')
             val = entry.get()
+            if isinstance(entry, tk.BooleanVar):
+                self.app.config.set(*parts, bool(val))
+                continue
             try:
                 # Try to cast to appropriate type
                 if '.' in val:

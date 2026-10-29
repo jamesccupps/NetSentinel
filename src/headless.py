@@ -392,7 +392,8 @@ class HeadlessServer:
             'uptime_sec': int(time.time() - start) if start and data.get('is_monitoring') else 0,
             'capture': {k: cap.get(k, 0) for k in (
                 'packets_captured', 'bytes_captured', 'packets_per_sec', 'bytes_per_sec',
-                'flows_active', 'packets_dropped')},
+                'flows_active', 'packets_dropped', 'sample_rate')},
+            'resources': data.get('resources') or {'available': False},
             'alerts': {
                 'total': alerts.get('total', 0),
                 'unacknowledged': alerts.get('unacknowledged', 0),
@@ -626,6 +627,14 @@ class HeadlessServer:
                'Most recent combined anomaly score.')
         metric('uptime_seconds', int(time.time() - self.started_at),
                'Seconds since the API started.')
+        metric('capture_sample_rate', int(cap.get('sample_rate', 1) or 1),
+               'Under load, 1 in this many packets is analysed (1 = all).')
+        res = data.get('resources') or {}
+        if res.get('available'):
+            metric('process_cpu_percent', res['cpu_percent'],
+                   "This process's share of the machine's CPU.")
+            metric('process_resident_memory_bytes', int(res['rss_bytes']),
+                   'Resident memory of this process.')
 
         return "\n".join(lines) + "\n", 'text/plain; version=0.0.4; charset=utf-8'
 

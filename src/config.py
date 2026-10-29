@@ -147,6 +147,11 @@ DEFAULT_CONFIG = {
         "refresh_rate_ms": 1000,
         "max_log_lines": 500,           # Max rows kept in the live packet log
     },
+    "performance": {
+        # Below-normal CPU and I/O priority, so the desktop wins over the monitor.
+        # Under load the capture then samples sooner. Takes effect at the next start.
+        "low_priority": False,
+    },
     "whitelists": {
         "ips": [],
         "domains": [],
@@ -183,7 +188,10 @@ class Config:
         """Load config from disk, merging with defaults."""
         if os.path.exists(CONFIG_FILE):
             try:
-                with open(CONFIG_FILE) as f:
+                # utf-8-sig: Notepad saves UTF-8 with a BOM. Read in the Windows
+                # code page, an edited name like "Küche" could fail to decode, and
+                # the whole file was then replaced by defaults.
+                with open(CONFIG_FILE, encoding='utf-8-sig') as f:
                     saved = json.load(f)
                 self._data = self._deep_merge(DEFAULT_CONFIG, saved)
                 logger.info("Configuration loaded from %s", CONFIG_FILE)

@@ -98,6 +98,8 @@ class _StubApp:
             'device_learner': {'total_devices': 2},
             'is_monitoring': self.capture_engine.is_running,
             'score_history': [{'t': i} for i in range(1000)],
+            'resources': {'available': True, 'cpu_percent': 1.5, 'rss_bytes': 64 << 20,
+                          'threads': 9, 'low_priority': False},
         }
 
 
@@ -182,6 +184,17 @@ class TestEndpoints(_ApiTestCase):
         self.assertIn('capture', body)
         self.assertIn('alerts', body)
         self.assertEqual(body['capture']['packets_captured'], 12345)
+
+    def test_the_overview_says_what_netsentinel_costs(self):
+        """The handoff asked for CPU, RAM, drops and sampling on the dashboard."""
+        o = self.get_json('/api/overview')
+        self.assertEqual(o['resources']['cpu_percent'], 1.5)
+        self.assertEqual(o['resources']['rss_bytes'], 64 << 20)
+        self.assertIn('sample_rate', o['capture'])
+        self.assertIn('packets_dropped', o['capture'])
+        metrics = self.get('/api/metrics')[2]
+        self.assertIn('netsentinel_process_resident_memory_bytes 67108864', metrics)
+        self.assertIn('netsentinel_capture_sample_rate', metrics)
 
     def test_status_omits_the_score_time_series(self):
         """1000 points per call would dominate the response for no benefit."""
