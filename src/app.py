@@ -47,6 +47,11 @@ class NetSentinelApp:
         from src.config import Config
         self.config = Config().load()
 
+        from src.resources import ResourceMonitor, set_low_priority
+        self.resources = ResourceMonitor()
+        if self.config.get('performance', 'low_priority', default=False):
+            set_low_priority()
+
         # Detect network environment (gateway, DNS, local IPs, etc.)
         from src.net_detect import NetworkEnvironment
         self.net_env = NetworkEnvironment().detect()
@@ -839,6 +844,7 @@ class NetSentinelApp:
             'baseline_whitelist': self.baseline_whitelist.get_stats(),
             'correlator': self.alert_correlator.get_stats(),
             'pcap_writer': self.pcap_writer.get_buffer_stats(),
+            'resources': self.resources.snapshot(),
         }
 
     def run(self, tk_root=None):

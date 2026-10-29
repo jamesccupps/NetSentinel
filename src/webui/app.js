@@ -206,6 +206,8 @@ async function refreshOverview() {
   bars($('protocols'), o.protocols.map((p) => ({ name: p.name, value: p.count, fraction: p.fraction })),
     (r) => `${(r.fraction * 100).toFixed(1)}%`);
   bars($('talkers'), o.top_talkers.map((t) => ({ name: t.ip, value: t.bytes })), (r) => fmtBytes(r.value));
+  const res = o.resources || {};
+  const rate = Number(o.capture.sample_rate || 1);
   const facts = [
     ['Monitoring', o.monitoring ? 'Yes' : 'No'],
     ['Uptime', o.monitoring ? fmtDuration(o.uptime_sec) : '—'],
@@ -213,6 +215,11 @@ async function refreshOverview() {
     ['Open incidents', fmtNum(o.incidents_active)],
     ['ML model', o.ml.is_trained ? 'Trained' : 'Learning the baseline'],
     ['Baseline samples', fmtNum(o.ml.baseline_samples)],
+    ['CPU', res.available ? `${res.cpu_percent}%${res.low_priority ? ' (low priority)' : ''}` : '—'],
+    ['Memory', res.available ? fmtBytes(res.rss_bytes) : '—'],
+    ['Threads', res.available ? fmtNum(res.threads) : '—'],
+    ['Packets dropped', fmtNum(o.capture.packets_dropped)],
+    ['Analysing', rate > 1 ? `1 in ${rate} packets (busy)` : 'Every packet'],
   ];
   $('engine').replaceChildren(...facts.flatMap(([k, v]) => [h('dt', null, k), h('dd', null, v)]));
 }

@@ -23,6 +23,7 @@ brute force on SSH" instead of 50 individual entries.
 import time
 import logging
 import threading
+from collections import deque
 from datetime import datetime
 
 logger = logging.getLogger("NetSentinel.Correlator")
@@ -41,6 +42,12 @@ _ESCALATION_CHAINS = [
 ]
 
 
+# Alerts an incident keeps. One that stayed active through an alert storm used to
+# keep every alert it absorbed; the count is kept separately, so nothing is lost
+# from what the incident reports.
+MAX_ALERTS_PER_INCIDENT = 500
+
+
 class Incident:
     """A group of correlated alerts forming a single security incident."""
 
@@ -53,7 +60,8 @@ class Incident:
             self.id = Incident._id_counter
         self.created = time.time()
         self.updated = self.created
-        self.alerts = []
+        self.alerts = deque(maxlen=MAX_ALERTS_PER_INCIDENT)
+        self.alert_count = 0
         self.severity = "LOW"
         self.title = ""
         self.narrative = ""
@@ -67,6 +75,7 @@ class Incident:
     def add_alert(self, alert):
         """Add an alert to this incident."""
         self.alerts.append(alert)
+        self.alert_count += 1
         self.updated = time.time()
         if alert.src_ip:
             self.source_ips.add(alert.src_ip)
@@ -84,7 +93,7 @@ class Incident:
 
     def _update_narrative(self):
         """Generate a human-readable summary of this incident."""
-        n = len(self.alerts)
+        n = self.alert_count
         cats = sorted(self.categories)
         src_list = sorted(self.source_ips)[:3]
         dst_list = sorted(self.dest_ips)[:3]
@@ -121,14 +130,14 @@ class Incident:
             'severity': self.severity,
             'title': self.title,
             'narrative': self.narrative,
-            'alert_count': len(self.alerts),
+            'alert_count': self.alert_count,
             'source_ips': sorted(self.source_ips),
             'dest_ips': sorted(self.dest_ips),
             'categories': sorted(self.categories),
             'rule_ids': sorted(self.rule_ids),
             'is_escalation': self.is_escalation,
             'acknowledged': self.acknowledged,
-            'alerts': [a.to_dict() for a in self.alerts[-20:]],  # Last 20 for display
+            'alerts': [a.to_dict() for a in list(self.alerts)[-20:]],  # Last 20 for display
         }
 
 
@@ -146,7 +155,6 @@ class AlertCorrelator:
         self._active_incidents = {}
 
         # All incidents (including closed): deque for bounded storage
-        from collections import deque
         self._all_incidents = deque(maxlen=1000)
 
         # Callbacks for new/updated incidents
@@ -295,7 +303,7 @@ class AlertCorrelator:
                     'severity': inc.severity,
                     'title': inc.title,
                     'narrative': inc.narrative,
-                    'alert_count': len(inc.alerts),
+                    'alert_count': inc.alert_count,
                     'source_ips': sorted(inc.source_ips),
                     'dest_ips': sorted(inc.dest_ips),
                     'categories': sorted(inc.categories),
@@ -326,6 +334,8 @@ class AlertCorrelator:
                 inc.severity = item.get('severity', 'LOW')
                 inc.title = item.get('title', '')
                 inc.narrative = item.get('narrative', '')
+                # Saved, but never read back, so reloaded incidents said "0 alerts".
+                inc.alert_count = item.get('alert_count', 0)
                 inc.source_ips = set(item.get('source_ips', []))
                 inc.dest_ips = set(item.get('dest_ips', []))
                 inc.categories = set(item.get('categories', []))
