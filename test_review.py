@@ -230,6 +230,41 @@ class TestTrafficDigest(_BundleCase):
             self.assertNotIn(leak, digest)
 
 
+@unittest.skipUnless(SCAPY_REAL, 'real scapy needed to build frames')
+class TestSnippetNarrowing(unittest.TestCase):
+    """Found on a real network that delivers VLAN-tagged frames to the desktop."""
+
+    def test_vlan_tagged_frames_are_matched(self):
+        from scapy.all import IP, UDP, Dot1AD, Dot1Q, Ether, IPv6
+        from src.pcap_writer import _frame_involves
+        tagged = bytes(Ether() / Dot1Q(vlan=12) / IPv6(src='fe80::1', dst='ff02::fb') / UDP())
+        qinq = bytes(Ether() / Dot1AD(vlan=5) / Dot1Q(vlan=12) / IP(src='10.0.0.9', dst='10.0.0.1'))
+        plain = bytes(Ether() / IP(src='10.0.0.9', dst='10.0.0.1'))
+        self.assertTrue(_frame_involves(tagged, {'fe80::1'}))
+        self.assertTrue(_frame_involves(qinq, {'10.0.0.1'}))
+        self.assertTrue(_frame_involves(plain, {'10.0.0.9'}))
+        self.assertFalse(_frame_involves(tagged, {'fe80::2'}))
+        self.assertFalse(_frame_involves(b'\x00' * 10, {'10.0.0.9'}))
+
+    def test_a_capture_of_everything_says_so(self):
+        """It fell back to all traffic silently, and read as the alert's own."""
+        from scapy.all import IP, Ether
+        out = tempfile.mkdtemp(prefix='ns_scope_')
+        self.addCleanup(shutil.rmtree, out, True)
+        writer = PcapWriter(Config().load(), output_dir=out)
+        writer.buffer_packet(bytes(Ether() / IP(src='10.9.9.9', dst='10.9.9.8')))
+        alert = an_alert()
+        self.assertTrue(writer.export_for_alert(alert, directory=out))
+        self.assertIn('no packet named', alert.evidence['packet_capture_scope'])
+
+    def test_an_mdns_announcement_is_named(self):
+        from scapy.all import DNS, DNSRR
+        from src.review import _dns_names
+        line = _dns_names(DNS(qr=1, qd=[], an=DNSRR(rrname='_googlecast._tcp.local', type='PTR',
+                                                   rdata='tv._googlecast._tcp.local')))
+        self.assertTrue(line.startswith('DNS answer _googlecast._tcp.local → '), line)
+
+
 class _FakeWriter:
     def __init__(self, size=1000):
         self.size, self.n = size, 0
@@ -367,6 +402,14 @@ class TestVerdicts(unittest.TestCase):
         self.assertIsNone(self.store.add(ml))
         self.assertEqual(alert_subjects(ml), [])
 
+    def test_a_multicast_destination_is_not_a_subject(self):
+        """Found live: an mDNS verdict was tied to 224.0.0.251, i.e. every device."""
+        mdns = an_alert('FORENSICS-SENSITIVE-DATA', src='192.168.8.40')
+        mdns.dst_ip = '224.0.0.251'
+        self.assertEqual(alert_subjects(mdns), [('src_ip', '192.168.8.40')])
+        mdns.dst_ip = 'ff02::fb'
+        self.assertEqual(alert_subjects(mdns), [('src_ip', '192.168.8.40')])
+
     def test_domains_come_from_the_traffic_not_from_a_guess(self):
         guessed = an_alert('DATA-EXFIL', destination_domains=['innocent.example'])
         self.assertNotIn(('domain', 'innocent.example'), alert_subjects(guessed))
@@ -419,6 +462,16 @@ class TestReviewModeInTheApp(unittest.TestCase):
         self.addCleanup(shutil.rmtree, self.dir, True)
         self.recorder = ReviewRecorder(self.dir, _FakeWriter())
         self.app = bare_app(self.recorder)
+
+    def test_review_mode_can_be_turned_on_before_monitoring_exists(self):
+        """--review crashed at startup: __init__ enabled it before _running was set."""
+        app = NetSentinelApp.__new__(NetSentinelApp)
+        app.review = None
+        app.pcap_writer = _FakeWriter()
+        app.config = Config().load()
+        recorder = app.enable_review(self.dir)
+        self.assertEqual(recorder.directory, os.path.abspath(self.dir))
+        self.assertFalse(app.pcap_writer.is_recording)
 
     def test_every_severity_gets_a_snippet_and_repeats_share_it(self):
         """pcap_on_alert defaults to CRITICAL; review mode needs the LOW ones too."""

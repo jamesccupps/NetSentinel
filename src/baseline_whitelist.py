@@ -58,9 +58,22 @@ def alert_subjects(alert):
             break
     for kind in ('dst_ip', 'src_ip'):
         ip = _field(alert, kind)
-        if ip:
+        if ip and not _is_group_address(ip):
             subjects.append((kind, ip))
     return subjects
+
+
+def _is_group_address(ip):
+    """
+    Multicast and broadcast are not hosts. A verdict on an mDNS alert was tied to
+    224.0.0.251 and would have silenced that rule for every device on the network.
+    """
+    import ipaddress
+    try:
+        addr = ipaddress.ip_address(str(ip).split('%')[0])
+    except ValueError:
+        return False
+    return addr.is_multicast or addr.is_unspecified or str(addr) == '255.255.255.255'
 
 
 class ConfirmedFalsePositives:

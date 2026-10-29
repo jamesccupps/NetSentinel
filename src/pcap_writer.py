@@ -32,24 +32,35 @@ PCAP_LINKTYPE_NULL = 0        # BSD loopback
 PCAP_SNAPLEN = 65535
 
 
+# 802.1Q, 802.1ad (QinQ) and the old QinQ tag: 4 bytes each before the real type.
+_VLAN_TAGS = (0x8100, 0x88a8, 0x9100)
+
+
 def _frame_involves(frame, endpoints):
     """
     Cheap check for whether an Ethernet frame involves one of these IPv4/IPv6 hosts.
 
     Deliberately byte-level rather than a Scapy parse: this runs over the whole ring
     buffer when an alert fires, and re-parsing 150k frames would stall the caller.
+
+    VLAN tags are skipped. A network that delivers tagged frames to this machine
+    had every tagged packet fail the check, so alerts about them got a capture of
+    all traffic instead of theirs.
     """
     try:
-        if len(frame) < 34:
-            return False
-        ethertype = (frame[12] << 8) | frame[13]
-        if ethertype == 0x0800:                      # IPv4
-            src = '.'.join(str(b) for b in frame[26:30])
-            dst = '.'.join(str(b) for b in frame[30:34])
-        elif ethertype == 0x86dd and len(frame) >= 54:  # IPv6
+        offset = 12
+        ethertype = (frame[offset] << 8) | frame[offset + 1]
+        while ethertype in _VLAN_TAGS:
+            offset += 4
+            ethertype = (frame[offset] << 8) | frame[offset + 1]
+        ip = offset + 2
+        if ethertype == 0x0800 and len(frame) >= ip + 20:          # IPv4
+            src = '.'.join(str(b) for b in frame[ip + 12:ip + 16])
+            dst = '.'.join(str(b) for b in frame[ip + 16:ip + 20])
+        elif ethertype == 0x86dd and len(frame) >= ip + 40:        # IPv6
             import ipaddress
-            src = str(ipaddress.IPv6Address(bytes(frame[22:38])))
-            dst = str(ipaddress.IPv6Address(bytes(frame[38:54])))
+            src = str(ipaddress.IPv6Address(bytes(frame[ip + 8:ip + 24])))
+            dst = str(ipaddress.IPv6Address(bytes(frame[ip + 24:ip + 40])))
         else:
             return False
         return src in endpoints or dst in endpoints
@@ -197,6 +208,11 @@ class PcapWriter:
                        if _frame_involves(data, endpoints)]
             if focused:
                 packets = focused
+            elif hasattr(alert, 'evidence'):
+                # Say so: read as the alert's traffic, the rest of the network is
+                # misleading.
+                alert.evidence['packet_capture_scope'] = (
+                    "everything in the window: no packet named the alert's hosts")
 
         safe_rule = re.sub(r'[^A-Za-z0-9_.-]', '_', str(getattr(alert, 'rule_id', 'alert')))
         filename = (f"alert_{safe_rule}_{getattr(alert, 'id', 0)}_"
