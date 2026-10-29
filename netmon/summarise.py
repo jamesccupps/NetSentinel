@@ -51,7 +51,8 @@ import os
 import re
 import time
 
-from netmon.redact import AI, audit, redact_findings, summary_for_model
+from netmon.redact import (AI, audit, device_is_restricted, redact_findings,
+                           summary_for_model)
 
 logger = logging.getLogger("netmon.summarise")
 
@@ -447,6 +448,13 @@ class Summariser:
 
     def investigate(self, analyzer, profile, device):
         """One device's last window, for the on-demand action."""
+        # Refused before anything is gathered: a device on a restricted
+        # segment with no findings would otherwise go out by name and role,
+        # which is "the fact that something happened there" in a sentence.
+        if device_is_restricted(device, profile):
+            raise SummaryError(
+                f'{device} is on a segment whose details are not sent '
+                f'to an external service')
         findings = [f for f in analyzer.findings if f.device == device]
         records, withheld = redact_findings(findings, profile, audience=AI)
         if withheld and not records:
