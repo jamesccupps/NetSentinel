@@ -823,6 +823,22 @@ class TestDeadStateRemoved(unittest.TestCase):
         self.assertFalse(hasattr(bl, '_dns_pairs'))
 
 
+class TestSharedHostingIsNotMalicious(unittest.TestCase):
+    """URLhaus lists a malware file on github.com; that made github.com itself
+    'known-bad', so every visit to GitHub alerted."""
+
+    def test_url_feeds_do_not_condemn_the_platform(self):
+        from src.threat_intel import THREAT_FEEDS
+        ti = ThreatIntelEngine(fresh_config())
+        data = ('https://github.com/someone/repo/raw/main/payload.exe\n'
+                'https://raw.githubusercontent.com/x/y/main/a.ps1\n'
+                'https://drive.google.com/uc?id=abc\n'
+                'http://malware-host.example/drop.bin\n')
+        _, domains, urls = ti._parse_feed('urlhaus_domains', THREAT_FEEDS['urlhaus_domains'], data)
+        self.assertEqual([d for d, _ in domains], ['malware-host.example'])
+        self.assertEqual(len(urls), 4, 'the exact URLs are still matched')
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)
 

@@ -229,7 +229,9 @@ def scan_bytes(name, data):
     for m in _URL.finditer(text):
         add('url', _URL_PASSWORD.sub(r'\1****@', m.group(0).rstrip('.,;:!?\'"')))
     for m in _EMAIL.finditer(text):
-        add('email', m.group(0).lower(), m)
+        # icon@2x.png and obj@x.prototype are not addresses
+        if _is_domain(m.group(1).rsplit('.', 1)[-1]):
+            add('email', m.group(0).lower(), m)
     for m in _DOMAIN.finditer(text):
         # logger.info( and self.site = are code, not domains
         if _is_domain(m.group(2)) and text[m.end():m.end() + 3].lstrip()[:1] not in ('(', '=', '['):

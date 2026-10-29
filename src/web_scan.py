@@ -43,6 +43,13 @@ def safe_relpath(name):
     return os.path.join(*parts[-8:]) if parts else 'upload'
 
 
+def _read_exact(stream, n):
+    data = stream.read(n)
+    if len(data) != n:
+        raise ScanError('upload ended early')
+    return data
+
+
 class _Session:
     def __init__(self):
         self.id = secrets.token_hex(8)
@@ -134,6 +141,29 @@ class ScanSessions:
         session.files += 1
         session.bytes += length
         return os.path.relpath(target, session.dir)
+
+    def add_batch(self, session_id, stream, length):
+        """
+        Several files in one request, so a folder of 40,000 small files is a
+        few dozen requests rather than 40,000. Each record is a big-endian u16
+        name length, the UTF-8 name, a big-endian u32 size, then the bytes.
+        """
+        stored, remaining = 0, length
+        while remaining > 0:
+            if remaining < 6:
+                raise ScanError('malformed batch')
+            name_len = int.from_bytes(_read_exact(stream, 2), 'big')
+            if not 0 < name_len <= 4096 or name_len + 4 > remaining - 2:
+                raise ScanError('malformed batch')
+            name = _read_exact(stream, name_len).decode('utf-8', 'replace')
+            size = int.from_bytes(_read_exact(stream, 4), 'big')
+            remaining -= 6 + name_len
+            if size > remaining:
+                raise ScanError('malformed batch')
+            self.add_file(session_id, name, stream, size)
+            remaining -= size
+            stored += 1
+        return stored
 
     def start(self, session_id):
         with self._lock:

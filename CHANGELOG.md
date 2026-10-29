@@ -64,6 +64,11 @@ a rolling capture, a web UI, and acknowledge, snooze and maintenance mode. See
 
 ### Fixes
 
+- github.com was "known-bad". URLhaus lists malware *links*, many hosted on GitHub,
+  Google Drive, Dropbox and the like, and every link's host became a malicious
+  domain, so ordinary traffic to those platforms alerted in live monitoring as
+  well as in scans. Shared hosting platforms are no longer listed by host; the
+  exact bad URLs still match.
 - The desktop app's header said v1.0 whatever the version; it now reads it.
 - A UniFi timestamp with one or two fractional digits (`13:05:01.5Z`) did not parse
   on Python 3.10, and the row fell back to the local-time column, four hours out.

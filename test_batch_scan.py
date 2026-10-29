@@ -307,6 +307,10 @@ class TestFileScanPatterns(unittest.TestCase):
         self.assertNotIn('Hidden9', dumped.replace('hidden9', 'Hidden9'))
         self.assertIn('https://bob:****@site.example.com/a', r['indicators']['url'])
 
+    def test_file_names_with_at_signs_are_not_emails(self):
+        r = self.scan('icon@2x.png logo@3x.webp a@b.prototype real@corp.example.com')
+        self.assertEqual(list(r['indicators']['email']), ['real@corp.example.com'])
+
     def test_utf16_text_is_searched(self):
         from src.file_scan import scan_bytes
         r = scan_bytes('export.txt', 'server 8.8.8.8 ok'.encode('utf-16-le'))

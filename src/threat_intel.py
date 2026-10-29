@@ -108,6 +108,29 @@ SUSPICIOUS_TLDS = {
 }
 
 
+# URL feeds list malware *links*, and a great many of those are hosted on
+# platforms everyone uses. A bad file on github.com says nothing about
+# github.com, so these hosts never become malicious domains; the full URL is
+# still matched exactly.
+SHARED_HOSTING = (
+    'github.com', 'githubusercontent.com', 'github.io', 'gitlab.com', 'bitbucket.org',
+    'google.com', 'googleusercontent.com', 'googleapis.com', 'goo.gl', 'appspot.com',
+    'dropbox.com', 'dropboxusercontent.com', 'onedrive.live.com', 'live.com', '1drv.ms',
+    'sharepoint.com', 'microsoft.com', 'windows.net', 'azureedge.net', 'office.com',
+    'amazonaws.com', 'cloudfront.net', 'discord.com', 'discordapp.com', 'discordapp.net',
+    'mediafire.com', 'sourceforge.net', 'archive.org', 'pastebin.com', 'paste.ee',
+    'mega.nz', 'wetransfer.com', 'we.tl', 'transfer.sh', 'bit.ly', 'tinyurl.com',
+    't.me', 'telegram.org', 'firebaseapp.com', 'web.app', 'netlify.app', 'vercel.app',
+    'herokuapp.com', 'pages.dev', 'workers.dev', 'r2.dev', 'blogspot.com', 'wordpress.com',
+    'weebly.com', 'wixsite.com', 'yandex.ru', 'yadi.sk', 'icloud.com', 'box.com',
+)
+
+
+def is_shared_hosting(host):
+    host = (host or '').lower().rstrip('.')
+    return any(host == d or host.endswith('.' + d) for d in SHARED_HOSTING)
+
+
 def tld_of(domain):
     """Return the final DNS label, lowercased. Empty for single-label names."""
     if not domain:
@@ -380,7 +403,7 @@ class ThreatIntelEngine:
                 try:
                     from urllib.parse import urlparse
                     parsed = urlparse(line)
-                    if parsed.hostname:
+                    if parsed.hostname and not is_shared_hosting(parsed.hostname):
                         domains.append((parsed.hostname, feed_info))
                 except Exception:
                     pass

@@ -1145,10 +1145,14 @@ class NetSentinelGUI:
         stats_card = Card(results_frame, title="ANALYSIS SUMMARY")
         stats_card.pack(side='left', fill='both', expand=True, padx=(0, 4))
 
+        stats_scroll = ttk.Scrollbar(stats_card, orient='vertical')
+        stats_scroll.pack(side='right', fill='y')
         self._pcap_stats_text = tk.Text(stats_card, bg=COLORS['bg_card'],
                                          fg=COLORS['text'], font=('Consolas', 9),
-                                         relief='flat', wrap='word', padx=8, pady=8)
+                                         relief='flat', wrap='word', padx=8, pady=8,
+                                         yscrollcommand=stats_scroll.set)
         self._pcap_stats_text.pack(fill='both', expand=True)
+        stats_scroll.config(command=self._pcap_stats_text.yview)
         self._pcap_stats_text.tag_configure('header', foreground=COLORS['accent'],
                                              font=('Consolas', 9, 'bold'))
         self._pcap_stats_text.tag_configure('value', foreground=COLORS['text'])
@@ -1328,7 +1332,9 @@ class NetSentinelGUI:
                 st.insert('end', f"  ... and {len(entries) - 100} more (Export Results has them all)\n")
 
         st.insert('end', '\nFILES\n', 'header')
-        for f in report['files']:
+        files = [f for f in report['files'] if 'error' in f] + \
+                [f for f in report['files'] if 'error' not in f]
+        for f in files[:500]:
             if 'error' in f:
                 st.insert('end', f"  {f['file']}: failed ({f['error']})\n", 'alert_med')
             elif f.get('type') == 'capture':
@@ -1337,8 +1343,11 @@ class NetSentinelGUI:
             else:
                 st.insert('end', f"  {f['file']}: {f['indicators']} indicators, "
                                  f"{f['secrets']} secrets{'  (' + f['note'] + ')' if f.get('note') else ''}\n")
-        for f in report['skipped']:
+        for f in report['skipped'][:200]:
             st.insert('end', f"  {f['file']}: skipped ({f['reason']})\n")
+        hidden = max(0, len(files) - 500) + max(0, len(report['skipped']) - 200)
+        if hidden:
+            st.insert('end', f"  ... and {hidden} more (Export Results has them all)\n")
 
     def _pcap_open_file(self):
         """Open file dialog and start PCAP analysis."""
@@ -1410,6 +1419,10 @@ class NetSentinelGUI:
 
     def _pcap_add_alert(self, alert):
         """Add a single alert to the PCAP results panel."""
+        # A big folder can raise thousands; Tk slows to a crawl long before that.
+        # The report and Export Results still have every one.
+        if len(self._pcap_alert_widgets) >= 300:
+            return
         item = AlertListItem(self._pcap_alerts_frame, alert.to_dict())
         item.pack(fill='x', padx=2, pady=1)
         self._pcap_alert_widgets.append(item)

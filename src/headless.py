@@ -45,8 +45,9 @@ Endpoints
     GET /api/devices      discovered devices on the local network
     GET /api/metrics      Prometheus text exposition
     GET /api/scan         a file scan's progress and report, ?id=
-    POST /api/scan/new, /api/scan/upload?id=&name=, /api/scan/start?id=,
-         /api/scan/cancel?id=          upload files and scan them (token required)
+    POST /api/scan/new, /api/scan/upload?id=&name=, /api/scan/upload-batch?id=,
+         /api/scan/start?id=, /api/scan/cancel?id=
+                          upload files and scan them (token required)
 """
 
 import hmac
@@ -220,6 +221,7 @@ class HeadlessServer:
         self.post_routes = {
             '/api/scan/new': self._post_scan_new,
             '/api/scan/upload': self._post_scan_upload,
+            '/api/scan/upload-batch': self._post_scan_upload_batch,
             '/api/scan/start': self._post_scan_start,
             '/api/scan/cancel': self._post_scan_cancel,
         }
@@ -361,6 +363,10 @@ class HeadlessServer:
     def _post_scan_upload(self, params, body, length):
         name = _str_param(params, 'name') or 'upload'
         stored = self._scan_sessions().add_file(_str_param(params, 'id'), name, body, length)
+        return {'stored': stored}, 201
+
+    def _post_scan_upload_batch(self, params, body, length):
+        stored = self._scan_sessions().add_batch(_str_param(params, 'id'), body, length)
         return {'stored': stored}, 201
 
     def _post_scan_start(self, params, body, length):

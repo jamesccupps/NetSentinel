@@ -169,6 +169,11 @@ tr:hover td { background: rgba(88,166,255,.04); }
 .progress-track { height: 8px; background: var(--input); border-radius: 4px; overflow: hidden; }
 .progress-bar { height: 100%; width: 0; background: var(--accent); transition: width .2s; }
 
+.error {
+  margin-top: 14px; padding: 10px 14px; border-radius: 8px;
+  background: rgba(248,81,73,.1); border: 1px solid rgba(248,81,73,.4); color: var(--red);
+}
+.panel-foot { padding: 10px 14px; color: var(--dim); display: flex; align-items: center; gap: 12px; justify-content: flex-end; }
 .report { display: flex; flex-direction: column; gap: 16px; }
 .report .cards .card.bad .v { color: var(--red); }
 .report .cards .card.good .v { color: var(--green); }

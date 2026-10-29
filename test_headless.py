@@ -337,6 +337,19 @@ class TestDashboard(_ApiTestCase):
         self.assertNotIn('Hunter2Secret', json.dumps(state))
         self.assertEqual(self.post(f'/api/scan/upload?id={sid}&name=x', b'x')[0], 409)
 
+    def test_many_files_travel_in_one_request(self):
+        def record(name, data):
+            raw = name.encode()
+            return len(raw).to_bytes(2, 'big') + raw + len(data).to_bytes(4, 'big') + data
+        sid = json.loads(self.post('/api/scan/new')[1])['id']
+        body = b''.join(record(f'logs/{i}.log', f'host 10.0.0.{i}'.encode()) for i in range(50))
+        status, reply = self.post(f'/api/scan/upload-batch?id={sid}', body)
+        self.assertEqual((status, json.loads(reply)['stored']), (201, 50))
+        self.assertEqual(self.get_json(f'/api/scan?id={sid}')['files'], 50)
+        # a record claiming more bytes than were sent is refused, not read past
+        bad = record('x.log', b'abc')[:-1]
+        self.assertEqual(self.post(f'/api/scan/upload-batch?id={sid}', bad)[0], 400)
+
     def test_an_unknown_scan_is_404(self):
         self.assertEqual(self.request('/api/scan?id=nope')[0], 404)
 

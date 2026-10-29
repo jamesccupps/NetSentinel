@@ -293,17 +293,33 @@ async function refreshIncidents() {
 
 // ─── Scan files ──────────────────────────────────────────────────────────
 
-const scan = { queue: [], id: null, xhr: null, cancelled: false, report: null, kind: 'ipv4', filter: '' };
+const scan = { queue: [], skipped: 0, id: null, xhr: null, cancelled: false, report: null, kind: 'ipv4', filter: '' };
+// The same folders and file types the scanner leaves out: no point uploading them.
+const SKIP_DIRS = new Set(['.git', '.svn', '.hg', 'node_modules', '__pycache__', '.venv', 'venv']);
+const MEDIA = /\.(jpe?g|png|gif|bmp|ico|webp|mp3|mp4|m4a|wav|avi|mov|mkv|flac|ogg|woff2?|ttf|otf)$/i;
+const BATCH_BYTES = 8 * 1024 * 1024, BATCH_FILES = 2000, SINGLE_FILE = 4 * 1024 * 1024;
 
 function addToQueue(entries) {
-  for (const e of entries) scan.queue.push(e);
+  for (const e of entries) {
+    const parts = e.path.split('/');
+    if (parts.slice(0, -1).some((p) => SKIP_DIRS.has(p)) || MEDIA.test(e.path)) scan.skipped++;
+    else scan.queue.push(e);
+  }
   renderQueue();
+}
+
+function scanError(message) {
+  const el = $('scan-error');
+  el.textContent = message;
+  el.hidden = !message;
 }
 
 function renderQueue() {
   const total = scan.queue.reduce((n, e) => n + e.file.size, 0);
   $('queue').hidden = !scan.queue.length;
-  $('queue-summary').textContent = `${scan.queue.length} file${scan.queue.length === 1 ? '' : 's'}, ${fmtBytes(total)}`;
+  $('queue').hidden = !scan.queue.length && !scan.skipped;
+  $('queue-summary').textContent = `${fmtNum(scan.queue.length)} file${scan.queue.length === 1 ? '' : 's'}, ${fmtBytes(total)}` +
+    (scan.skipped ? ` · ${fmtNum(scan.skipped)} left out (version control, dependencies, images and media)` : '');
   const shown = scan.queue.slice(0, 200).map((e) => h('li', null, h('span', null, e.path), h('span', null, fmtBytes(e.file.size))));
   if (scan.queue.length > 200) shown.push(h('li', null, `… and ${scan.queue.length - 200} more`));
   $('queue-list').replaceChildren(...shown);
@@ -313,7 +329,10 @@ async function readEntry(entry, prefix, out) {
   if (entry.isFile) {
     const file = await new Promise((ok, fail) => entry.file(ok, fail));
     out.push({ file, path: prefix + file.name });
+    if (out.length % 500 === 0) $('queue-summary').textContent = `Reading the folder… ${fmtNum(out.length)} files`;
   } else if (entry.isDirectory) {
+    if (SKIP_DIRS.has(entry.name)) { scan.skipped++; return; }
+    $('queue').hidden = false;
     const reader = entry.createReader();
     for (;;) {
       const batch = await new Promise((ok, fail) => reader.readEntries(ok, fail));
@@ -329,11 +348,36 @@ function setProgress(label, fraction) {
   $('scan-progress-bar').style.width = `${Math.round(100 * Math.min(1, fraction))}%`;
 }
 
-function upload(id, entry, onProgress) {
+// Small files travel together: [u16 name length][name][u32 size][bytes] per file.
+function batches(files) {
+  const out = [];
+  let current = null;
+  for (const e of files) {
+    if (e.file.size > SINGLE_FILE) { out.push({ single: e, size: e.file.size, count: 1 }); continue; }
+    if (!current || current.size + e.file.size > BATCH_BYTES || current.count >= BATCH_FILES) {
+      current = { parts: [], size: 0, count: 0 };
+      out.push(current);
+    }
+    const name = new TextEncoder().encode(e.path).slice(0, 4096);
+    const head = new Uint8Array(2 + name.length + 4);
+    const view = new DataView(head.buffer);
+    view.setUint16(0, name.length);
+    head.set(name, 2);
+    view.setUint32(2 + name.length, e.file.size);
+    current.parts.push(head, e.file);
+    current.size += e.file.size;
+    current.count++;
+  }
+  return out;
+}
+
+function upload(id, batch, onProgress) {
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
     scan.xhr = xhr;
-    xhr.open('POST', `/api/scan/upload?id=${encodeURIComponent(id)}&name=${encodeURIComponent(entry.path)}`);
+    xhr.open('POST', batch.single
+      ? `/api/scan/upload?id=${encodeURIComponent(id)}&name=${encodeURIComponent(batch.single.path)}`
+      : `/api/scan/upload-batch?id=${encodeURIComponent(id)}`);
     xhr.setRequestHeader('X-NetSentinel-Token', TOKEN);
     xhr.upload.onprogress = (e) => onProgress(e.loaded);
     xhr.onload = () => {
@@ -342,7 +386,7 @@ function upload(id, entry, onProgress) {
     };
     xhr.onerror = () => reject(new Error('upload failed'));
     xhr.onabort = () => reject(new Error('cancelled'));
-    xhr.send(entry.file);
+    xhr.send(batch.single ? batch.single.file : new Blob(batch.parts));
   });
 }
 
@@ -352,16 +396,19 @@ async function startScan() {
   scan.cancelled = false;
   $('start-scan').disabled = $('clear-queue').disabled = true;
   $('scan-report').replaceChildren();
+  scanError('');
   try {
     const session = await api('/api/scan/new', { method: 'POST' });
     scan.id = session.id;
     const total = files.reduce((n, e) => n + e.file.size, 0) || 1;
-    let done = 0;
-    for (const [i, entry] of files.entries()) {
+    let done = 0, sent = 0;
+    for (const batch of batches(files)) {
       if (scan.cancelled) throw new Error('cancelled');
-      await upload(scan.id, entry, (loaded) =>
-        setProgress(`Uploading ${i + 1} of ${files.length}: ${entry.path}`, (done + loaded) / total * 0.5));
-      done += entry.file.size;
+      await upload(scan.id, batch, (loaded) =>
+        setProgress(`Uploading… ${fmtNum(sent)} of ${fmtNum(files.length)} files sent`,
+          (done + Math.min(loaded, batch.size)) / total * 0.5));
+      done += batch.size;
+      sent += batch.count;
     }
     await api(`/api/scan/start?id=${scan.id}`, { method: 'POST' });
     for (;;) {
@@ -382,7 +429,8 @@ async function startScan() {
     renderQueue();
     renderReport();
   } catch (e) {
-    toast(e.message === 'cancelled' ? 'Scan cancelled.' : `Scan failed: ${e.message}`);
+    if (e.message === 'cancelled') toast('Scan cancelled.');
+    else scanError(`The scan stopped: ${e.message}`);
   } finally {
     scan.xhr = null;
     $('scan-progress').hidden = true;
@@ -437,9 +485,15 @@ function renderReport() {
       h('td', null, h('span', { class: `badge ${x.severity}` }, x.severity), ` ${x.label}`),
       h('td', { class: 'mono' }, x.value), h('td', { class: 'wrap mono' }, `${x.file}:${x.line}`))),
   ];
+  const secretCsv = () => download('netsentinel-secrets.csv', csv([['kind', 'value_masked', 'file', 'line'],
+    ...r.credentials.map((c) => [`${c.protocol} ${c.credential_type}`, c.value, c.captures.join('; '), '']),
+    ...r.secrets.map((x) => [x.label, x.value, x.file, x.line])]), 'text/csv');
   out.append(h('div', { class: 'panel' + (secretRows.length ? ' flush' : '') },
     secretRows.length
-      ? h('div', { class: 'table-wrap' }, table(['Exposed', 'Value (masked)', 'Where'], secretRows))
+      ? [h('div', { class: 'table-wrap' }, table(['Exposed', 'Value (masked)', 'Where'], secretRows.slice(0, 1000))),
+        h('div', { class: 'panel-foot' },
+          secretRows.length > 1000 ? `Showing 1,000 of ${fmtNum(secretRows.length)}. ` : '',
+          h('button', { type: 'button', class: 'secondary', onclick: secretCsv }, 'Download CSV'))]
       : [h('h2', null, 'Exposed secrets'), h('div', { class: 'empty' }, 'Nothing that looks like a leaked password, key or token.')]));
 
   const indicatorPanel = h('div', { class: 'panel' });
@@ -481,13 +535,16 @@ function renderReport() {
   };
   renderIndicators();
 
+  // A 40,000-file scan should not mean a 40,000-row table: failures first, then a sample.
+  const files = [...r.files.filter((f) => f.error), ...r.files.filter((f) => !f.error)].slice(0, 500);
+  const hidden = r.files.length - files.length + Math.max(0, r.skipped.length - 200);
   out.append(h('div', { class: 'panel flush' }, h('div', { class: 'table-wrap' }, table(['File', 'Type', 'Result'], [
-    ...r.files.map((f) => h('tr', null, h('td', { class: 'wrap mono' }, f.file), h('td', null, f.type),
+    ...files.map((f) => h('tr', null, h('td', { class: 'wrap mono' }, f.file), h('td', null, f.type),
       h('td', null, f.error ? `Failed: ${f.error}` : f.type === 'capture'
         ? `${fmtNum(f.packets)} packets, ${f.alerts} alerts, ${f.credentials} credentials`
         : `${f.indicators} indicators, ${f.secrets} secrets${f.note ? ` (${f.note})` : ''}`))),
-    ...r.skipped.map((f) => h('tr', null, h('td', { class: 'wrap mono' }, f.file), h('td', null, 'skipped'), h('td', null, f.reason))),
-  ]))));
+    ...r.skipped.slice(0, 200).map((f) => h('tr', null, h('td', { class: 'wrap mono' }, f.file), h('td', null, 'skipped'), h('td', null, f.reason))),
+  ])), hidden ? h('div', { class: 'panel-foot' }, `${fmtNum(hidden)} more files are in the JSON report.`) : null));
 
   out.append(h('div', { class: 'report-actions' },
     h('button', { type: 'button', class: 'secondary', onclick: () => download('netsentinel-scan.json', JSON.stringify(r, null, 2), 'application/json') },
@@ -516,7 +573,7 @@ function setUpScan() {
     else for (const f of e.dataTransfer.files) out.push({ file: f, path: f.name });
     addToQueue(out);
   });
-  $('clear-queue').addEventListener('click', () => { scan.queue = []; renderQueue(); });
+  $('clear-queue').addEventListener('click', () => { scan.queue = []; scan.skipped = 0; renderQueue(); });
   $('start-scan').addEventListener('click', startScan);
   $('cancel-scan').addEventListener('click', cancelScan);
 }
