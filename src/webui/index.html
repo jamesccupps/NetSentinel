@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="netsentinel-token" content="__NETSENTINEL_TOKEN__">
+<title>NetSentinel Dashboard</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cpath d='M16 2 4 7v8c0 7.5 5.1 13.4 12 15 6.9-1.6 12-7.5 12-15V7z' fill='%2358a6ff'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="/static/style.css">
+<script src="/static/app.js" defer></script>
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">
+    <svg viewBox="0 0 32 32" aria-hidden="true"><path d="M16 2 4 7v8c0 7.5 5.1 13.4 12 15 6.9-1.6 12-7.5 12-15V7z"/></svg>
+    <span class="name">NetSentinel</span>
+    <span class="version">v__NETSENTINEL_VERSION__</span>
+  </div>
+  <nav class="tabs" id="tabs">
+    <a href="#overview" data-page="overview">Overview</a>
+    <a href="#alerts" data-page="alerts">Alerts</a>
+    <a href="#devices" data-page="devices">Devices</a>
+    <a href="#incidents" data-page="incidents">Incidents</a>
+    <a href="#scan" data-page="scan">Scan Files</a>
+  </nav>
+  <div class="status" id="status"><span class="dot"></span><span class="label">Connecting…</span></div>
+</header>
+
+<main>
+  <section class="page" id="page-overview">
+    <div class="cards" id="cards"></div>
+    <div class="grid two">
+      <div class="panel"><h2>Traffic <small>packets / second</small></h2><canvas id="chart-pps"></canvas></div>
+      <div class="panel"><h2>Bandwidth <small>KB / second</small></h2><canvas id="chart-bw"></canvas></div>
+    </div>
+    <div class="grid three">
+      <div class="panel"><h2>Protocols</h2><div id="protocols" class="bars"></div></div>
+      <div class="panel"><h2>Top talkers</h2><div id="talkers" class="bars"></div></div>
+      <div class="panel"><h2>Engine</h2><dl id="engine" class="facts"></dl></div>
+    </div>
+    <div class="panel">
+      <h2>Recent alerts <a class="more" href="#alerts">All alerts →</a></h2>
+      <div id="recent-alerts" class="alert-list"></div>
+    </div>
+  </section>
+
+  <section class="page" id="page-alerts" hidden>
+    <div class="toolbar">
+      <div class="chips" id="severity-chips"></div>
+      <input type="search" id="alert-search" placeholder="Filter by title, IP or rule">
+    </div>
+    <div id="alert-list" class="alert-list"></div>
+  </section>
+
+  <section class="page" id="page-devices" hidden>
+    <div class="toolbar">
+      <div class="chips" id="device-types"></div>
+      <input type="search" id="device-search" placeholder="Filter by IP, name or MAC">
+    </div>
+    <div class="panel flush"><div class="table-wrap"><table id="device-table"></table></div></div>
+  </section>
+
+  <section class="page" id="page-incidents" hidden>
+    <div id="incident-list" class="alert-list"></div>
+  </section>
+
+  <section class="page" id="page-scan" hidden>
+    <div class="panel">
+      <h2>Scan files for leaks</h2>
+      <p class="hint">Drop files, folders or zips here. Logs, configs, documents, exports and packet
+        captures all work. You get every IP address, domain, URL, email and MAC address in them, and
+        any password, key or token that looks leaked, masked, with the file and line. Nothing leaves
+        this computer: the files are scanned by NetSentinel here and deleted afterwards.</p>
+      <div id="dropzone" class="dropzone" tabindex="0">
+        <div class="drop-title">Drop files or folders</div>
+        <div class="drop-actions">
+          <button type="button" id="pick-files">Choose files</button>
+          <button type="button" id="pick-folder" class="secondary">Choose a folder</button>
+        </div>
+        <input type="file" id="file-input" multiple hidden>
+        <input type="file" id="folder-input" webkitdirectory multiple hidden>
+      </div>
+      <div id="queue" class="queue" hidden>
+        <div class="queue-head"><span id="queue-summary"></span>
+          <span class="queue-actions"><button type="button" id="clear-queue" class="secondary">Clear</button>
+          <button type="button" id="start-scan">Scan</button></span></div>
+        <ul id="queue-list"></ul>
+      </div>
+      <div id="scan-progress" class="progress" hidden>
+        <div class="progress-label" id="scan-progress-label"></div>
+        <div class="progress-track"><div class="progress-bar" id="scan-progress-bar"></div></div>
+        <button type="button" id="cancel-scan" class="secondary">Cancel</button>
+      </div>
+    </div>
+    <div id="scan-report"></div>
+  </section>
+</main>
+<div id="toast" class="toast" hidden></div>
+</body>
+</html>

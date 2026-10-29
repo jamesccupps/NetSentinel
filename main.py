@@ -176,8 +176,8 @@ def parse_args(argv=None):
         description='AI-powered network monitor and intrusion detection system.',
         epilog='With no arguments, starts the desktop interface.')
     parser.add_argument('--headless', action='store_true',
-                        help='run without a GUI and serve a read-only HTTP API '
-                             '(for a Pi on a SPAN port, a container, or a server)')
+                        help='run without a GUI, serving the browser dashboard and '
+                             'API (for a Pi on a SPAN port, a container, or a server)')
     parser.add_argument('--host', default='127.0.0.1',
                         help='API bind address (default: 127.0.0.1). Binding '
                              'publicly exposes captured credentials and alert '
@@ -185,7 +185,7 @@ def parse_args(argv=None):
     parser.add_argument('--port', type=int, default=8787,
                         help='API port (default: 8787; 0 asks the OS to choose)')
     parser.add_argument('--no-api', action='store_true',
-                        help='headless with no HTTP listener at all')
+                        help='no HTTP listener at all: no browser dashboard, no API')
     parser.add_argument('--version', action='version',
                         version=f'NetSentinel {APP_VERSION}')
     return parser.parse_args(argv)
@@ -305,7 +305,24 @@ def main(argv=None):
     if splash:
         splash.destroy()
 
-    app.run(tk_root=tk_root)
+    # The browser dashboard runs alongside the window; Open in Browser finds it
+    # on app.web_server. A busy port falls back to any free one.
+    app.web_server = None
+    if not args.no_api:
+        try:
+            from src.headless import HeadlessServer
+            app.web_server = HeadlessServer(app, host=args.host, port=args.port)
+            app.web_server.start(fallback=True)
+            logger.info("Dashboard: %s", app.web_server.url)
+        except Exception as e:
+            logger.warning("Browser dashboard unavailable: %s", e)
+            app.web_server = None
+
+    try:
+        app.run(tk_root=tk_root)
+    finally:
+        if app.web_server is not None:
+            app.web_server.stop()
 
 
 if __name__ == "__main__":

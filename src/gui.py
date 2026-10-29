@@ -636,6 +636,12 @@ class NetSentinelGUI:
         ctrl_frame = tk.Frame(top_bar, bg=COLORS['bg_panel'])
         ctrl_frame.pack(side='right', padx=16)
 
+        tk.Button(ctrl_frame, text="🌐  Open in Browser", font=('Segoe UI', 9, 'bold'),
+                  bg=COLORS['bg_input'], fg=COLORS['accent'],
+                  relief='flat', cursor='hand2', padx=10,
+                  command=self._open_dashboard
+        ).pack(side='left', padx=(0, 8))
+
         # About button
         tk.Button(ctrl_frame, text="ℹ  About", font=('Segoe UI', 8),
                   bg=COLORS['bg_input'], fg=COLORS['text_dim'],
@@ -1186,6 +1192,18 @@ class NetSentinelGUI:
 
         self._pcap_alert_widgets = []
         self._pcap_batch = None
+
+    def _open_dashboard(self):
+        """Open the browser dashboard served alongside this window."""
+        import webbrowser
+        server = getattr(self.app, 'web_server', None)
+        if server is None:
+            messagebox.showinfo(
+                "Browser Dashboard",
+                "The dashboard is not running. It starts with NetSentinel unless "
+                "--no-api was given; check the log for why it could not start.")
+            return
+        webbrowser.open(server.url)
 
     def _pcap_set_busy(self, busy):
         state = 'disabled' if busy else 'normal'

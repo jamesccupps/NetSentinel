@@ -1,9 +1,10 @@
 """
-Headless mode.
-==============
+Headless mode and the browser dashboard.
+=========================================
 Runs the detection engine with no GUI and exposes its state over HTTP, so
 NetSentinel can live on a Raspberry Pi hanging off a SPAN port instead of only
-on the desktop it is watching.
+on the desktop it is watching. The desktop app starts the same server, so the
+dashboard is also a browser view of a session with a window.
 
 This needed almost no new code. `NetSentinelApp` never imported tkinter outside
 `run()`, and the last piece of display logic moved to `presentation.py`, so the
@@ -12,10 +13,17 @@ a window.
 
 Design notes
 ------------
-**Read-only.** Every endpoint is a GET. There is no way to change configuration,
-acknowledge an alert or stop monitoring through this API. A sensor that can be
-reconfigured over the network is a liability, and the failure modes of getting
-authentication wrong are worse than the inconvenience of editing config.json.
+**Read-only.** There is no way to change configuration, acknowledge an alert or
+stop monitoring through this API. A sensor that can be reconfigured over the
+network is a liability, and the failure modes of getting authentication wrong
+are worse than the inconvenience of editing config.json. The one thing a POST
+can do is upload files to be scanned, and it needs the token embedded in the
+dashboard page: a custom header no other site can send without a CORS
+preflight this server never answers, so no web page can drive it.
+
+**Only its own name.** Requests whose Host header is not a loopback name are
+refused while bound to loopback, which stops DNS rebinding from turning a
+malicious page into a reader of this API.
 
 **Localhost by default.** The output contains captured credentials, device
 inventory and alert history. Binding to 0.0.0.0 requires saying so explicitly,
@@ -27,23 +35,41 @@ bad trade.
 
 Endpoints
 ---------
-    GET /                 human-readable status summary
+    GET /                 the dashboard
+    GET /status.txt       human-readable status summary
     GET /health           liveness, for a supervisor or container probe
+    GET /api/overview     what the dashboard's overview shows
     GET /api/status       capture, IDS, ML and alert counters
     GET /api/alerts       recent alerts, ?limit= and ?severity=
     GET /api/incidents    correlated incidents
     GET /api/devices      discovered devices on the local network
     GET /api/metrics      Prometheus text exposition
+    GET /api/scan         a file scan's progress and report, ?id=
+    POST /api/scan/new, /api/scan/upload?id=&name=, /api/scan/start?id=,
+         /api/scan/cancel?id=          upload files and scan them (token required)
 """
 
+import hmac
 import json
 import logging
+import os
+import secrets
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-from src import presentation
+from src import presentation, __version__
+
+WEBUI_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'webui')
+STATIC_FILES = {
+    '/static/app.js': ('app.js', 'application/javascript; charset=utf-8'),
+    '/static/style.css': ('style.css', 'text/css; charset=utf-8'),
+}
+LOOPBACK_NAMES = {'127.0.0.1', 'localhost', '::1'}
+DASHBOARD_CSP = ("default-src 'self'; script-src 'self'; style-src 'self'; "
+                 "img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; "
+                 "base-uri 'none'; form-action 'none'")
 
 logger = logging.getLogger("NetSentinel.Headless")
 
@@ -63,8 +89,29 @@ class _Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         logger.debug("%s - %s", self.address_string(), fmt % args)
 
+    def _host_allowed(self):
+        allowed = self.server.netsentinel_allowed_hosts
+        if allowed is None:
+            return True
+        host = (self.headers.get('Host') or '').strip().lower()
+        if host.startswith('['):
+            host = host[1:host.find(']')] if ']' in host else host
+        else:
+            host = host.rsplit(':', 1)[0] if host.count(':') == 1 else host
+        if host not in allowed:
+            self._send_json({'error': 'unexpected Host header'}, status=421)
+            return False
+        return True
+
     def do_GET(self):
+        if not self._host_allowed():
+            return
         parsed = urlparse(self.path)
+        static = self.server.netsentinel_static(parsed.path)
+        if static is not None:
+            data, content_type, headers = static
+            self._send_bytes(data, content_type, 200, headers)
+            return
         route = self.server.netsentinel_routes.get(parsed.path)
         if route is None:
             self._send_json({'error': 'not found', 'path': parsed.path}, status=404)
@@ -73,6 +120,10 @@ class _Handler(BaseHTTPRequestHandler):
             params = parse_qs(parsed.query)
             body, content_type = route(params)
         except Exception as e:
+            status = getattr(e, 'status', 500)
+            if status != 500:   # a ScanError: the request was wrong, not the server
+                self._send_json({'error': str(e)}, status=status)
+                return
             logger.exception("Error serving %s", parsed.path)
             self._send_json({'error': 'internal error', 'detail': str(e)}, status=500)
             return
@@ -82,6 +133,43 @@ class _Handler(BaseHTTPRequestHandler):
         else:
             self._send_text(body, content_type)
 
+    def do_POST(self):
+        if not self._host_allowed():
+            return
+        parsed = urlparse(self.path)
+        route = self.server.netsentinel_post_routes.get(parsed.path)
+        if route is None:
+            known = parsed.path in self.server.netsentinel_routes
+            self._send_json({'error': 'method not allowed' if known else 'not found',
+                             'path': parsed.path}, status=405 if known else 404)
+            return
+        token = self.headers.get('X-NetSentinel-Token') or ''
+        if not hmac.compare_digest(token, self.server.netsentinel_token):
+            self._send_json({'error': 'missing or wrong token'}, status=403)
+            return
+        origin = self.headers.get('Origin')
+        if origin and urlparse(origin).netloc.lower() != (self.headers.get('Host') or '').lower():
+            self._send_json({'error': 'cross-origin request refused'}, status=403)
+            return
+        try:
+            length = int(self.headers.get('Content-Length') or 0)
+        except ValueError:
+            length = -1
+        if length < 0:
+            self._send_json({'error': 'bad Content-Length'}, status=400)
+            return
+        try:
+            payload, status = route(parse_qs(parsed.query), self.rfile, length)
+        except Exception as e:
+            status = getattr(e, 'status', 500)
+            if status == 500:
+                logger.exception("Error serving POST %s", parsed.path)
+            # The body may be unread; the connection cannot be reused safely.
+            self.close_connection = True
+            self._send_json({'error': str(e)}, status=status)
+            return
+        self._send_json(payload, status=status)
+
     def _send_json(self, payload, status=200):
         self._send_bytes(json.dumps(payload, indent=2, default=str).encode(),
                          'application/json', status)
@@ -89,9 +177,11 @@ class _Handler(BaseHTTPRequestHandler):
     def _send_text(self, text, content_type='text/plain; charset=utf-8', status=200):
         self._send_bytes(text.encode('utf-8'), content_type, status)
 
-    def _send_bytes(self, data, content_type, status):
+    def _send_bytes(self, data, content_type, status, headers=None):
         self.send_response(status)
         self.send_header('Content-Type', content_type)
+        for name, value in (headers or {}).items():
+            self.send_header(name, value)
         self.send_header('Content-Length', str(len(data)))
         # This serves captured credentials and device inventory. Nothing should
         # cache it, and no page should be able to frame or script against it.
@@ -112,20 +202,37 @@ class HeadlessServer:
         self._httpd = None
         self._thread = None
         self.started_at = time.time()
+        # Per process: the dashboard page carries it, nothing else can read it.
+        self.token = secrets.token_urlsafe(24)
+        self._scans = None
 
         self.routes = {
-            '/': self._route_index,
+            '/status.txt': self._route_index,
             '/health': self._route_health,
+            '/api/overview': self._route_overview,
+            '/api/scan': self._route_scan,
             '/api/status': self._route_status,
             '/api/alerts': self._route_alerts,
             '/api/incidents': self._route_incidents,
             '/api/devices': self._route_devices,
             '/api/metrics': self._route_metrics,
         }
+        self.post_routes = {
+            '/api/scan/new': self._post_scan_new,
+            '/api/scan/upload': self._post_scan_upload,
+            '/api/scan/start': self._post_scan_start,
+            '/api/scan/cancel': self._post_scan_cancel,
+        }
+
+    @property
+    def url(self):
+        host = '127.0.0.1' if self.host in ('0.0.0.0', '::', '') else self.host
+        return f"http://{'[' + host + ']' if ':' in host else host}:{self.port}/"
 
     # ─── Lifecycle ───────────────────────────────────────────────────────
 
-    def start(self):
+    def start(self, fallback=False):
+        """Listen; with fallback, take any free port if the configured one is in use."""
         if self._httpd is not None:
             return self.port
 
@@ -136,8 +243,19 @@ class HeadlessServer:
                 "Put it behind a firewall or a reverse proxy with authentication.",
                 self.host)
 
-        self._httpd = ThreadingHTTPServer((self.host, self.port), _Handler)
+        try:
+            self._httpd = ThreadingHTTPServer((self.host, self.port), _Handler)
+        except OSError:
+            if not fallback:
+                raise
+            logger.info("Port %d is in use; letting the OS choose one.", self.port)
+            self._httpd = ThreadingHTTPServer((self.host, 0), _Handler)
         self._httpd.netsentinel_routes = self.routes
+        self._httpd.netsentinel_post_routes = self.post_routes
+        self._httpd.netsentinel_static = self._static
+        self._httpd.netsentinel_token = self.token
+        self._httpd.netsentinel_allowed_hosts = (
+            LOOPBACK_NAMES if self.host in LOOPBACK_NAMES else None)
         self._httpd.daemon_threads = True
         # Port 0 asks the OS to choose; report what it actually gave us.
         self.port = self._httpd.server_address[1]
@@ -161,7 +279,95 @@ class HeadlessServer:
             self._thread.join(timeout=5)
         self._httpd = None
         self._thread = None
+        if self._scans is not None:
+            self._scans.close()
         logger.info("API stopped.")
+
+    # ─── Dashboard ───────────────────────────────────────────────────────
+
+    def _static(self, path):
+        """(bytes, content type, headers) for the dashboard's files, else None."""
+        if path in ('/', '/index.html'):
+            with open(os.path.join(WEBUI_DIR, 'index.html'), encoding='utf-8') as f:
+                page = f.read()
+            page = page.replace('__NETSENTINEL_TOKEN__', self.token)
+            page = page.replace('__NETSENTINEL_VERSION__', __version__)
+            return (page.encode('utf-8'), 'text/html; charset=utf-8',
+                    {'Content-Security-Policy': DASHBOARD_CSP})
+        entry = STATIC_FILES.get(path)
+        if entry is None:
+            return None
+        with open(os.path.join(WEBUI_DIR, entry[0]), 'rb') as f:
+            return f.read(), entry[1], {}
+
+    def _route_overview(self, params):
+        data = self.app.get_dashboard_data()
+        cap = data.get('capture', {})
+        alerts = data.get('alerts', {})
+        ml = data.get('ml', {})
+        score = (data.get('ml_result') or {}).get('anomaly_score', 0) or 0
+        label, colour = presentation.threat_level(score)
+        devices = data.get('device_learner', {})
+        start = cap.get('start_time') or 0
+        return {
+            'version': __version__,
+            'monitoring': bool(data.get('is_monitoring')),
+            'uptime_sec': int(time.time() - start) if start and data.get('is_monitoring') else 0,
+            'capture': {k: cap.get(k, 0) for k in (
+                'packets_captured', 'bytes_captured', 'packets_per_sec', 'bytes_per_sec',
+                'flows_active', 'packets_dropped')},
+            'alerts': {
+                'total': alerts.get('total', 0),
+                'unacknowledged': alerts.get('unacknowledged', 0),
+                'per_minute': alerts.get('alerts_per_minute', 0),
+                'by_severity': alerts.get('by_severity', {}),
+            },
+            'threat': {'label': label, 'colour': colour, 'score': round(float(score), 4)},
+            'protocols': [{'name': n, 'count': c, 'fraction': round(f, 4)}
+                          for n, c, f in presentation.protocol_breakdown(cap.get('protocols'))],
+            'top_talkers': [{'ip': ip, 'bytes': b} for ip, b in
+                            presentation.top_talkers(cap.get('top_talkers'), limit=8)],
+            'devices': {'total': devices.get('total_devices', 0),
+                        'active_last_hour': devices.get('active_last_hour', 0)},
+            'incidents_active': data.get('correlator', {}).get('active_incidents', 0),
+            'ml': {'is_trained': bool(ml.get('is_trained')),
+                   'baseline_samples': ml.get('baseline_samples', 0)},
+        }, 'application/json'
+
+    # ─── File scans ──────────────────────────────────────────────────────
+
+    def _scan_sessions(self):
+        if self._scans is None:
+            from src.web_scan import ScanSessions
+            self._scans = ScanSessions(self._make_analyzer)
+        return self._scans
+
+    def _make_analyzer(self):
+        """A PcapAnalyzer of the scan's own, so it never clobbers the GUI's results."""
+        from src.pcap_analyzer import PcapAnalyzer
+        app = self.app
+        return PcapAnalyzer(
+            app.config,
+            **{name: getattr(app, name, None) for name in (
+                'ids_engine', 'threat_intel', 'ioc_scanner', 'alert_verifier',
+                'net_env', 'forensics_db')})
+
+    def _route_scan(self, params):
+        return self._scan_sessions().get(_str_param(params, 'id')), 'application/json'
+
+    def _post_scan_new(self, params, body, length):
+        return self._scan_sessions().create(), 201
+
+    def _post_scan_upload(self, params, body, length):
+        name = _str_param(params, 'name') or 'upload'
+        stored = self._scan_sessions().add_file(_str_param(params, 'id'), name, body, length)
+        return {'stored': stored}, 201
+
+    def _post_scan_start(self, params, body, length):
+        return self._scan_sessions().start(_str_param(params, 'id')), 202
+
+    def _post_scan_cancel(self, params, body, length):
+        return self._scan_sessions().cancel(_str_param(params, 'id')), 200
 
     # ─── Routes ──────────────────────────────────────────────────────────
 
@@ -201,6 +407,7 @@ class HeadlessServer:
             f"  Baseline      {ml.get('baseline_samples', 0)} samples",
             f"  Threat level  {threat}",
             "",
+            f"Dashboard: {self.url}",
             "Endpoints: " + "  ".join(sorted(self.routes)),
         ]
         return "\n".join(lines) + "\n", 'text/plain; charset=utf-8'
@@ -339,8 +546,7 @@ def run_headless(app, host='127.0.0.1', port=8787, serve_api=True):
         if serve_api:
             server = HeadlessServer(app, host=host, port=port)
             server.start()
-            logger.info("Status: http://%s:%d/  Metrics: http://%s:%d/api/metrics",
-                        host, server.port, host, server.port)
+            logger.info("Dashboard: %s  Metrics: %sapi/metrics", server.url, server.url)
 
         logger.info("Running headless. Press Ctrl-C to stop.")
         while True:

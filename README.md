@@ -34,7 +34,9 @@ TLS stack stands out even when everything it sends is encrypted.
 
 **PCAP Export** — Ring buffer of raw packets with on-demand "save last 5 minutes" export and continuous recording with auto-rotation. Serious alerts automatically save the traffic that triggered them, narrowed to the hosts involved, so every CRITICAL finding opens in Wireshark.
 
-**Scan a folder or zip of captures** — the PCAP tab's **Scan Folder** and **Scan Zip / Files** run every capture they find through the analyzer and return one report: each plaintext credential (masked), where it crossed the network, and which captures it was in. Headless: `python -m src.batch_scan PATH... [--skip GLOB] [--json]`.
+**Browser dashboard** — NetSentinel serves a dashboard at `http://127.0.0.1:8787/` while it runs: live traffic and bandwidth charts, protocol and top-talker breakdowns, alerts with severity filters and evidence, devices, incidents, and file scanning. **Open in Browser** in the desktop app opens it; `--headless` runs the same dashboard with no window, as a server.
+
+**Scan files for leaks** — drop any files, folders or zips on the dashboard's **Scan Files** page, or use **Scan Files / Zips** and **Scan Folder** in the desktop app's File Analyzer tab. Logs, configs, documents (Word, Excel, PDF), exports and packet captures all work. You get every IP address, domain, URL, email and MAC address in them, which files held each one, any the threat feeds know as bad, and every password, key, token or card number that looks leaked, masked, with file and line. Packet captures also get the full traffic analysis. Command line: `python -m src.batch_scan PATH... [--skip GLOB] [--json]`.
 
 ## Quick Start
 
@@ -71,26 +73,35 @@ python main.py --headless      # no GUI, read-only HTTP API on 127.0.0.1:8787
 python main.py --help
 ```
 
-### Headless mode
+### Browser dashboard and headless mode
 
-The detection engine never needed a display, so it can run as a sensor — on a
-Raspberry Pi hanging off a SPAN port, in a container, or on a server — and be
-read over HTTP:
+The desktop app serves a browser dashboard at `http://127.0.0.1:8787/` (or the
+next free port), and **Open in Browser** in its top bar opens it. The detection
+engine never needed a display, so it can also run as a sensor with no window at
+all — on a Raspberry Pi hanging off a SPAN port, in a container, or on a server —
+with `python main.py --headless` (or `NetSentinel.exe --headless`), and be read
+in a browser or over HTTP:
 
 | Endpoint | Returns |
 |---|---|
-| `GET /` | human-readable status summary |
+| `GET /` | the dashboard |
+| `GET /status.txt` | human-readable status summary |
+| `GET /api/overview` | what the dashboard's overview shows |
 | `GET /health` | liveness, for a supervisor or container probe |
 | `GET /api/status` | capture, IDS, ML and alert counters |
 | `GET /api/alerts` | recent alerts (`?limit=`, `?severity=`) |
 | `GET /api/incidents` | correlated incidents |
 | `GET /api/devices` | discovered devices on the local network |
 | `GET /api/metrics` | Prometheus text exposition |
+| `POST /api/scan/...` | upload files for the dashboard's file scan (needs the page's token) |
 
-The API is **read-only and binds to localhost by default**. It serves captured
-credentials, device inventory and alert history, so `--host 0.0.0.0` logs a
-warning and should sit behind a firewall or an authenticating reverse proxy.
-`--no-api` runs headless with no listener at all.
+The API **binds to localhost by default** and cannot change configuration or
+monitoring. It serves captured credentials, device inventory and alert history,
+so `--host 0.0.0.0` logs a warning and should sit behind a firewall or an
+authenticating reverse proxy. While bound to localhost it refuses requests for
+any other host name, so a web page cannot read it through DNS rebinding, and
+uploads need a token that only the dashboard page carries, so no other site can
+drive them. `--no-api` runs with no listener and no dashboard.
 
 Or build a standalone executable:
 

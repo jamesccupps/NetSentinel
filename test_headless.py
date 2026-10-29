@@ -9,6 +9,7 @@ headers — is covered too.
 import json
 import os
 import sys
+import time
 import unittest
 import urllib.error
 import urllib.request
@@ -126,7 +127,7 @@ class TestEndpoints(_ApiTestCase):
         self.assertIn('uptime_sec', body)
 
     def test_index_is_human_readable(self):
-        status, headers, body = self.get('/')
+        status, headers, body = self.get('/status.txt')
         self.assertEqual(status, 200)
         self.assertTrue(headers['Content-Type'].startswith('text/plain'))
         self.assertIn('NetSentinel', body)
@@ -262,6 +263,94 @@ class TestResponseHardening(_ApiTestCase):
             self.get('/api/status')
         self.assertEqual(ctx.exception.code, 500)
         self.assertEqual(json.loads(ctx.exception.read())['error'], 'internal error')
+
+
+class TestDashboard(_ApiTestCase):
+    """The browser dashboard, and what keeps other web pages from driving it."""
+
+    def request(self, path, data=None, headers=None, method=None):
+        req = urllib.request.Request(self.base + path, data=data, method=method,
+                                     headers=headers or {})
+        try:
+            with urllib.request.urlopen(req, timeout=10) as r:
+                return r.status, r.read().decode()
+        except urllib.error.HTTPError as e:
+            return e.code, e.read().decode()
+
+    def post(self, path, data=b'', token=None, **headers):
+        headers['X-NetSentinel-Token'] = self.server.token if token is None else token
+        return self.request(path, data=data, headers=headers, method='POST')
+
+    def test_the_page_carries_the_token_and_a_strict_policy(self):
+        status, headers, body = self.get('/')
+        self.assertEqual(status, 200)
+        self.assertTrue(headers['Content-Type'].startswith('text/html'))
+        self.assertIn(self.server.token, body)
+        self.assertNotIn('__NETSENTINEL', body)
+        self.assertIn("script-src 'self'", headers['Content-Security-Policy'])
+        for path in ('/static/app.js', '/static/style.css'):
+            self.assertEqual(self.get(path)[0], 200)
+
+    def test_overview(self):
+        o = self.get_json('/api/overview')
+        self.assertEqual(o['threat']['label'], 'CRITICAL')
+        self.assertEqual(o['capture']['flows_active'], 7)
+        self.assertTrue(o['monitoring'])
+
+    def test_a_foreign_host_name_is_refused(self):
+        """DNS rebinding: evil.example resolving to 127.0.0.1 must not read the API."""
+        status, _ = self.request('/api/status', headers={'Host': f'evil.example:{self.port}'})
+        self.assertEqual(status, 421)
+        status, _ = self.request('/api/status', headers={'Host': f'localhost:{self.port}'})
+        self.assertEqual(status, 200)
+
+    def test_posts_need_the_token(self):
+        self.assertEqual(self.post('/api/scan/new', token='')[0], 403)
+        self.assertEqual(self.post('/api/scan/new', token='wrong')[0], 403)
+        self.assertEqual(self.post('/api/scan/new')[0], 201)
+
+    def test_a_cross_origin_post_is_refused_even_with_the_token(self):
+        status, _ = self.post('/api/scan/new', Origin='https://evil.example')
+        self.assertEqual(status, 403)
+        status, _ = self.post('/api/scan/new', Origin=f'http://127.0.0.1:{self.port}')
+        self.assertEqual(status, 201)
+
+    def test_upload_and_scan(self):
+        from test_batch_scan import FakeAnalyzer
+        self.server._make_analyzer = FakeAnalyzer
+        status, body = self.post('/api/scan/new')
+        sid = json.loads(body)['id']
+        config = b'password = "Hunter2Secret"\nserver 8.8.8.8\n'
+        status, body = self.post(f'/api/scan/upload?id={sid}&name=../../etc/app.conf', config)
+        self.assertEqual(status, 201)
+        self.assertEqual(json.loads(body)['stored'].replace('\\', '/'), 'etc/app.conf')
+        self.assertEqual(self.post(f'/api/scan/start?id={sid}')[0], 202)
+        for _ in range(100):
+            state = self.get_json(f'/api/scan?id={sid}')
+            if state['state'] != 'running':
+                break
+            time.sleep(0.05)
+        self.assertEqual(state['state'], 'done')
+        report = state['report']
+        self.assertEqual([s['kind'] for s in report['secrets']], ['password'])
+        self.assertEqual(report['indicators']['ipv4'][0]['value'], '8.8.8.8')
+        self.assertNotIn('Hunter2Secret', json.dumps(state))
+        self.assertEqual(self.post(f'/api/scan/upload?id={sid}&name=x', b'x')[0], 409)
+
+    def test_an_unknown_scan_is_404(self):
+        self.assertEqual(self.request('/api/scan?id=nope')[0], 404)
+
+
+class TestUploadNames(unittest.TestCase):
+    def test_names_cannot_leave_the_folder(self):
+        from src.web_scan import safe_relpath
+        cases = {'../../etc/passwd': os.path.join('etc', 'passwd'),
+                 'C:\\Windows\\win.ini': os.path.join('C_', 'Windows', 'win.ini'),
+                 '/abs/x.pcap': os.path.join('abs', 'x.pcap'),
+                 '..': 'upload', '': 'upload', 'a/./b': os.path.join('a', 'b')}
+        for name, expected in cases.items():
+            with self.subTest(name=name):
+                self.assertEqual(safe_relpath(name), expected)
 
 
 class TestCommandLine(unittest.TestCase):

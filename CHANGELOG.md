@@ -1,25 +1,49 @@
 # NetSentinel Changelog
 
-## v1.8.0 — Scan a folder of captures, a Windows download, and netmon
+## v1.8.0 — A browser dashboard, scan any file for leaks, and a Windows download
 
-**1426 unit tests** (up from 384) plus 14 integration checks.
+**1444 unit tests** (up from 384) plus 14 integration checks.
 
-### Scan a folder or a zip for leaked credentials
+### A dashboard in the browser
 
-The PCAP tab has two new buttons, **Scan Folder** and **Scan Zip / Files**. Every
-capture under a folder, inside the zips you pick, or in the files you select runs
-through the same analyzer as a single file, and the results come back as one
-report: each exposed credential (masked, as the forensics engine shows it), the
-connection it crossed, and every capture it appeared in, followed by a line per
-capture and a list of what was skipped and why. Export Results covers the whole
-scan. The same scan runs headless with `python -m src.batch_scan PATH... [--skip GLOB]
-[--json]`; `--skip 'flash*'` keeps captures you should not be opening out of it.
+NetSentinel now serves a dashboard at `http://127.0.0.1:8787/` whenever it runs,
+and the desktop app's new **Open in Browser** button opens it. Overview (live
+traffic and bandwidth charts, protocols, top talkers, threat level, recent
+alerts), Alerts (severity filters, search, evidence on click), Devices, Incidents,
+and Scan Files. `--headless` serves the same dashboard with no window, so the
+program can run as a server and be watched from a browser. Plain HTML, CSS and
+JavaScript served by the standard library: no framework, nothing fetched from the
+internet, and a Content-Security-Policy that allows only its own scripts.
+Everything that came off the network or out of a scanned file is shown as text.
 
-A hostile zip cannot write outside the scan: members are never extracted under
-their own names, but streamed into numbered files in a private temporary folder,
-capped at 2 GB each, analysed and deleted one at a time. Nested archives and
-password-protected members are reported, not opened. Folders are walked without
-following symlinks.
+The server still binds to localhost and still cannot change configuration or
+monitoring. New: while on localhost it refuses any Host header but a loopback
+name, which closes DNS rebinding, and the one thing a POST can do, upload files
+to scan, needs a token only the dashboard page carries, so no other web page can
+drive it. The plain-text summary moved from `/` to `/status.txt`.
+
+### Scan any files for leaks
+
+**Scan Files** in the dashboard (drag and drop files or whole folders) and **Scan
+Files / Zips** and **Scan Folder** in the desktop app's File Analyzer tab (was
+PCAP Analyzer) take anything: logs, configs, Word and Excel files, PDFs, exports,
+zips, and packet captures. One report lists every IP address (public or
+private), domain, URL, email and MAC address found and which files held it, any
+the threat feeds know as bad, and every private key, cloud or API token,
+password in a setting or URL, card number (Luhn-checked) or US SSN that looks
+leaked, masked, with file and line. Captures still get the full PCAP analysis,
+and their talkers and DNS names join the lists. Download the lists as CSV or the
+whole report as JSON. Headless: `python -m src.batch_scan PATH... [--skip GLOB]
+[--json]`; `--skip 'flash*'` keeps files you should not be opening out of it.
+
+Secrets are masked where they are found and the raw value never enters the
+report. An indicator that overlaps a secret is dropped, so `user:pass@host`
+never surfaces the password as an email. Zip members are never extracted under
+their own names, but streamed into numbered files in a private temporary
+folder, capped at 2 GB each, scanned and deleted one at a time; uploaded names
+are reduced to safe path components. Nested archives and password-protected
+members are reported, not opened, and folders are walked without following
+symlinks.
 
 ### A Windows build on every release
 
@@ -40,6 +64,7 @@ a rolling capture, a web UI, and acknowledge, snooze and maintenance mode. See
 
 ### Fixes
 
+- The desktop app's header said v1.0 whatever the version; it now reads it.
 - A UniFi timestamp with one or two fractional digits (`13:05:01.5Z`) did not parse
   on Python 3.10, and the row fell back to the local-time column, four hours out.
 - CI never installed PyYAML, so netmon's tests could not run there.
