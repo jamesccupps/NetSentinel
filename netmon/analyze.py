@@ -332,6 +332,9 @@ def _notify(analyzer, profile, args):
         if args.digest:
             notifier.send_digest(analyzer)
             print('digest sent')
+            code = _email_digest(analyzer, profile, args)
+            if code:
+                return code
     except AlertingError as e:
         print(f'alerting: {e}', file=sys.stderr)
         return 1
@@ -344,6 +347,28 @@ def _notify(analyzer, profile, args):
     if notifier.failures:
         print(f'{len(notifier.failures)} could not be delivered', file=sys.stderr)
         return 1
+    return 0
+
+
+def _email_digest(analyzer, profile, args):
+    """Email the digest too, if the secrets file configures it."""
+    from netmon.alerting import (AlertingError, build_digest, digest_title,
+                                 load_email_config, send_email_digest)
+    try:
+        email = load_email_config(args.secrets)
+        if email is None or not email.configured:
+            return 0
+        body = build_digest(analyzer, profile)
+        if args.dry_run:
+            email.validate()
+            print(f'--- would email {", ".join(email.recipients)} ---')
+            print(body)
+            return 0
+        send_email_digest(email, body, digest_title(profile))
+    except AlertingError as e:
+        print(f'email: {e}', file=sys.stderr)
+        return 1
+    print(f'digest emailed to {", ".join(email.recipients)}')
     return 0
 
 
