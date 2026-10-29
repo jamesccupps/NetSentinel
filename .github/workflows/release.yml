@@ -15,9 +15,9 @@ jobs:
   windows-exe:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: '3.12'
           cache: pip
@@ -39,7 +39,7 @@ jobs:
           "$hash  NetSentinel.exe" | Out-File -Encoding ascii dist\NetSentinel.exe.sha256
           Get-Item dist\NetSentinel.exe | Format-Table Name, Length
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: NetSentinel-exe
           path: |
