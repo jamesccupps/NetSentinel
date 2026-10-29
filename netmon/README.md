@@ -17,6 +17,7 @@ apply.
 ## Try it
 
 ```
+pip install pyyaml scapy          # all it needs
 python -m netmon                  # what there is
 python -m netmon analyze --profile netmon/profiles/example-site.yaml \
                          --unifi flows.csv --pcap capture.pcapng
