@@ -142,6 +142,22 @@ function ackButton(a) {
   }, 'Acknowledge');
 }
 
+function verdictButtons(a) {
+  const mine = (a.evidence || {}).your_verdict;
+  if (mine) return h('span', { class: 'acked-tag' }, mine === 'false_positive' ? 'false positive' : 'real');
+  if (!overview || !overview.controls || a.id == null) return null;
+  const send = (verdict) => (e) => {
+    e.stopPropagation();
+    if (verdict === 'false_positive' &&
+        !confirm(`Never alert on ${a.rule_id} for this host or domain again?`)) return;
+    control(`/api/alerts/verdict?id=${encodeURIComponent(a.id)}&verdict=${verdict}`, refreshCurrent);
+  };
+  return [
+    h('button', { type: 'button', class: 'ack secondary', onclick: send('real') }, 'Real'),
+    h('button', { type: 'button', class: 'ack secondary', onclick: send('false_positive') }, 'False positive'),
+  ];
+}
+
 function alertItem(a) {
   const key = a.id || `${a.timestamp}|${a.rule_id}|${a.title}`;
   const evidence = h('pre', { hidden: !expanded.has(key) }, JSON.stringify(a.evidence || {}, null, 2));
@@ -159,6 +175,7 @@ function alertItem(a) {
     h('span', { class: `badge ${a.severity}` }, a.severity),
     h('span', { class: 'title' }, a.title),
     h('span', { class: 'time' }, a.time_str || ''),
+    verdictButtons(a),
     ackButton(a)),
   a.description ? h('div', { class: 'desc' }, a.description) : null,
   h('div', { class: 'meta' }, [where, a.rule_id, a.category].filter(Boolean).join('  ·  ')),
@@ -210,6 +227,8 @@ async function refreshOverview() {
   const rate = Number(o.capture.sample_rate || 1);
   const facts = [
     ['Monitoring', o.monitoring ? 'Yes' : 'No'],
+    ['Review mode', o.review && o.review.enabled ? 'Recording' : 'Off'],
+    ['Suppressed by your verdicts', fmtNum(o.suppressed_alerts)],
     ['Uptime', o.monitoring ? fmtDuration(o.uptime_sec) : '—'],
     ['Alerts per minute', fmtNum(o.alerts.per_minute)],
     ['Open incidents', fmtNum(o.incidents_active)],
@@ -617,7 +636,26 @@ async function control(path, after) {
   }
 }
 
+async function buildBundle() {
+  const button = $('build-bundle');
+  button.disabled = true;
+  button.textContent = 'Building…';
+  try {
+    const r = await api('/api/review/bundle', { method: 'POST' });
+    $('bundle-result').hidden = false;
+    $('bundle-result').textContent =
+      `Bundle ready: ${r.alerts} alerts in ${r.groups} groups, ${r.digests} traffic digests, ` +
+      `${Math.round(r.bytes / 1024)} KB, ${r.masked} values masked. Upload this zip to Claude: ${r.zip}`;
+  } catch (e) {
+    toast(e.message);
+  } finally {
+    button.disabled = false;
+    button.textContent = 'Build review bundle';
+  }
+}
+
 function renderControls(o) {
+  $('build-bundle').hidden = !(o.controls && o.review && o.review.enabled);
   $('ack-all').hidden = !o.controls;
   const toggle = $('monitor-toggle');
   toggle.hidden = !o.controls;
@@ -679,6 +717,7 @@ document.addEventListener('DOMContentLoaded', () => {
   $('device-search').addEventListener('input', (e) => { deviceView.search = e.target.value; renderDevices(); });
   $('monitor-toggle').addEventListener('click', toggleMonitoring);
   $('ack-all').addEventListener('click', () => control('/api/alerts/ack-all', refreshCurrent));
+  $('build-bundle').addEventListener('click', buildBundle);
   setUpScan();
   window.addEventListener('hashchange', show);
   show();

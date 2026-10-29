@@ -73,6 +73,9 @@ class _StubApp:
         self.device_learner = self._Devices()
         self.can_start = True
         self.last_start_error = ''
+        self.verdicts = []
+        self.verdict_has_no_subject = False
+        self.review_on = True
 
     def start_monitoring(self):
         if not self.can_start:
@@ -83,6 +86,23 @@ class _StubApp:
 
     def stop_monitoring(self):
         self.capture_engine.is_running = False
+
+    def record_verdict(self, alert_id, verdict, note=''):
+        if verdict not in ('real', 'false_positive'):
+            raise ValueError(verdict)
+        if not any(a.id == alert_id for a in self.alert_manager.items):
+            raise KeyError(alert_id)
+        if self.verdict_has_no_subject:
+            raise LookupError('This alert names no host or domain to tie a verdict to.')
+        self.verdicts.append((alert_id, verdict))
+        return ({'rule_id': 'SYN-FLOOD', 'kind': 'src_ip', 'value': '203.0.113.9'}
+                if verdict == 'false_positive' else None)
+
+    def build_review_bundle(self, **options):
+        if not self.review_on:
+            raise FileNotFoundError('No alerts recorded yet.')
+        return {'folder': 'f', 'zip': 'f.zip', 'alerts': 4, 'groups': 4, 'digests': 0,
+                'files': 3, 'bytes': 1000, 'masked': 0}
 
     def get_dashboard_data(self):
         return {
@@ -470,6 +490,26 @@ class TestControls(_ApiTestCase):
     def test_controls_take_no_body(self):
         self.assertEqual(self.post('/api/monitoring/stop', b'{}')[0], 400)
         self.assertTrue(self.app.capture_engine.is_running)
+
+    def test_a_verdict_from_the_browser(self):
+        alert = self.app.alert_manager.items[0]
+        status, reply = self.post(f'/api/alerts/verdict?id={alert.id}&verdict=false_positive')
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(reply)['suppressing']['value'], '203.0.113.9')
+        self.assertEqual(self.app.verdicts, [(alert.id, 'false_positive')])
+        self.assertEqual(self.post('/api/alerts/verdict?id=999999&verdict=real')[0], 404)
+        self.assertEqual(self.post(f'/api/alerts/verdict?id={alert.id}&verdict=maybe')[0], 400)
+        self.app.verdict_has_no_subject = True
+        self.assertEqual(self.post(
+            f'/api/alerts/verdict?id={alert.id}&verdict=false_positive')[0], 409)
+
+    def test_a_review_bundle_from_the_browser(self):
+        status, reply = self.post('/api/review/bundle')
+        self.assertEqual((status, json.loads(reply)['zip']), (201, 'f.zip'))
+        self.app.review_on = False
+        status, reply = self.post('/api/review/bundle')
+        self.assertEqual(status, 409)
+        self.assertIn('No alerts', json.loads(reply)['error'])
 
     def test_the_overview_says_whether_controls_work(self):
         self.assertTrue(self.get_json('/api/overview')['controls'])

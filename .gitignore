@@ -66,3 +66,6 @@ captures/
 # UniFi exports and other site data pulled in for offline analysis.
 netmon/data/
 *.flows.csv
+
+# Claude Code local state (agent worktrees, settings)
+.claude/

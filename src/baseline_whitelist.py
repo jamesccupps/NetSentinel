@@ -28,7 +28,128 @@ import logging
 import threading
 from collections import Counter
 
+from src.public_suffix import registrable_domain
+
 logger = logging.getLogger("NetSentinel.BaselineWL")
+
+
+def _field(alert, name):
+    """Read a field from an Alert or from its to_dict() form."""
+    if isinstance(alert, dict):
+        return alert.get(name)
+    return getattr(alert, name, None)
+
+
+def alert_subjects(alert):
+    """
+    What an alert is about, most specific first: (kind, value) pairs.
+
+    Domains come only from what the traffic itself said (SNI, the DNS query), not
+    from destination_domains, which is a guess from recent lookups and can name an
+    unrelated site.
+    """
+    evidence = _field(alert, 'evidence') or {}
+    subjects = []
+    for key in ('tls_sni', 'dns_query', 'query', 'domain'):
+        name = evidence.get(key) if isinstance(evidence, dict) else None
+        if isinstance(name, str) and '.' in name:
+            name = name.lower().strip('.')
+            subjects.append(('domain', registrable_domain(name) or name))
+            break
+    for kind in ('dst_ip', 'src_ip'):
+        ip = _field(alert, kind)
+        if ip:
+            subjects.append((kind, ip))
+    return subjects
+
+
+class ConfirmedFalsePositives:
+    """
+    Alerts a person marked as false positives, by rule and subject.
+
+    Unlike learned entries these never expire: someone decided. Kept in their own
+    file and re-read when it changes, so a verdict recorded from the command line
+    reaches a running NetSentinel without a restart, and the running app's saves
+    cannot overwrite it.
+    """
+
+    def __init__(self, path):
+        self.path = path
+        self._lock = threading.Lock()
+        self._entries = {}
+        self._mtime = None
+        self._reload()
+
+    @staticmethod
+    def key(rule_id, kind, value):
+        return f"{rule_id}|{kind}|{value}"
+
+    def add(self, alert, note='', review_id=''):
+        """Confirm an alert as a false positive. None if it names nothing to match."""
+        subjects = alert_subjects(alert)
+        if not subjects:
+            return None
+        kind, value = subjects[0]
+        rule_id = _field(alert, 'rule_id') or ''
+        entry = {'rule_id': rule_id, 'kind': kind, 'value': value,
+                 'note': str(note or '')[:500], 'review_id': review_id,
+                 'added': time.time()}
+        with self._lock:
+            self._reload()
+            self._entries[self.key(rule_id, kind, value)] = entry
+            self._save()
+        logger.info("Confirmed false positive: %s for %s %s", rule_id, kind, value)
+        return entry
+
+    def remove(self, key):
+        with self._lock:
+            self._reload()
+            if self._entries.pop(key, None) is None:
+                return False
+            self._save()
+            return True
+
+    def entries(self):
+        with self._lock:
+            self._reload()
+            return sorted(self._entries.values(), key=lambda e: e['added'])
+
+    def matches(self, alert):
+        """The entry that suppresses this alert, or None."""
+        with self._lock:
+            self._reload()
+            if not self._entries:
+                return None
+            rule_id = _field(alert, 'rule_id') or ''
+            for kind, value in alert_subjects(alert):
+                entry = self._entries.get(self.key(rule_id, kind, value))
+                if entry is not None:
+                    return entry
+        return None
+
+    def _reload(self):
+        try:
+            mtime = os.stat(self.path).st_mtime
+        except OSError:
+            return
+        if mtime == self._mtime:
+            return
+        try:
+            with open(self.path, encoding='utf-8') as f:
+                data = json.load(f)
+            self._entries = {self.key(e['rule_id'], e['kind'], e['value']): e
+                             for e in data if isinstance(e, dict) and 'rule_id' in e}
+            self._mtime = mtime
+        except (OSError, ValueError, KeyError) as e:
+            logger.error("Could not read confirmed false positives: %s", e)
+
+    def _save(self):
+        from src.config import atomic_write_json
+        atomic_write_json(self.path, list(self._entries.values()), indent=1)
+        try:
+            self._mtime = os.stat(self.path).st_mtime
+        except OSError:
+            pass
 
 
 class BaselineWhitelist:
@@ -66,6 +187,8 @@ class BaselineWhitelist:
         from src.config import DB_DIR
         self._db_path = os.path.join(DB_DIR, "baseline_whitelist.json")
         self._load()
+        self.confirmed = ConfirmedFalsePositives(
+            os.path.join(DB_DIR, "confirmed_false_positives.json"))
 
         # If we have existing data, check if learning is complete
         if self._domains:
@@ -157,9 +280,11 @@ class BaselineWhitelist:
         if domain in self._user_dga_exact or base in self._user_dga_exact:
             return True
 
-        # Check user-configured suffix matches
+        # Check user-configured suffix matches, on a label boundary: a bare
+        # endswith let "ample.com" vouch for "example.com".
         for suffix in self._user_dga_suffixes:
-            if domain.endswith(suffix) or base.endswith(suffix):
+            suffix = suffix.lower().strip('.')
+            if suffix and (domain == suffix or domain.endswith('.' + suffix)):
                 return True
 
         with self._lock:
@@ -222,19 +347,25 @@ class BaselineWhitelist:
                 )) if self.is_learning else 0,
             }
 
+    def confirm_false_positive(self, alert, note='', review_id=''):
+        """Never alert on this rule for this alert's subject again. See ConfirmedFalsePositives."""
+        return self.confirmed.add(alert, note=note, review_id=review_id)
+
+    def suppresses(self, alert):
+        """The confirmed false positive matching this alert, or None."""
+        return self.confirmed.matches(alert)
+
     @staticmethod
     def _base_domain(domain):
-        """Extract the base domain (registrable domain) from a full domain."""
-        parts = domain.lower().strip('.').split('.')
-        if len(parts) <= 2:
-            return domain.lower().strip('.')
-        # Handle common multi-part TLDs
-        multi_tlds = {'co.uk', 'co.jp', 'com.au', 'co.nz', 'co.in', 'com.br'}
-        if len(parts) >= 3:
-            last_two = f"{parts[-2]}.{parts[-1]}"
-            if last_two in multi_tlds:
-                return '.'.join(parts[-3:])
-        return '.'.join(parts[-2:])
+        """
+        The registrable domain: what one owner controls.
+
+        It was the last two labels, with six two-part suffixes special-cased, so
+        learning one site under .co.za, or one tenant of github.io or duckdns.org,
+        whitelisted every other one.
+        """
+        domain = domain.lower().strip('.')
+        return registrable_domain(domain) or domain
 
     def save(self):
         """Persist whitelist to disk."""
@@ -280,7 +411,7 @@ class BaselineWhitelist:
         if not os.path.exists(self._db_path):
             return
         try:
-            with open(self._db_path) as f:
+            with open(self._db_path, encoding='utf-8') as f:
                 data = json.load(f)
 
             self.learning_start = data.get('learning_start', time.time())

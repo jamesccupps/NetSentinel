@@ -58,13 +58,13 @@ class AlertManager:
         self._autosave_interval = 60  # Flush alert history at most once a minute
 
     def add_alert(self, alert):
-        """Add a new alert to the store."""
+        """Add a new alert to the store. Returns whether it was kept."""
         severity_order = {'LOW': 0, 'MEDIUM': 1, 'HIGH': 2, 'CRITICAL': 3}
         min_level = severity_order.get(self.severity_filter, 0)
         alert_level = severity_order.get(alert.severity, 0)
 
         if alert_level < min_level:
-            return  # Below filter threshold
+            return False  # Below filter threshold
 
         with self._lock:
             self._alerts.appendleft(alert)
@@ -101,6 +101,15 @@ class AlertManager:
             if now - self._last_sound_time >= self._sound_cooldown:
                 self._last_sound_time = now
                 self._play_sound()
+        return True
+
+    def get_alert(self, alert_id):
+        """The stored alert with this id, or None."""
+        with self._lock:
+            for alert in self._alerts:
+                if alert.id == alert_id:
+                    return alert
+        return None
 
     def register_listener(self, callback):
         """Register a callback for new alerts."""

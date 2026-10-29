@@ -54,7 +54,7 @@ Endpoints
          /api/scan/start?id=, /api/scan/cancel?id=
                           upload files and scan them (token required)
     POST /api/monitoring/start, /api/monitoring/stop, /api/alerts/ack?id=,
-         /api/alerts/ack-all
+         /api/alerts/ack-all, /api/alerts/verdict?id=&verdict=, /api/review/bundle
                           controls (token required, loopback binds only)
 """
 
@@ -294,6 +294,8 @@ class HeadlessServer:
             '/api/monitoring/stop': self._post_monitoring_stop,
             '/api/alerts/ack': self._post_alert_ack,
             '/api/alerts/ack-all': self._post_alerts_ack_all,
+            '/api/alerts/verdict': self._post_alert_verdict,
+            '/api/review/bundle': self._post_review_bundle,
         }
 
     @property
@@ -394,6 +396,8 @@ class HeadlessServer:
                 'packets_captured', 'bytes_captured', 'packets_per_sec', 'bytes_per_sec',
                 'flows_active', 'packets_dropped', 'sample_rate')},
             'resources': data.get('resources') or {'available': False},
+            'review': data.get('review') or {'enabled': False},
+            'suppressed_alerts': data.get('suppressed_alerts', 0),
             'alerts': {
                 'total': alerts.get('total', 0),
                 'unacknowledged': alerts.get('unacknowledged', 0),
@@ -488,6 +492,34 @@ class HeadlessServer:
         self._control(length)
         self.app.alert_manager.acknowledge_all()
         return {'acknowledged': 'all'}, 200
+
+    def _post_alert_verdict(self, params, body, length):
+        """?id=&verdict=real|false_positive. A false positive stops that rule for that subject."""
+        self._control(length)
+        try:
+            alert_id = int(_str_param(params, 'id') or '')
+        except ValueError:
+            raise RequestRefused('Which alert? Pass ?id=.', 400) from None
+        verdict = _str_param(params, 'verdict')
+        try:
+            entry = self.app.record_verdict(alert_id, verdict)
+        except KeyError:
+            raise RequestRefused('No alert with that id.', 404) from None
+        except ValueError:
+            raise RequestRefused('verdict must be real or false_positive.', 400) from None
+        except LookupError as e:
+            raise RequestRefused(str(e), 409) from None
+        return {'id': alert_id, 'verdict': verdict,
+                'suppressing': entry and {'rule_id': entry['rule_id'], 'kind': entry['kind'],
+                                          'value': entry['value']}}, 200
+
+    def _post_review_bundle(self, params, body, length):
+        self._control(length)
+        try:
+            result = self.app.build_review_bundle()
+        except FileNotFoundError as e:
+            raise RequestRefused(str(e), 409) from None
+        return result, 201
 
     # ─── Routes ──────────────────────────────────────────────────────────
 

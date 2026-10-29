@@ -87,6 +87,9 @@ class PcapWriter:
         self._record_path = None
         self._record_packets = 0
         self._record_start = 0
+        self._record_dir = self.output_dir
+        self._record_budget = None      # bytes; None means prune by file count
+        self._record_max_age = None     # seconds
         self._max_file_mb = config.get('capture', 'pcap_max_file_mb', default=100)
         self.link_type = config.get('capture', 'pcap_link_type',
                                     default=PCAP_LINKTYPE_ETHERNET)
@@ -165,13 +168,16 @@ class PcapWriter:
             logger.error("Failed to export PCAP: %s", e)
             return None
 
-    def export_for_alert(self, alert, seconds=60):
+    def export_for_alert(self, alert, seconds=60, directory=None):
         """
         Save the packets around an alert so it can be opened in Wireshark.
 
         The ring buffer already holds recent traffic, so the evidence for an alert
         is usually still in memory at the moment it fires — this just writes it out
         before it ages away. Returns the path, or None if there was nothing to save.
+
+        With a directory (review mode), the file goes there and its caller prunes
+        it; otherwise the newest pcap_max_alert_files are kept.
         """
         cutoff = time.time() - seconds
         endpoints = {ip for ip in (getattr(alert, 'src_ip', ''),
@@ -195,7 +201,7 @@ class PcapWriter:
         safe_rule = re.sub(r'[^A-Za-z0-9_.-]', '_', str(getattr(alert, 'rule_id', 'alert')))
         filename = (f"alert_{safe_rule}_{getattr(alert, 'id', 0)}_"
                     f"{datetime.now():%Y%m%d_%H%M%S}.pcap")
-        filepath = os.path.join(self.output_dir, filename)
+        filepath = os.path.join(directory or self.output_dir, filename)
 
         try:
             with open(filepath, 'wb') as f:
@@ -204,7 +210,8 @@ class PcapWriter:
                     self._write_packet_record(f, ts, raw)
             logger.info("Saved %d packets for %s to %s",
                         len(packets), safe_rule, filepath)
-            self._prune_alert_captures()
+            if directory is None:
+                self._prune_alert_captures()
             return filepath
         except OSError as e:
             logger.error("Could not save alert capture: %s", e)
@@ -223,8 +230,15 @@ class PcapWriter:
         except OSError as e:
             logger.debug("Alert capture pruning error: %s", e)
 
-    def start_recording(self, filename=None):
-        """Start continuous PCAP recording."""
+    def start_recording(self, filename=None, directory=None, budget_bytes=None,
+                        max_age_sec=None):
+        """
+        Start continuous PCAP recording.
+
+        With a byte budget or a maximum age (review mode's rolling capture), old
+        files in the directory are pruned by age, then by size, instead of by
+        pcap_max_files.
+        """
         if self._recording:
             return self._record_path
 
@@ -232,7 +246,11 @@ class PcapWriter:
             ts = datetime.now().strftime('%Y%m%d_%H%M%S')
             filename = f"netsentinel_recording_{ts}.pcap"
 
-        filepath = os.path.join(self.output_dir, filename)
+        self._record_dir = directory or self.output_dir
+        self._record_budget = budget_bytes
+        self._record_max_age = max_age_sec
+        os.makedirs(self._record_dir, exist_ok=True)
+        filepath = os.path.join(self._record_dir, filename)
 
         try:
             self._record_file = open(filepath, 'wb')
@@ -242,6 +260,7 @@ class PcapWriter:
             self._record_start = time.time()
             self._recording = True
             logger.info("Started PCAP recording: %s", filepath)
+            self._prune_old_captures()   # what the last run left over the budget
             return filepath
         except Exception as e:
             logger.error("Failed to start recording: %s", e)
@@ -283,8 +302,8 @@ class PcapWriter:
         packet raised into a debug-level except and recording died silently forever.
         """
         old = self._record_file
-        ts = datetime.now().strftime('%Y%m%d_%H%M%S')
-        new_path = os.path.join(self.output_dir, f"netsentinel_recording_{ts}.pcap")
+        ts = datetime.now().strftime('%Y%m%d_%H%M%S_%f')
+        new_path = os.path.join(self._record_dir, f"netsentinel_recording_{ts}.pcap")
         try:
             new_file = open(new_path, 'wb')
             self._write_pcap_header(new_file)
@@ -311,18 +330,37 @@ class PcapWriter:
         keep = self.config.get('capture', 'pcap_max_files', default=20)
         try:
             files = [
-                os.path.join(self.output_dir, f)
-                for f in os.listdir(self.output_dir)
+                os.path.join(self._record_dir, f)
+                for f in os.listdir(self._record_dir)
                 if f.startswith('netsentinel_recording_') and f.endswith('.pcap')
             ]
             files.sort(key=os.path.getmtime, reverse=True)
-            for path in files[keep:]:
+            if self._record_budget is None and self._record_max_age is None:
+                doomed = files[keep:]
+            else:
+                doomed = self._over_budget(files)
+            for path in doomed:
                 if path == self._record_path:
                     continue
                 os.remove(path)
                 logger.info("Pruned old capture %s", os.path.basename(path))
         except OSError as e:
             logger.debug("Capture pruning error: %s", e)
+
+    def _over_budget(self, newest_first):
+        """Files past the age limit, then the oldest until the rest fit the budget."""
+        doomed, kept, total = [], [], 0
+        now = time.time()
+        for path in newest_first:
+            size, mtime = os.path.getsize(path), os.path.getmtime(path)
+            too_old = self._record_max_age and now - mtime > self._record_max_age
+            too_big = self._record_budget and total + size > self._record_budget and kept
+            if path != self._record_path and (too_old or too_big):
+                doomed.append(path)
+            else:
+                kept.append(path)
+                total += size
+        return doomed
 
     def _write_pcap_header(self, f):
         """

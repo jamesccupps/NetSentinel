@@ -644,6 +644,16 @@ class NetSentinelGUI:
                   command=self._open_dashboard
         ).pack(side='left', padx=(0, 8))
 
+        review_btn = tk.Menubutton(ctrl_frame, text="🧾  Review", font=('Segoe UI', 9),
+                                   bg=COLORS['bg_input'], fg=COLORS['text'],
+                                   relief='flat', cursor='hand2', padx=10)
+        review_menu = tk.Menu(review_btn, tearoff=0)
+        review_menu.add_command(label="Build review bundle", command=self._review_build)
+        review_menu.add_command(label="Import verdicts…", command=self._review_import)
+        review_menu.add_command(label="Open review folder", command=self._review_open_folder)
+        review_btn.config(menu=review_menu)
+        review_btn.pack(side='left', padx=(0, 8))
+
         # About button
         tk.Button(ctrl_frame, text="ℹ  About", font=('Segoe UI', 8),
                   bg=COLORS['bg_input'], fg=COLORS['text_dim'],
@@ -1210,6 +1220,85 @@ class NetSentinelGUI:
                 "--no-api was given; check the log for why it could not start.")
             return
         webbrowser.open(server.url)
+
+    # ─── Review mode ─────────────────────────────────────────────────────
+
+    def _review_folder(self):
+        from src.review import default_directory
+        review = self.app.review
+        return review.directory if review is not None else default_directory()
+
+    def _review_build(self):
+        """Build in the background; a big review folder takes a few seconds."""
+        result = {}
+
+        def work():
+            try:
+                result['ok'] = self.app.build_review_bundle()
+            except Exception as e:      # shown to the user, whatever it was
+                result['error'] = e
+
+        thread = threading.Thread(target=work, daemon=True, name="ReviewBundle")
+        thread.start()
+        self._statusbar_text.config(text="Building the review bundle...")
+
+        def poll():
+            if thread.is_alive():
+                self.root.after(200, poll)
+                return
+            if 'error' in result:
+                self._statusbar_text.config(text="The review bundle was not built.")
+                messagebox.showwarning("Review bundle", str(result['error']))
+                return
+            r = result['ok']
+            self._statusbar_text.config(text=f"Review bundle: {r['zip']}")
+            if messagebox.askyesno(
+                    "Review bundle",
+                    f"{r['alerts']} alerts in {r['groups']} groups, {r['digests']} traffic "
+                    f"digests, {r['bytes'] // 1024} KB. {r['masked']} values were masked.\n\n"
+                    f"{r['zip']}\n\nUpload the zip to Claude and ask it which alerts are "
+                    "real; its README says how to answer.\n\nOpen the folder?"):
+                self._open_path(os.path.dirname(r['zip']))
+        poll()
+
+    def _review_import(self):
+        from src.review import import_verdicts
+        path = filedialog.askopenfilename(
+            title="Open the answer (the JSON the bundle's README asks for)",
+            filetypes=[('Answer', '*.json *.txt *.md'), ('All files', '*.*')])
+        if not path:
+            return
+        try:
+            with open(path, encoding='utf-8-sig') as f:
+                result = import_verdicts(self._review_folder(), f.read(),
+                                         self.app.baseline_whitelist.confirmed)
+        except (OSError, ValueError) as e:
+            messagebox.showerror("Import verdicts", f"Could not import it: {e}")
+            return
+        lines = [f"{result['false_positive']} false positives (no longer alerted on), "
+                 f"{result['real']} real."]
+        if result['unknown_ids']:
+            lines.append(f"{len(result['unknown_ids'])} ids were not found in this review folder.")
+        if result['no_subject']:
+            lines.append(f"{len(result['no_subject'])} false positives name no host or "
+                         "domain, so nothing is suppressed for them.")
+        messagebox.showinfo("Import verdicts", "\n".join(lines))
+
+    def _review_open_folder(self):
+        folder = self._review_folder()
+        os.makedirs(folder, exist_ok=True)
+        self._open_path(folder)
+
+    @staticmethod
+    def _open_path(path):
+        import subprocess
+        import sys as _sys
+        if _sys.platform == 'win32':
+            os.startfile(path)
+        elif _sys.platform == 'darwin':
+            subprocess.Popen(['open', path])
+        else:
+            subprocess.Popen(['xdg-open', path])
 
     def _pcap_set_busy(self, busy):
         state = 'disabled' if busy else 'normal'
@@ -2455,6 +2544,19 @@ class NetSentinelGUI:
         self._add_setting_toggle(
             perf_card, 'performance.low_priority',
             'Run at lower priority, so your work comes first', False)
+
+        review_card = Card(scroll_frame, title="REVIEW MODE (applies at next start)")
+        review_card.pack(fill='x', padx=8, pady=(0, 8))
+        self._add_setting_toggle(
+            review_card, 'review.enabled',
+            'Save the traffic behind every alert, for a review bundle', False)
+        self._add_setting_toggle(
+            review_card, 'review.pseudonymise_lan',
+            'Bundles replace LAN addresses with labels', False)
+        self._add_setting_row(review_card, 'review.directory',
+                              'Folder (blank: ~/.netsentinel/review)', '')
+        self._add_setting_row(review_card, 'review.capture_budget_mb',
+                              'Rolling capture budget (MB)', '2048')
 
         # Blacklist management
         bl_card = Card(scroll_frame, title="BLACKLISTED IPs (one per line)")
