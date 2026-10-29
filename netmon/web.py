@@ -21,6 +21,15 @@ they write, write atomically, and keep the previous version alongside. Writes
 require a token issued with the page and a same-origin check, so another page in
 the same browser cannot drive this one.
 
+Foreign Host headers
+--------------------
+While bound to loopback, a request whose Host header is not a loopback name is
+refused before anything is served. Without that, a page on any website can
+point its own hostname at 127.0.0.1 (DNS rebinding), read `/` as same-origin,
+and take the token off it — after which the token check protects nothing. A
+loopback bind is the only case where the legitimate names are knowable; bound
+anywhere else, the firewall is the boundary, as the warning says.
+
 Nothing here touches the network. It reads files and shows what is in them.
 """
 
@@ -55,6 +64,20 @@ _STATIC_TYPES = {'.html': 'text/html; charset=utf-8',
                  '.js': 'application/javascript; charset=utf-8',
                  '.svg': 'image/svg+xml'}
 
+#: The names a browser can legitimately use for a loopback listener. Anything
+#: else in the Host header, while bound to loopback, is a rebinding attempt.
+LOOPBACK_NAMES = frozenset({'127.0.0.1', 'localhost', '::1'})
+
+
+def _host_name(header):
+    """The name part of a Host header, without the port, lowercased."""
+    host = (header or '').strip().lower()
+    if host.startswith('['):
+        return host[1:host.find(']')] if ']' in host else host
+    # One colon is host:port. More than one is a bare IPv6 address, which a
+    # browser would have bracketed; it is compared as it stands.
+    return host.rsplit(':', 1)[0] if host.count(':') == 1 else host
+
 
 class _Handler(BaseHTTPRequestHandler):
 
@@ -77,9 +100,27 @@ class _Handler(BaseHTTPRequestHandler):
         finally:
             self._head_only = False
 
+    def _host_allowed(self):
+        """
+        Refuse a foreign Host header while bound to loopback.
+
+        Checked on every request, page and API alike: the page carries the
+        token, so serving it to a rebound hostname hands over the one thing the
+        write checks rely on.
+        """
+        allowed = self.server.netmon_app.allowed_hosts()
+        if allowed is None or _host_name(self.headers.get('Host')) in allowed:
+            return True
+        self._send_json({'error': 'unexpected Host header',
+                         'detail': 'this server answers only to a loopback name'},
+                        421)
+        return False
+
     # ─── GET ─────────────────────────────────────────────────────────────
 
     def do_GET(self):
+        if not self._host_allowed():
+            return
         parsed = urlparse(self.path)
         app = self.server.netmon_app
 
@@ -131,6 +172,9 @@ class _Handler(BaseHTTPRequestHandler):
         if raw is None:
             return self._refuse({'error': 'body shorter than Content-Length'}, 400)
 
+        if not self._host_allowed():
+            return
+
         if not app.allow_edit:
             return self._send_json(
                 {'error': 'editing is off',
@@ -140,7 +184,12 @@ class _Handler(BaseHTTPRequestHandler):
         # token is issued with the page; the Origin check catches the
         # form-submission case, where a token would not be readable anyway.
         origin = self.headers.get('Origin')
-        if origin and urlparse(origin).netloc != self.headers.get('Host'):
+        if origin is not None and (urlparse(origin).netloc.lower()
+                                   != (self.headers.get('Host') or '').lower()):
+            return self._send_json({'error': 'cross-origin request refused'}, 403)
+        # Browsers label a request another site initiated, whether or not they
+        # also send an Origin. A same-origin page never produces this value.
+        if (self.headers.get('Sec-Fetch-Site') or '').lower() == 'cross-site':
             return self._send_json({'error': 'cross-origin request refused'}, 403)
         if not secrets.compare_digest(
                 self.headers.get('X-Netmon-Token') or '', app.token):
@@ -312,7 +361,18 @@ class WebServer:
         self._httpd = self._thread = None
 
     def url(self):
-        return f'http://{self.host}:{self.port}/'
+        host = f'[{self.host}]' if ':' in self.host else self.host
+        return f'http://{host}:{self.port}/'
+
+    def allowed_hosts(self):
+        """
+        The Host names to accept, or None for any.
+
+        Only a loopback bind has a knowable answer. Bound to an address on a
+        management network, the names it is reached by are the site's business
+        and the firewall is the boundary.
+        """
+        return LOOPBACK_NAMES if self.host in LOOPBACK_NAMES else None
 
     # ─── Read routes ─────────────────────────────────────────────────────
 
