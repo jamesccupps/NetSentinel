@@ -176,6 +176,8 @@ class TestDirectory(_RingCase):
 
     def test_it_is_created_owner_only(self):
         """It holds packet payload."""
+        if os.name == 'nt':
+            self.skipTest('POSIX permission model only')
         target = os.path.join(self.scratch, 'new')
         ring = RingBuffer(target, profile())
         ring.ensure_directory()
@@ -362,6 +364,8 @@ class TestExtraction(_RingCase):
         self.assertGreater(result['packets'], 0)
 
     def test_the_extract_is_written_owner_only(self):
+        if os.name == 'nt':
+            self.skipTest('POSIX permission model only')
         result = self.ring.extract(self.base + 30, seconds=10)
         self.assertEqual(os.stat(result['path']).st_mode & 0o077, 0)
 

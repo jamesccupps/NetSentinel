@@ -171,7 +171,9 @@ class TestProcessedState(unittest.TestCase):
 
     def test_an_unwritable_state_directory_does_not_raise(self):
         """Failing to record progress is not a reason to stop working."""
-        processed = _Processed('/proc/cannot/write/here.json')
+        # Under a file, so it cannot be created anywhere. /proc/... only fails
+        # on Linux: on Windows it is C:\proc, and the test wrote there.
+        processed = _Processed(os.path.join(self.sample, 'here.json'))
         processed.add(self.sample)          # logs, does not raise
 
 
@@ -236,8 +238,9 @@ class TestTailing(unittest.TestCase):
         before = os.stat(self.path).st_ino
         os.remove(self.path)
         self.append('y' * 300)
-        self.assertEqual(os.stat(self.path).st_ino, before,
-                         'this test only means something if the inode is reused')
+        if os.stat(self.path).st_ino != before:
+            # NTFS, for one, never hands the old file ID back.
+            self.skipTest('this filesystem did not reuse the inode')
         with self.assertLogs('netmon.service', level='INFO'):
             self.assertEqual(list(tail.lines()), ['y' * 300])
 
@@ -249,6 +252,29 @@ class TestTailing(unittest.TestCase):
         for n in range(10):
             self.append(f'line {n}')
             self.assertEqual(list(tail.lines()), [f'line {n}'])
+
+    def test_crlf_lines_are_counted_in_bytes(self):
+        """
+        Text mode read "\\r\\n" as "\\n", one byte short a line, so the next pass
+        started on the leftover "\\n" and reported an empty line.
+        """
+        with open(self.path, 'wb') as handle:
+            handle.write(b'one\r\n')
+        tail = _Tail(self.path)
+        self.assertEqual(list(tail.lines()), ['one'])
+        with open(self.path, 'ab') as handle:
+            handle.write(b'two\r\n')
+        self.assertEqual(list(tail.lines()), ['two'])
+
+    def test_a_bad_byte_does_not_move_the_position(self):
+        """One bad byte decodes to three bytes of U+FFFD; counting those overshot."""
+        with open(self.path, 'wb') as handle:
+            handle.write(b'bad \xff\xfe\n')
+        tail = _Tail(self.path)
+        self.assertEqual(len(list(tail.lines())), 1)
+        with open(self.path, 'ab') as handle:
+            handle.write(b'next\n')
+        self.assertEqual(list(tail.lines()), ['next'])
 
     def test_truncation_in_place_is_survived(self):
         self.append('a' * 100)
@@ -334,8 +360,8 @@ class TestTailPositionSurvivesRestarts(unittest.TestCase):
         self.assertEqual(list(self.tail().lines()), ['y' * 300])
 
     def test_an_unwritable_state_path_does_not_raise(self):
-        tail = _Tail(self.path, '/proc/cannot/write/here.json')
         self.append('one')
+        tail = _Tail(self.path, os.path.join(self.path, 'here.json'))   # under a file
         with self.assertLogs('netmon.service', level='WARNING'):
             self.assertEqual(list(tail.lines()), ['one'])
 

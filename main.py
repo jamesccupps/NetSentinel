@@ -33,7 +33,11 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     handlers=[
-        logging.FileHandler(os.path.join(LOG_DIR, f"netsentinel_{datetime.now():%Y%m%d}.log")),
+        # Windows would otherwise use its ANSI code page, and a line holding a
+        # character outside it (an international domain name, a file name) is
+        # dropped by logging rather than written.
+        logging.FileHandler(os.path.join(LOG_DIR, f"netsentinel_{datetime.now():%Y%m%d}.log"),
+                            encoding='utf-8'),
         logging.StreamHandler()
     ]
 )
@@ -171,6 +175,7 @@ def show_splash():
 def parse_args(argv=None):
     """Command line. Defaults reproduce the previous behaviour exactly."""
     import argparse
+    from src.headless import DEFAULT_PORT
     parser = argparse.ArgumentParser(
         prog='netsentinel',
         description='AI-powered network monitor and intrusion detection system.',
@@ -182,8 +187,8 @@ def parse_args(argv=None):
                         help='API bind address (default: 127.0.0.1). Binding '
                              'publicly exposes captured credentials and alert '
                              'history — put it behind a firewall.')
-    parser.add_argument('--port', type=int, default=8787,
-                        help='API port (default: 8787; 0 asks the OS to choose)')
+    parser.add_argument('--port', type=int, default=DEFAULT_PORT,
+                        help=f'API port (default: {DEFAULT_PORT}; 0 asks the OS to choose)')
     parser.add_argument('--no-api', action='store_true',
                         help='no HTTP listener at all: no browser dashboard, no API')
     parser.add_argument('--version', action='version',

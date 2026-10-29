@@ -34,7 +34,7 @@ TLS stack stands out even when everything it sends is encrypted.
 
 **PCAP Export** — Ring buffer of raw packets with on-demand "save last 5 minutes" export and continuous recording with auto-rotation. Serious alerts automatically save the traffic that triggered them, narrowed to the hosts involved, so every CRITICAL finding opens in Wireshark.
 
-**Browser dashboard** — NetSentinel serves a dashboard at `http://127.0.0.1:8787/` while it runs: live traffic and bandwidth charts, protocol and top-talker breakdowns, alerts with severity filters and evidence, devices, incidents, and file scanning. **Open in Browser** in the desktop app opens it; `--headless` runs the same dashboard with no window, as a server.
+**Browser dashboard** — NetSentinel serves a dashboard at `http://127.0.0.1:8737/` while it runs: live traffic and bandwidth charts, protocol and top-talker breakdowns, alerts with severity filters and evidence, devices, incidents, and file scanning. **Open in Browser** in the desktop app opens it; `--headless` runs the same dashboard with no window, as a server.
 
 **Scan files for leaks** — drop any files, folders or zips on the dashboard's **Scan Files** page, or use **Scan Files / Zips** and **Scan Folder** in the desktop app's File Analyzer tab. Logs, configs, documents (Word, Excel, PDF), exports and packet captures all work. You get every IP address, domain, URL, email and MAC address in them, which files held each one, any the threat feeds know as bad, and every password, key, token or card number that looks leaked, masked, with file and line. Packet captures also get the full traffic analysis. Command line: `python -m src.batch_scan PATH... [--skip GLOB] [--json]`.
 
@@ -69,13 +69,13 @@ setup.bat
 
 ```bash
 python main.py                 # desktop interface
-python main.py --headless      # no GUI, read-only HTTP API on 127.0.0.1:8787
+python main.py --headless      # no GUI, read-only HTTP API on 127.0.0.1:8737
 python main.py --help
 ```
 
 ### Browser dashboard and headless mode
 
-The desktop app serves a browser dashboard at `http://127.0.0.1:8787/` (or the
+The desktop app serves a browser dashboard at `http://127.0.0.1:8737/` (or the
 next free port), and **Open in Browser** in its top bar opens it. The detection
 engine never needed a display, so it can also run as a sensor with no window at
 all — on a Raspberry Pi hanging off a SPAN port, in a container, or on a server —

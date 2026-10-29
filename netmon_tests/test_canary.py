@@ -16,6 +16,7 @@ inbound connection from a network an attacker may already be on.
 import json
 import os
 import shutil
+import socket
 import sys
 import tempfile
 import time
@@ -513,6 +514,41 @@ class TestListenerOverHttp(unittest.TestCase):
 
     def test_an_unknown_path_is_404(self):
         self.assertEqual(self.post(path='/something')[0], 404)
+
+    def test_a_refusal_reaches_the_client_whole(self):
+        """
+        These are answered with the body unread, and closing on an unread body
+        made Windows reset the connection, which threw the answer away.
+        """
+        body = b'x' * (512 * 1024)        # over the cap, under what is drained
+        for path, expected in (('/something', 404), ('/canary', 413)):
+            with self.subTest(path=path):
+                request = urllib.request.Request(
+                    self.base + path, data=body, method='POST',
+                    headers={'X-Netmon-Token': TOKEN})
+                with self.assertRaises(urllib.error.HTTPError) as ctx:
+                    urllib.request.urlopen(request, timeout=5)
+                self.assertEqual(ctx.exception.code, expected)
+
+    def test_a_refused_body_is_not_read_as_the_next_request(self):
+        """The connection is kept alive, so an unread body used to be parsed next."""
+        event = json.dumps(record()).encode()
+        inner = (b'POST /canary HTTP/1.1\r\nHost: x\r\nX-Netmon-Token: '
+                 + TOKEN.encode() + b'\r\nContent-Length: '
+                 + str(len(event)).encode() + b'\r\n\r\n' + event)
+        outer = (b'POST /something HTTP/1.1\r\nHost: x\r\nContent-Length: '
+                 + str(len(inner)).encode() + b'\r\n\r\n' + inner)
+        with socket.create_connection(('127.0.0.1', self.port), timeout=5) as s:
+            s.sendall(outer)
+            replies = b''
+            while True:
+                chunk = s.recv(65536)
+                if not chunk:
+                    break
+                replies += chunk
+        self.assertEqual(replies.count(b'HTTP/1.1 '), 1)
+        self.assertTrue(replies.startswith(b'HTTP/1.1 404'))
+        self.assertEqual(self.listener.findings, [])
 
     def test_the_root_path_works_too(self):
         self.assertEqual(self.post(path='/')[0], 200)

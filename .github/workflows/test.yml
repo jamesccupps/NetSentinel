@@ -37,6 +37,34 @@ jobs:
       - name: Coverage report
         run: python -m coverage report --sort=cover
 
+  # The exe ships for Windows, and Windows broke code that passed here: files
+  # opened in the ANSI code page, POSIX file modes, and a socket closed with
+  # unread data resetting the connection. One version (the exe's) catches those.
+  test-windows:
+    runs-on: windows-latest
+    env:
+      # Only for the console, which is cp1252 when piped. Not PYTHONUTF8: that
+      # would also change open()'s default and hide the bugs this job is for.
+      PYTHONIOENCODING: utf-8
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install scapy psutil scikit-learn numpy cryptography pyyaml
+
+      - name: Unit and regression tests
+        run: python -m unittest discover -s . -p "test_*.py" -v
+
+      - name: Integration check
+        run: python tools/integration_check.py
+
   lint:
     runs-on: ubuntu-latest
     steps:

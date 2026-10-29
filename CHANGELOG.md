@@ -2,11 +2,11 @@
 
 ## v1.8.0 — A browser dashboard, scan any file for leaks, and a Windows download
 
-**1444 unit tests** (up from 384) plus 14 integration checks.
+**1456 unit tests** (up from 384) plus 14 integration checks.
 
 ### A dashboard in the browser
 
-NetSentinel now serves a dashboard at `http://127.0.0.1:8787/` whenever it runs,
+NetSentinel now serves a dashboard at `http://127.0.0.1:8737/` whenever it runs,
 and the desktop app's new **Open in Browser** button opens it. Overview (live
 traffic and bandwidth charts, protocols, top talkers, threat level, recent
 alerts), Alerts (severity filters, search, evidence on click), Devices, Incidents,
@@ -73,6 +73,23 @@ a rolling capture, a web UI, and acknowledge, snooze and maintenance mode. See
 - A UniFi timestamp with one or two fractional digits (`13:05:01.5Z`) did not parse
   on Python 3.10, and the row fell back to the local-time column, four hours out.
 - CI never installed PyYAML, so netmon's tests could not run there.
+- On Windows the dashboard could lose its own error messages. A refused upload
+  was answered before its body was read, and Windows resets a connection closed
+  with data unread, which threw the answer away: the browser showed a network
+  error instead of "another scan is running". A refusal is now read to the end,
+  for up to 2 seconds, before the connection closes. netmon's canary listener had
+  the same flaw and kept the connection open, so a refused body was then read as
+  a second request.
+- The log file was written in the Windows code page, and a line holding a
+  character outside it (an international domain name, a file name) was dropped.
+  It is UTF-8 now, and so is the File Analyzer's CSV export, which failed
+  outright on such a name.
+- netmon's canary-log tailer counted the bytes of decoded text: one short a line
+  for a log with Windows line endings, and over for every byte that is not UTF-8,
+  so it reported empty lines or skipped real ones. It counts the file's bytes.
+- The dashboard's port is 8737, not 8787, which localcast and RStudio Server use.
+- The tests now also run on Windows in CI. They only ran on Linux before, which is
+  how the above got through.
 
 ## v1.7.0 — Detection that survives evasion, and a sensor you can deploy
 

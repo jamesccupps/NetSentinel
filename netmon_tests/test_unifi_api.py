@@ -481,6 +481,8 @@ class TestWriting(unittest.TestCase):
 
     def test_it_is_written_owner_only(self):
         """It is a map of the network."""
+        if os.name == 'nt':
+            self.skipTest('POSIX permission model only')
         profile, _ = build_profile(dict(SAMPLE), 'Test Site')
         write_profile(profile, self.path)
         self.assertEqual(os.stat(self.path).st_mode & 0o077, 0)

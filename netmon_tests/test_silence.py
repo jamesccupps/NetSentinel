@@ -153,6 +153,8 @@ class TestRefusals(_Case):
 class TestTheStore(_Case):
 
     def test_it_persists_owner_only(self):
+        if os.name == 'nt':
+            self.skipTest('POSIX permission model only')
         self.store.add('maintenance', device='x')
         self.assertEqual(os.stat(self.path).st_mode & 0o077, 0)
         self.assertEqual(len(Silences(self.path, clock=lambda: NOW).active()), 1)

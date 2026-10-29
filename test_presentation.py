@@ -274,7 +274,7 @@ class TestGuiUsesTheSharedLogic(unittest.TestCase):
 
     def test_gui_delegates_rather_than_reimplementing(self):
         root = os.path.dirname(os.path.abspath(__file__))
-        with open(os.path.join(root, 'src', 'gui.py')) as f:
+        with open(os.path.join(root, 'src', 'gui.py'), encoding='utf-8') as f:
             source = f.read()
         self.assertIn('from src import presentation', source)
         self.assertIn('presentation.threat_level', source)
@@ -285,7 +285,7 @@ class TestGuiUsesTheSharedLogic(unittest.TestCase):
 
     def test_presentation_module_imports_no_gui_toolkit(self):
         root = os.path.dirname(os.path.abspath(__file__))
-        with open(os.path.join(root, 'src', 'presentation.py')) as f:
+        with open(os.path.join(root, 'src', 'presentation.py'), encoding='utf-8') as f:
             source = f.read()
         self.assertNotIn('import tkinter', source)
         self.assertNotIn('from tkinter', source)
