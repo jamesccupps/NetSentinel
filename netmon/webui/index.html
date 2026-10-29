@@ -7,7 +7,8 @@
 <link rel="stylesheet" href="/static/style.css">
 <link rel="icon" href="data:,">
 </head>
-<body data-token="{{TOKEN}}" data-editable="{{EDITABLE}}">
+<body data-token="{{TOKEN}}" data-editable="{{EDITABLE}}"
+      data-silences="{{SILENCES}}" data-summarise="{{SUMMARISE}}">
 
 <header>
   <h1>netmon</h1>
@@ -45,12 +46,40 @@
         <option value="">all</option>
         <option value="push">needs attention now</option>
         <option value="digest">daily report</option>
+        <option value="weekly">weekly</option>
       </select>
     </label>
     <label>Rule <select id="f-rule"><option value="">all</option></select></label>
     <input type="text" id="f-search" placeholder="filter by device or text…">
+    <label><input type="checkbox" id="f-snoozed"> show snoozed</label>
   </div>
+
+  <div id="silence-controls" class="toolbar" style="display:none">
+    <label>Reason <input type="text" id="s-reason" maxlength="200"
+      placeholder="why — it goes in the record"></label>
+    <label>Snooze for
+      <select id="s-hours">
+        <option value="1">1 hour</option>
+        <option value="4" selected>4 hours</option>
+        <option value="24">1 day</option>
+        <option value="72">3 days</option>
+        <option value="168">1 week</option>
+      </select>
+    </label>
+    <span id="s-status" class="note"></span>
+  </div>
+
   <div id="finding-list"></div>
+
+  <div id="silences-wrap" style="display:none">
+    <h3>In effect</h3>
+    <p class="note">
+      An acknowledgement stops one finding pushing and leaves it in the digest.
+      Maintenance stops pushes for a device or rule and leaves everything in
+      the digest. A snooze hides a device or rule completely, so it always ends.
+    </p>
+    <div id="silence-list"></div>
+  </div>
 </section>
 
 <!-- ─── Devices ──────────────────────────────────────────────────────── -->

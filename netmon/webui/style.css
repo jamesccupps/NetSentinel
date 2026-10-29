@@ -154,3 +154,19 @@ pre.out {
 
 .empty { color: var(--dim); padding: 40px 0; text-align: center; }
 .empty strong { display: block; color: var(--text); margin-bottom: 6px; }
+
+.finding .actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
+button.small {
+  background: var(--panel-2); color: var(--text); border: 1px solid var(--line);
+  border-radius: 6px; padding: 3px 10px; cursor: pointer; font: inherit;
+  font-size: 12.5px;
+}
+button.small:hover { border-color: var(--accent); }
+button.small:disabled { opacity: .5; cursor: default; }
+.badge.ack, .badge.maintenance { color: var(--ok); }
+.badge.snooze { color: var(--dim); }
+.finding.silenced { opacity: .75; }
+
+pre.payload { max-height: 50vh; overflow: auto; }
+.summary-item { margin: 8px 0; }
+.summary-item .why { color: var(--dim); }

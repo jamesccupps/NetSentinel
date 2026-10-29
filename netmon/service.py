@@ -54,7 +54,8 @@ class ServiceConfig:
                  unifi_ca='', unifi_insecure=False, unifi_site='default',
                  canary_log='', secrets='', web_host='127.0.0.1', web_port=0,
                  drift_interval=4 * 3600, prune_interval=3600,
-                 digest_hour=7, poll_interval=30, notify=True, dry_run=False):
+                 digest_hour=7, poll_interval=30, notify=True, dry_run=False,
+                 allow_edit=False):
         self.profile_path = profile_path
         self.rules_path = rules_path
         self.ring_dir = ring_dir
@@ -74,6 +75,9 @@ class ServiceConfig:
         self.poll_interval = int(poll_interval)
         self.notify = bool(notify)
         self.dry_run = bool(dry_run)
+        # The UI's editors and its acknowledge/snooze/maintenance buttons. Off
+        # by default, as for `netmon web`: the UI is read-only unless asked.
+        self.allow_edit = bool(allow_edit)
 
     @property
     def processed_path(self):
@@ -529,7 +533,8 @@ class Service:
                              analyzer=_LiveView(self),
                              silences_path=self.config.silences_path,
                              host=self.config.web_host,
-                             port=self.config.web_port)
+                             port=self.config.web_port,
+                             allow_edit=self.config.allow_edit)
         port = self.web.start()
         logger.info('UI on http://%s:%d/', self.config.web_host, port)
         return port
@@ -570,7 +575,9 @@ class _LiveView:
 
     @property
     def findings(self):
-        return self._service.recent
+        # Silences are applied as they stand now, not as they stood when each
+        # finding arrived: a snooze added later must hide what it covers.
+        return self._service.silences.visible(list(self._service.recent))
 
     @property
     def events_seen(self):
@@ -578,11 +585,11 @@ class _LiveView:
 
     def by_severity(self):
         from netmon.events import Severity
-        return sorted(self._service.recent,
+        return sorted(self.findings,
                       key=lambda f: (-Severity.rank(f.severity), f.ts))
 
     def report(self):
-        return dict(self._service.counts, findings=len(self._service.recent),
+        return dict(self._service.counts, findings=len(self.findings),
                     events=self._service.counts['captures'])
 
 
@@ -594,12 +601,8 @@ def _next_occurrence(now, hour):
     return today if today > now else today + 86400
 
 
-def _main(argv=None):
+def _parser():
     import argparse
-    import sys
-
-    from netmon.profile import ProfileError
-    from netmon.rules_engine import RuleError
 
     parser = argparse.ArgumentParser(
         prog='python -m netmon serve',
@@ -627,6 +630,9 @@ def _main(argv=None):
     web.add_argument('--web-host', default='127.0.0.1')
     web.add_argument('--web-port', type=int, default=8788)
     web.add_argument('--no-web', action='store_true')
+    web.add_argument('--allow-edit', action='store_true',
+                     help='let the UI write: the profile and rule editors, and '
+                          'the acknowledge, snooze and maintenance buttons')
 
     timing = parser.add_argument_group('schedule')
     timing.add_argument('--drift-interval', type=int, default=4 * 3600,
@@ -639,13 +645,12 @@ def _main(argv=None):
     parser.add_argument('--once', action='store_true',
                         help='one pass and exit, for a cron entry or a check')
     parser.add_argument('-v', '--verbose', action='store_true')
-    args = parser.parse_args(argv)
+    return parser
 
-    logging.basicConfig(
-        level=logging.DEBUG if args.verbose else logging.INFO,
-        format='%(asctime)s %(levelname)-7s %(name)s: %(message)s')
 
-    config = ServiceConfig(
+def config_from_args(args):
+    """The ServiceConfig a parsed `netmon serve` command line describes."""
+    return ServiceConfig(
         profile_path=args.profile, rules_path=args.rules, ring_dir=args.ring,
         state_dir=args.state, unifi_host=args.unifi_host,
         unifi_fingerprint=args.fingerprint, unifi_ca=args.ca,
@@ -655,8 +660,22 @@ def _main(argv=None):
         web_port=None if args.no_web or args.once else args.web_port,
         drift_interval=args.drift_interval, digest_hour=args.digest_hour,
         poll_interval=args.poll, notify=not args.no_notify,
-        dry_run=args.dry_run)
+        dry_run=args.dry_run, allow_edit=args.allow_edit)
 
+
+def _main(argv=None):
+    import sys
+
+    from netmon.profile import ProfileError
+    from netmon.rules_engine import RuleError
+
+    args = _parser().parse_args(argv)
+
+    logging.basicConfig(
+        level=logging.DEBUG if args.verbose else logging.INFO,
+        format='%(asctime)s %(levelname)-7s %(name)s: %(message)s')
+
+    config = config_from_args(args)
     try:
         service = Service(config)
     except (ProfileError, RuleError) as e:
