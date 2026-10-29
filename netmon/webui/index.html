@@ -24,6 +24,7 @@
   <button data-tab="rules">Rules</button>
   <button data-tab="filter">Capture filter</button>
   <button data-tab="profile">Profile</button>
+  <button data-tab="triage" id="nav-triage" style="display:none">Model triage</button>
 </nav>
 
 <main>
@@ -202,6 +203,37 @@
   <div class="toolbar">
     <button class="action" id="p-save">Validate and save</button>
     <span id="p-status" class="note"></span>
+  </div>
+</section>
+
+<!-- ─── Model triage ─────────────────────────────────────────────────── -->
+<section id="triage">
+  <p class="note">
+    Asks a model which findings matter and why. Advisory: nothing it returns is
+    run. Preparing sends nothing — it shows the exact message that would leave
+    this sensor, redacted, with nothing from a metadata-only segment, and an
+    estimate of its size. Only the second button sends it, once, within the
+    day's token budget.
+  </p>
+  <div class="toolbar">
+    <label>Device <input type="text" id="t-device"
+      placeholder="blank for the whole window"></label>
+    <button class="action" id="t-prepare" data-permission="summarise">Prepare</button>
+    <button class="action" id="t-send" data-permission="summarise" disabled>Send it</button>
+    <button class="ghost" id="t-discard" disabled>Discard</button>
+    <span id="t-status" class="note"></span>
+  </div>
+  <div id="t-preview" style="display:none">
+    <div class="cards" id="t-cards"></div>
+    <p class="note" id="t-note"></p>
+    <h3>The message, exactly as it would be sent</h3>
+    <pre class="out payload" id="t-message"></pre>
+    <h3>The fixed instructions sent with it</h3>
+    <pre class="out payload" id="t-system"></pre>
+  </div>
+  <div id="t-result" style="display:none">
+    <h3>Triage</h3>
+    <div id="t-result-body"></div>
   </div>
 </section>
 
