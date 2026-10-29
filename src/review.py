@@ -397,6 +397,8 @@ def _dns_names(dns):
     queries = [name(q.qname) for q in as_list(dns.qd)]
     if not dns.qr:
         return f"DNS query {', '.join(queries)}"
+    if not queries:      # mDNS announcements answer without a question
+        queries = [name(rr.rrname) for rr in as_list(dns.an)[:1]]
     answers = []
     for rr in as_list(dns.an)[:4]:
         data = rr.rdata
@@ -547,9 +549,12 @@ def build_bundle(directory, out_dir=None, *, pseudonymise=False, include_pcaps=F
             omitted += 1
             continue
         name = f"traffic/{len(digests) + 1:02d}_{re.sub(r'[^A-Za-z0-9_.-]', '_', rule)}.txt"
+        scope = next(((r.get('evidence') or {}).get('packet_capture_scope')
+                      for r in members if r.get('snippet') == snippet), None)
         head = (f"Group {index}: {rule} for {redact.ip(host) or '(no host)'}, "
                 f"{len(members)} alert(s). Representative: {members[0].get('review_id')}\n"
-                f"Traffic around {snippet_alert_time(members, snippet)}:\n\n")
+                f"Traffic around {snippet_alert_time(members, snippet)}"
+                f"{f' ({scope})' if scope else ''}:\n\n")
         body = digest_pcap(os.path.join(snippet_dir, snippet), redact, include_payloads)
         if writer.write(name, head + body):
             digests.append((index, name))

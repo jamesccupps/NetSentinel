@@ -186,12 +186,7 @@ class NetSentinelApp:
         # Pass baseline whitelist to ML engine for learned-beacon suppression
         self.ml_engine.baseline_whitelist = self.baseline_whitelist
 
-        # Review mode: --review DIR for this run, or the Settings toggle.
         self.review = None
-        if not review_dir and self.config.get('review', 'enabled', default=False):
-            review_dir = self.config.get('review', 'directory', default='') or True
-        if review_dir:
-            self.enable_review(None if review_dir is True else review_dir)
 
         self.forensics_enabled = self.config.get('forensics', 'enabled', default=True)
 
@@ -236,6 +231,13 @@ class NetSentinelApp:
 
         # ML analysis results
         self.last_ml_result = {}
+
+        # Review mode: --review DIR for this run, or the Settings toggle. Last, so
+        # everything it reaches for exists.
+        if not review_dir and self.config.get('review', 'enabled', default=False):
+            review_dir = self.config.get('review', 'directory', default='') or True
+        if review_dir:
+            self.enable_review(None if review_dir is True else review_dir)
 
         logger.info("NetSentinel App initialized.")
 
@@ -389,7 +391,9 @@ class NetSentinelApp:
         if self.review is None:
             self.review = ReviewRecorder(directory, self.pcap_writer, config=self.config)
             logger.info("Review mode on, recording to %s", self.review.directory)
-            if self._running:
+            # getattr: called from __init__ too, and --review used to crash there
+            # because _running did not exist yet.
+            if getattr(self, '_running', False):
                 self.review.start()
         return self.review
 
