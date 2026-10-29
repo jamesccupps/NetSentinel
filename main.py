@@ -73,8 +73,10 @@ def request_admin():
     # them; " ".join breaks on any path containing a space.
     import subprocess
     params = subprocess.list2cmdline(sys.argv)
+    # The working folder too: without one, the elevated copy starts in System32,
+    # and a relative path such as --review captures would land there.
     rc = ctypes.windll.shell32.ShellExecuteW(
-        None, "runas", sys.executable, params, None, 1
+        None, "runas", sys.executable, params, os.getcwd(), 1
     )
     # ShellExecuteW returns <= 32 on failure (SE_ERR_ACCESSDENIED == 5 when the
     # UAC prompt is declined). It does not raise, so without this check the
@@ -191,6 +193,9 @@ def parse_args(argv=None):
                         help=f'API port (default: {DEFAULT_PORT}; 0 asks the OS to choose)')
     parser.add_argument('--no-api', action='store_true',
                         help='no HTTP listener at all: no browser dashboard, no API')
+    parser.add_argument('--review', metavar='DIR',
+                        help='review mode for this run: save the traffic behind every '
+                             'alert to DIR, for a review bundle')
     parser.add_argument('--version', action='version',
                         version=f'NetSentinel {APP_VERSION}')
     return parser.parse_args(argv)
@@ -202,7 +207,7 @@ def run_headless_mode(args):
     from src.app import NetSentinelApp
     from src.headless import run_headless
 
-    app = NetSentinelApp()
+    app = NetSentinelApp(review_dir=args.review)
     return run_headless(app, host=args.host, port=args.port,
                         serve_api=not args.no_api)
 
@@ -253,7 +258,7 @@ def main(argv=None):
             from src.app import NetSentinelApp
 
             init_result['status'] = 'Configuring NetSentinel...'
-            app = NetSentinelApp()
+            app = NetSentinelApp(review_dir=args.review)
             init_result['app'] = app
             init_result['status'] = 'Ready!'
         except Exception as e:

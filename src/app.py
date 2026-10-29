@@ -16,6 +16,24 @@ logger = logging.getLogger("NetSentinel.App")
 # How long a restart waits for the last run's capture threads to exit.
 CAPTURE_EXIT_WAIT = 6
 
+# Rules whose verification does file hashing, PowerShell and VirusTotal lookups.
+# Those run with 10-second timeouts, so doing them inline on the packet worker
+# stalls the whole capture pipeline exactly when something interesting happens.
+_SLOW_VERIFY_RULES = frozenset({
+    'IOC-SUSPICIOUS-PROC', 'IOC-PROC-NAME', 'IOC-LISTEN-PORT', 'IOC-ACTIVE-THREAT',
+})
+
+
+def _note_severity_change(alert, before):
+    """
+    Keep the severity an alert had before verification changed it.
+
+    The verifier lowers likely false positives to LOW. Those are what a reviewer
+    most needs to see, with what the detection itself thought.
+    """
+    if alert.severity != before:
+        alert.evidence['severity_before_verification'] = before
+
 # Human-readable names and units for ML feature vector elements.
 # Defined at module level to avoid rebuilding on every alert.
 _FEATURE_INFO = {
@@ -43,7 +61,7 @@ _FEATURE_INFO = {
 class NetSentinelApp:
     """Main application class that orchestrates all components."""
 
-    def __init__(self):
+    def __init__(self, review_dir=None):
         from src.config import Config
         self.config = Config().load()
 
@@ -84,61 +102,9 @@ class NetSentinelApp:
             process_verifier=self.process_verifier,
         )
 
-        # Rules whose verification does file hashing, PowerShell and VirusTotal lookups.
-        # Those run with 10-second timeouts, so doing them inline on the packet worker
-        # stalls the whole capture pipeline exactly when something interesting happens.
-        _SLOW_VERIFY_RULES = frozenset({
-            'IOC-SUSPICIOUS-PROC', 'IOC-PROC-NAME', 'IOC-LISTEN-PORT', 'IOC-ACTIVE-THREAT',
-        })
-
-        def _verified_alert_gateway(alert):
-            """Universal alert gateway — enriches and verifies ALL alerts before emitting."""
-            # Enrich with domain resolution from IDS engine's DNS tracker
-            try:
-                if self.ids_engine and alert.dst_ip:
-                    domains = self.ids_engine._get_domains_for_ip(alert.dst_ip)
-                    if domains and 'destination_domains' not in alert.evidence:
-                        alert.evidence['destination_domains'] = list(domains)[:5]
-                if self.ids_engine and alert.src_ip:
-                    domains = self.ids_engine._get_domains_for_ip(alert.src_ip)
-                    if domains and 'source_domains' not in alert.evidence:
-                        alert.evidence['source_domains'] = list(domains)[:5]
-            except Exception:
-                pass
-
-            # Enrich with forensics domain map
-            try:
-                if self.forensics and alert.dst_ip:
-                    f_domains = self.forensics._ip_to_domains.get(alert.dst_ip, set())
-                    if f_domains:
-                        existing = set(alert.evidence.get('destination_domains', []))
-                        alert.evidence['destination_domains'] = list(existing | f_domains)[:5]
-            except Exception:
-                pass
-
-            if alert.rule_id in _SLOW_VERIFY_RULES:
-                # Publish now, deepen later: the user sees the alert immediately and the
-                # verification verdict is merged into its evidence when it completes.
-                alert.evidence.setdefault('alert_verification', {
-                    'verdict': 'PENDING',
-                    'confidence': '—',
-                    'reasoning': ['Deep process verification queued'],
-                })
-                self._emit_alert(alert)
-                try:
-                    self._verify_queue.put_nowait(alert)
-                except Exception:
-                    logger.debug("Verification queue full; skipping deep verify for %s",
-                                 alert.rule_id)
-                return
-
-            try:
-                self.alert_verifier.verify_alert(alert, ids_engine=self.ids_engine)
-            except Exception as e:
-                logger.debug("Alert verification error: %s", e)
-            self._emit_alert(alert)
-
-        self._alert_gateway = _verified_alert_gateway
+        # The single gateway every alert passes through; see _verified_alert_gateway.
+        self._alert_gateway = self._verified_alert_gateway
+        self.suppressed_alerts = 0
 
         # Bounded so a burst cannot grow without limit; dropping deep verification is
         # survivable because the alert itself has already been delivered.
@@ -220,6 +186,13 @@ class NetSentinelApp:
         # Pass baseline whitelist to ML engine for learned-beacon suppression
         self.ml_engine.baseline_whitelist = self.baseline_whitelist
 
+        # Review mode: --review DIR for this run, or the Settings toggle.
+        self.review = None
+        if not review_dir and self.config.get('review', 'enabled', default=False):
+            review_dir = self.config.get('review', 'directory', default='') or True
+        if review_dir:
+            self.enable_review(None if review_dir is True else review_dir)
+
         self.forensics_enabled = self.config.get('forensics', 'enabled', default=True)
 
         # Track which insecure services we've already alerted on (avoid spam)
@@ -240,6 +213,8 @@ class NetSentinelApp:
             'capture', 'pcap_on_alert_seconds', default=60)
         self._pcap_alert_cooldown = 60
         self._pcap_alert_cooldowns = {}
+        # In review mode, alerts inside the cooldown share the capture that was saved.
+        self._pcap_alert_last = {}
 
         # Alerts raised outside the IDS engine (IOC, ML) skip its cooldown, so a rule
         # that matches every packet of a connection alerted on every packet.
@@ -273,26 +248,40 @@ class NetSentinelApp:
         away. Without it, a CRITICAL alert names an IP and a rule and leaves the
         user with nothing to actually look at.
         """
-        if not self._pcap_on_alert:
-            return
-        if not Severity.gte(alert.severity, self._pcap_on_alert_severity):
-            return
+        review = self.review
+        if review is None:
+            if not self._pcap_on_alert:
+                return
+            if not Severity.gte(alert.severity, self._pcap_on_alert_severity):
+                return
+        # In review mode, every alert, whatever its severity: the ones verification
+        # lowered to LOW are the ones a reviewer most needs to see.
 
         now = time.time()
         # One capture per rule+source per cooldown, so an alert storm cannot fill
         # the disk with near-identical files.
         key = f"{alert.rule_id}:{alert.src_ip}"
         if now - self._pcap_alert_cooldowns.get(key, 0) < self._pcap_alert_cooldown:
+            shared = self._pcap_alert_last.get(key) if review is not None else None
+            if shared:
+                alert.evidence['packet_capture'] = shared
             return
         self._pcap_alert_cooldowns[key] = now
         if len(self._pcap_alert_cooldowns) > 500:
             cutoff = now - self._pcap_alert_cooldown
             self._pcap_alert_cooldowns = {
                 k: t for k, t in self._pcap_alert_cooldowns.items() if t >= cutoff}
+            self._pcap_alert_last = {
+                k: p for k, p in self._pcap_alert_last.items() if k in self._pcap_alert_cooldowns}
 
         try:
-            path = self.pcap_writer.export_for_alert(
-                alert, seconds=self._pcap_on_alert_seconds)
+            if review is not None:
+                path = review.snippet(alert, referenced=self._referenced_captures)
+                if path:
+                    self._pcap_alert_last[key] = path
+            else:
+                path = self.pcap_writer.export_for_alert(
+                    alert, seconds=self._pcap_on_alert_seconds)
             if path:
                 alert.evidence['packet_capture'] = path
                 alert.evidence['packet_capture_note'] = (
@@ -300,6 +289,62 @@ class NetSentinelApp:
                     'see exactly what triggered the detection.')
         except Exception as e:
             logger.debug("Alert capture error: %s", e)
+
+    def _verified_alert_gateway(self, alert):
+        """Universal alert gateway — enriches and verifies ALL alerts before emitting."""
+        # Someone already judged this rule for this host or domain a false positive.
+        whitelist = getattr(self, 'baseline_whitelist', None)
+        if whitelist is not None and whitelist.suppresses(alert):
+            self.suppressed_alerts += 1
+            return
+
+        # Enrich with domain resolution from IDS engine's DNS tracker
+        try:
+            if self.ids_engine and alert.dst_ip:
+                domains = self.ids_engine._get_domains_for_ip(alert.dst_ip)
+                if domains and 'destination_domains' not in alert.evidence:
+                    alert.evidence['destination_domains'] = list(domains)[:5]
+            if self.ids_engine and alert.src_ip:
+                domains = self.ids_engine._get_domains_for_ip(alert.src_ip)
+                if domains and 'source_domains' not in alert.evidence:
+                    alert.evidence['source_domains'] = list(domains)[:5]
+        except Exception:
+            pass
+
+        # Enrich with forensics domain map
+        try:
+            forensics = getattr(self, 'forensics', None)
+            if forensics and alert.dst_ip:
+                f_domains = forensics._ip_to_domains.get(alert.dst_ip, set())
+                if f_domains:
+                    existing = set(alert.evidence.get('destination_domains', []))
+                    alert.evidence['destination_domains'] = list(existing | f_domains)[:5]
+        except Exception:
+            pass
+
+        if alert.rule_id in _SLOW_VERIFY_RULES:
+            # Publish now, deepen later: the user sees the alert immediately and the
+            # verification verdict is merged into its evidence when it completes.
+            alert.evidence.setdefault('alert_verification', {
+                'verdict': 'PENDING',
+                'confidence': '—',
+                'reasoning': ['Deep process verification queued'],
+            })
+            self._emit_alert(alert)
+            try:
+                self._verify_queue.put_nowait(alert)
+            except Exception:
+                logger.debug("Verification queue full; skipping deep verify for %s",
+                             alert.rule_id)
+            return
+
+        before = alert.severity
+        try:
+            self.alert_verifier.verify_alert(alert, ids_engine=self.ids_engine)
+        except Exception as e:
+            logger.debug("Alert verification error: %s", e)
+        _note_severity_change(alert, before)
+        self._emit_alert(alert)
 
     def _cooldown_ok(self, alert):
         """
@@ -319,14 +364,67 @@ class NetSentinelApp:
                 k: t for k, t in self._alert_cooldowns.items() if t >= cutoff}
         return True
 
+    def _referenced_captures(self):
+        return {a.evidence.get('packet_capture')
+                for a in self.alert_manager.get_alerts(limit=self.alert_manager.max_stored)}
+
     def _emit_alert(self, alert):
         """Deliver a finished alert to storage, the GUI and the correlator."""
         self._capture_alert_evidence(alert)
-        self.alert_manager.add_alert(alert)
+        alert.stored = self.alert_manager.add_alert(alert)
+        review = self.review
+        verdict = alert.evidence.get('alert_verification', {}).get('verdict')
+        if review is not None and alert.stored and verdict != 'PENDING':
+            review.record(alert)       # deferred ones are recorded once verified
         try:
             self.alert_correlator.process_alert(alert)
         except Exception as e:
             logger.debug("Alert correlation error: %s", e)
+
+    # ─── Review mode ─────────────────────────────────────────────────────
+
+    def enable_review(self, directory=None):
+        """Turn review mode on, recording to directory (default ~/.netsentinel/review)."""
+        from src.review import ReviewRecorder
+        if self.review is None:
+            self.review = ReviewRecorder(directory, self.pcap_writer, config=self.config)
+            logger.info("Review mode on, recording to %s", self.review.directory)
+            if self._running:
+                self.review.start()
+        return self.review
+
+    def build_review_bundle(self, **options):
+        """Build a bundle from this run's review folder. See src.review.build_bundle."""
+        from src import __version__
+        from src.review import build_bundle, default_directory
+        options.setdefault('pseudonymise',
+                           self.config.get('review', 'pseudonymise_lan', default=False))
+        directory = self.review.directory if self.review is not None else default_directory()
+        return build_bundle(directory, version=__version__, **options)
+
+    def record_verdict(self, alert_id, verdict, note=''):
+        """
+        A person's verdict on a stored alert. A false positive stops that rule for
+        that alert's host or domain. Returns the confirmed entry (None for 'real').
+        Raises KeyError for an unknown alert, ValueError for a verdict that is not
+        one, and LookupError for a false positive with nothing to tie it to.
+        """
+        from src.review import normalise_verdict, record_verdict, review_id
+        alert = self.alert_manager.get_alert(alert_id)
+        if alert is None:
+            raise KeyError(alert_id)
+        normalised = normalise_verdict(verdict)
+        if normalised is None:
+            raise ValueError(verdict)
+        record = alert.to_dict()
+        record['review_id'] = review_id(alert)
+        directory = self.review.directory if self.review is not None else None
+        entry = record_verdict(directory, record, normalised,
+                               self.baseline_whitelist.confirmed, note=note)
+        if normalised == 'false_positive' and entry is None:
+            raise LookupError('This alert names no host or domain to tie a verdict to.')
+        alert.evidence['your_verdict'] = normalised
+        return entry
 
     def _verification_loop(self, stop):
         """Run slow verification off the packet path and update alerts in place."""
@@ -336,6 +434,7 @@ class NetSentinelApp:
                 alert = self._verify_queue.get(timeout=0.5)
             except queue.Empty:
                 continue
+            before = alert.severity
             try:
                 self.alert_verifier.verify_alert(alert, ids_engine=self.ids_engine)
             except Exception as e:
@@ -345,6 +444,10 @@ class NetSentinelApp:
                     'confidence': '0%',
                     'reasoning': [f'Verification error: {e}'],
                 }
+            _note_severity_change(alert, before)
+            review = self.review
+            if review is not None and getattr(alert, 'stored', True):
+                review.record(alert)
 
     def _on_raw_packet(self, raw_bytes):
         """Called for each raw packet (from capture thread). Feeds PCAP writer."""
@@ -777,6 +880,8 @@ class NetSentinelApp:
             self._running = True
             stop = self._stop_event = threading.Event()
             self.feature_store.start()
+            if self.review is not None:
+                self.review.start()
             self._analysis_thread = threading.Thread(
                 target=self._analysis_loop, args=(stop,), daemon=True,
                 name="AnalysisThread")
@@ -797,6 +902,8 @@ class NetSentinelApp:
         self._running = False
         self._stop_event.set()
         self.capture_engine.stop()
+        if self.review is not None:
+            self.review.stop()
         self.alert_manager.save_alerts()
         self.ml_engine.baseline.save()
         self.feature_store.shutdown()
@@ -845,6 +952,9 @@ class NetSentinelApp:
             'correlator': self.alert_correlator.get_stats(),
             'pcap_writer': self.pcap_writer.get_buffer_stats(),
             'resources': self.resources.snapshot(),
+            'review': ({'enabled': True, 'directory': self.review.directory}
+                       if self.review is not None else {'enabled': False}),
+            'suppressed_alerts': self.suppressed_alerts,
         }
 
     def run(self, tk_root=None):

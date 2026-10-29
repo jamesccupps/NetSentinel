@@ -152,6 +152,18 @@ DEFAULT_CONFIG = {
         # Under load the capture then samples sooner. Takes effect at the next start.
         "low_priority": False,
     },
+    "review": {
+        # Keep what it takes to judge alerts: a capture behind every alert, a rolling
+        # full capture and alerts.jsonl, for a review bundle. --review DIR turns it
+        # on for one run. See src/review.py.
+        "enabled": False,
+        "directory": "",                # Default: ~/.netsentinel/review
+        "snippet_seconds": 60,          # Traffic saved before each alert
+        "snippet_budget_mb": 500,       # Alert captures kept; referenced ones last
+        "capture_budget_mb": 2048,      # Rolling full capture
+        "capture_max_hours": 24,
+        "pseudonymise_lan": False,      # Bundles replace LAN addresses with labels
+    },
     "whitelists": {
         "ips": [],
         "domains": [],

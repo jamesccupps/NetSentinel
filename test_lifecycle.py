@@ -88,6 +88,7 @@ def make_app(capture=None, interval=0.05):
     app._alert_cooldowns = {}
     import queue
     app._verify_queue = queue.Queue()
+    app.review = None
     app._running = False
     app._lifecycle_lock = threading.Lock()
     app._stop_event = threading.Event()
