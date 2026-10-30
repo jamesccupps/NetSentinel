@@ -30,6 +30,8 @@ COMMANDS = {
              'build a site profile from the UniFi controller'),
     'silence': ('netmon.silence',
                 'ack, snooze or put a device or rule in maintenance'),
+    'geoip': ('netmon.geoip',
+              'country and network lookups: download DB-IP Lite, check, look up'),
     'web': ('netmon.web', 'the local web UI'),
     'serve': ('netmon.service', 'run everything on a schedule, as a service'),
 }

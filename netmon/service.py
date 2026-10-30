@@ -29,7 +29,9 @@ Restarts
 --------
 What has been processed is kept on disk, so a restart does not re-analyse
 yesterday or re-alert on what was already sent. The alternative is a service
-nobody dares restart.
+nobody dares restart. So are the day's findings (netmon.window): one per
+identity across capture files and restarts, each pushed once, with unanswered
+pushes carried onto the digest's checklist until someone answers them.
 """
 
 from __future__ import annotations
@@ -54,7 +56,8 @@ class ServiceConfig:
                  unifi_ca='', unifi_insecure=False, unifi_site='default',
                  canary_log='', secrets='', web_host='127.0.0.1', web_port=0,
                  drift_interval=4 * 3600, prune_interval=3600,
-                 digest_hour=7, poll_interval=30, notify=True, dry_run=False):
+                 digest_hour=7, poll_interval=30, notify=True, dry_run=False,
+                 allow_edit=False, allow_summarise=False):
         self.profile_path = profile_path
         self.rules_path = rules_path
         self.ring_dir = ring_dir
@@ -74,6 +77,13 @@ class ServiceConfig:
         self.poll_interval = int(poll_interval)
         self.notify = bool(notify)
         self.dry_run = bool(dry_run)
+        # The UI's editors and its acknowledge/snooze/maintenance buttons. Off
+        # by default, as for `netmon web`: the UI is read-only unless asked.
+        self.allow_edit = bool(allow_edit)
+        # The model-triage button. Separate from editing: it writes nothing,
+        # but it sends a redacted summary off the sensor, which is its own
+        # decision.
+        self.allow_summarise = bool(allow_summarise)
 
     @property
     def processed_path(self):
@@ -90,6 +100,10 @@ class ServiceConfig:
     @property
     def silences_path(self):
         return os.path.join(self.state_dir, 'silences.json')
+
+    @property
+    def window_path(self):
+        return os.path.join(self.state_dir, 'findings.json')
 
 
 class _Processed:
@@ -292,15 +306,26 @@ class Service:
             self.ring = RingBuffer(config.ring_dir, self.profile)
 
         from netmon.silence import Silences
+        from netmon.window import FindingWindow
         self.silences = Silences(config.silences_path)
         self.notifier = self._build_notifier() if config.notify else None
+        self.email = self._build_email() if config.notify else None
         self.web = None
+        # The day's findings, on disk, deduplicated across capture files and
+        # restarts. See netmon.window.
+        self.window = FindingWindow(config.window_path, clock=clock)
 
         self._stop = threading.Event()
         self._next = {'drift': 0.0, 'prune': 0.0, 'digest': 0.0}
-        self.counts = {'captures': 0, 'findings': 0, 'pushed': 0,
-                       'canary': 0, 'drift': 0, 'errors': 0}
-        self.recent = []
+        # `events` is packets and flows read, which is what every report means
+        # by events; `captures` is files. The two used to be the same number.
+        self.counts = {'captures': 0, 'events': 0, 'findings': 0, 'repeats': 0,
+                       'pushed': 0, 'canary': 0, 'drift': 0, 'errors': 0}
+
+    @property
+    def recent(self):
+        """The findings since the last digest, one per identity."""
+        return self.window.findings()
 
     def _build_notifier(self):
         from netmon.alerting import AlertingError, Notifier, load_config
@@ -314,6 +339,19 @@ class Service:
             return None
         return Notifier(alert_config, self.profile, ring=self.ring,
                         silences=self.silences)
+
+    def _build_email(self):
+        """The email digest, if the secrets file configures one."""
+        from netmon.alerting import AlertingError, load_email_config
+        try:
+            config = load_email_config(self.config.secrets or None)
+            if config is None or not config.configured:
+                return None
+            config.validate()
+        except AlertingError as e:
+            logger.warning('the email digest is off: %s', e)
+            return None
+        return config
 
     # ─── Jobs ────────────────────────────────────────────────────────────
 
@@ -338,15 +376,26 @@ class Service:
 
     def _analyse(self, path):
         from netmon.analyze import Analyzer
+        from netmon.leakcheck import LeakCounter
         from netmon.sources.pcap import PcapError, read_pcap
 
         analyzer = Analyzer(self.profile, self.rules)
+        # These files were written under the capture filter, so anything from
+        # a metadata-only segment in one is a leak, not a sample.
+        leaks = LeakCounter(self.profile, on_disk=True,
+                            source=os.path.basename(path))
         try:
-            analyzer.feed(read_pcap(path, self.profile))
+            analyzer.feed(read_pcap(path, self.profile, leaks=leaks))
         except PcapError as e:
             logger.warning('could not read %s: %s', os.path.basename(path), e)
             self.counts['errors'] += 1
             return []
+        if leaks.restricted_frames:
+            logger.error('%s holds %d frames from metadata-only segments',
+                         os.path.basename(path), leaks.restricted_frames)
+        analyzer.findings.extend(leaks.findings())
+        self.counts['events'] += analyzer.events_seen
+        self.window.add_events(analyzer.events_seen)
         logger.info('%s: %d events, %d findings', os.path.basename(path),
                     analyzer.events_seen, len(analyzer.findings))
         return analyzer.findings
@@ -376,6 +425,8 @@ class Service:
             self.counts['errors'] += 1
             return []
         self.counts['drift'] += report['changed']
+        self.window.set_standing(report.get('standing_problems') or [])
+        self.window.save()
         logger.info('configuration: %d standing, %d changed',
                     report['standing'], report['changed'])
         return findings
@@ -404,46 +455,62 @@ class Service:
                         len(result['removed']),
                         result['freed_bytes'] // (1024 * 1024))
 
-    def send_digest(self):
-        if self.notifier is None:
-            return
+    def digest_view(self):
+        """The day's findings, with silences applied, for the digest."""
+        return _Window(self.silences.visible(self.window.findings()),
+                       self.window.events)
+
+    def digest_body(self, now=None):
         from netmon.alerting import build_digest
+        return build_digest(self.digest_view(), self.profile,
+                            open_items=self.window.open_items(self.silences, now))
 
-        class _Window:
-            """The day's findings, in the shape the digest builder expects."""
+    def send_digest(self, now=None):
+        """
+        The daily report, by ntfy and email, whichever are configured.
 
-            def __init__(self, findings, counts):
-                self.findings = findings
-                self.events_seen = counts['captures']
+        The window starts again only once one of them has it; a digest nobody
+        received should not take the day's findings with it.
+        """
+        if self.notifier is None and self.email is None:
+            return False
+        from netmon.alerting import digest_title, send_email_digest
 
-            def by_severity(self):
-                from netmon.events import Severity
-                return sorted(self.findings,
-                              key=lambda f: -Severity.rank(f.severity))
-
-            def report(self):
-                from netmon.events import Severity
-                by_severity = {}
-                for finding in self.findings:
-                    by_severity[finding.severity] = \
-                        by_severity.get(finding.severity, 0) + 1
-                return {'events': self.events_seen,
-                        'findings': len(self.findings),
-                        'by_severity': by_severity, 'suppressed_repeats': 0}
-
-        window = _Window(list(self.recent), self.counts)
-        try:
-            self.notifier.send_digest(window)
-            logger.info('digest sent: %d findings', len(window.findings))
-        except Exception as e:
-            logger.warning('could not send the digest: %s', e)
-            self.counts['errors'] += 1
-        self.recent.clear()
+        body = self.digest_body(now)
+        delivered = False
+        if self.notifier is not None:
+            try:
+                delivered |= bool(self.notifier.send_digest(None, body=body))
+            except Exception as e:
+                logger.warning('could not send the digest: %s', e)
+                self.counts['errors'] += 1
+        if self.email is not None:
+            try:
+                if self.config.dry_run:
+                    logger.info('would email the digest to %s',
+                                ', '.join(self.email.recipients))
+                else:
+                    send_email_digest(self.email, body, digest_title(self.profile))
+                delivered = True
+            except Exception as e:
+                logger.warning('could not email the digest: %s', e)
+                self.counts['errors'] += 1
+        if delivered:
+            logger.info('digest sent: %d findings', len(self.window))
+            self.window.rollover(now)
+        return delivered
 
     # ─── Delivery ────────────────────────────────────────────────────────
 
     def deliver(self, findings):
-        """Push what needs attention now; keep the rest for the digest."""
+        """
+        Push what needs attention now; keep the rest for the digest.
+
+        Each finding identity pushes once. A repeat — the same finding in the
+        next capture file, or after a restart — adds to the count of the one
+        already kept, and an earlier push still waiting for an answer is on
+        the digest's checklist rather than pushed again.
+        """
         if not findings:
             return
         # A snooze hides a finding entirely. Acks and maintenance only stop the
@@ -451,20 +518,31 @@ class Service:
         findings = [f for f in findings if self.silences.decide(f) != 'drop']
         if not findings:
             return
-        self.counts['findings'] += len(findings)
-        self.recent.extend(findings)
-        del self.recent[:-2000]
+        fresh = [f for f in findings if self.window.admit(f)]
+        self.counts['findings'] += len(fresh)
+        self.counts['repeats'] += len(findings) - len(fresh)
 
-        if self.notifier is None:
-            for finding in findings:
-                logger.info('[%s] %s', finding.severity, finding.description)
-            return
         try:
-            sent, _ = self.notifier.send(findings)
+            if self.notifier is None:
+                for finding in fresh:
+                    logger.info('[%s] %s', finding.severity, finding.description)
+                return
+            try:
+                sent, _ = self.notifier.send(fresh)
+            except Exception as e:
+                logger.warning('could not deliver: %s', e)
+                self.counts['errors'] += 1
+                return
             self.counts['pushed'] += len(sent)
-        except Exception as e:
-            logger.warning('could not deliver: %s', e)
-            self.counts['errors'] += 1
+            fresh_ids = {id(f) for f in fresh}
+            for finding in sent:
+                if id(finding) not in fresh_ids:
+                    # Raised while sending — an extract that found restricted
+                    # frames on disk — so it is kept like any other.
+                    self.window.admit(finding)
+                self.window.mark_pushed(finding)
+        finally:
+            self.window.save()
 
     # ─── The loop ────────────────────────────────────────────────────────
 
@@ -507,12 +585,13 @@ class Service:
         self.deliver(findings)
 
         if self._due_for_digest(now):
-            self.send_digest()
+            self.send_digest(now)
             self._next['digest'] = now + 23 * 3600
         return findings
 
     def _due_for_digest(self, now):
-        if self.notifier is None or now < self._next['digest']:
+        if (self.notifier is None and self.email is None) \
+                or now < self._next['digest']:
             return False
         if self._next['digest'] == 0.0:
             # Not on the first tick: a restart at 07:05 should not send a second
@@ -529,7 +608,11 @@ class Service:
                              analyzer=_LiveView(self),
                              silences_path=self.config.silences_path,
                              host=self.config.web_host,
-                             port=self.config.web_port)
+                             port=self.config.web_port,
+                             allow_edit=self.config.allow_edit,
+                             allow_summarise=self.config.allow_summarise,
+                             state_dir=self.config.state_dir,
+                             secrets_path=self.config.secrets)
         port = self.web.start()
         logger.info('UI on http://%s:%d/', self.config.web_host, port)
         return port
@@ -555,6 +638,7 @@ class Service:
             if self.web is not None:
                 self.web.stop()
             self.processed.save()
+            self.window.save()
         logger.info('stopped: %s', self.counts)
         return self.counts
 
@@ -570,20 +654,44 @@ class _LiveView:
 
     @property
     def findings(self):
-        return self._service.recent
+        # Silences are applied as they stand now, not as they stood when each
+        # finding arrived: a snooze added later must hide what it covers.
+        return self._service.silences.visible(list(self._service.recent))
 
     @property
     def events_seen(self):
-        return self._service.counts['captures']
+        # Since the last digest, like the findings beside it — and kept across
+        # restarts with them.
+        return self._service.window.events
 
     def by_severity(self):
         from netmon.events import Severity
-        return sorted(self._service.recent,
+        return sorted(self.findings,
                       key=lambda f: (-Severity.rank(f.severity), f.ts))
 
     def report(self):
-        return dict(self._service.counts, findings=len(self._service.recent),
-                    events=self._service.counts['captures'])
+        return dict(self._service.counts, findings=len(self.findings),
+                    events=self._service.window.events)
+
+
+class _Window:
+    """The day's findings, in the shape the digest builder expects."""
+
+    def __init__(self, findings, events):
+        self.findings = findings
+        self.events_seen = events
+
+    def by_severity(self):
+        from netmon.events import Severity
+        return sorted(self.findings, key=lambda f: -Severity.rank(f.severity))
+
+    def report(self):
+        by_severity = {}
+        for finding in self.by_severity():
+            by_severity[finding.severity] = by_severity.get(finding.severity, 0) + 1
+        repeats = sum(max(0, int(f.count or 1) - 1) for f in self.findings)
+        return {'events': self.events_seen, 'findings': len(self.findings),
+                'by_severity': by_severity, 'suppressed_repeats': repeats}
 
 
 def _next_occurrence(now, hour):
@@ -594,12 +702,8 @@ def _next_occurrence(now, hour):
     return today if today > now else today + 86400
 
 
-def _main(argv=None):
+def _parser():
     import argparse
-    import sys
-
-    from netmon.profile import ProfileError
-    from netmon.rules_engine import RuleError
 
     parser = argparse.ArgumentParser(
         prog='python -m netmon serve',
@@ -627,6 +731,14 @@ def _main(argv=None):
     web.add_argument('--web-host', default='127.0.0.1')
     web.add_argument('--web-port', type=int, default=8788)
     web.add_argument('--no-web', action='store_true')
+    web.add_argument('--allow-edit', action='store_true',
+                     help='let the UI write: the profile and rule editors, and '
+                          'the acknowledge, snooze and maintenance buttons')
+    web.add_argument('--allow-summarise', '--allow-summarize',
+                     action='store_true', dest='allow_summarise',
+                     help='offer the model-triage button: a preview of the '
+                          'exact redacted payload, then a second click sends '
+                          'it, within the daily budget kept under --state')
 
     timing = parser.add_argument_group('schedule')
     timing.add_argument('--drift-interval', type=int, default=4 * 3600,
@@ -639,13 +751,12 @@ def _main(argv=None):
     parser.add_argument('--once', action='store_true',
                         help='one pass and exit, for a cron entry or a check')
     parser.add_argument('-v', '--verbose', action='store_true')
-    args = parser.parse_args(argv)
+    return parser
 
-    logging.basicConfig(
-        level=logging.DEBUG if args.verbose else logging.INFO,
-        format='%(asctime)s %(levelname)-7s %(name)s: %(message)s')
 
-    config = ServiceConfig(
+def config_from_args(args):
+    """The ServiceConfig a parsed `netmon serve` command line describes."""
+    return ServiceConfig(
         profile_path=args.profile, rules_path=args.rules, ring_dir=args.ring,
         state_dir=args.state, unifi_host=args.unifi_host,
         unifi_fingerprint=args.fingerprint, unifi_ca=args.ca,
@@ -655,8 +766,23 @@ def _main(argv=None):
         web_port=None if args.no_web or args.once else args.web_port,
         drift_interval=args.drift_interval, digest_hour=args.digest_hour,
         poll_interval=args.poll, notify=not args.no_notify,
-        dry_run=args.dry_run)
+        dry_run=args.dry_run, allow_edit=args.allow_edit,
+        allow_summarise=args.allow_summarise)
 
+
+def _main(argv=None):
+    import sys
+
+    from netmon.profile import ProfileError
+    from netmon.rules_engine import RuleError
+
+    args = _parser().parse_args(argv)
+
+    logging.basicConfig(
+        level=logging.DEBUG if args.verbose else logging.INFO,
+        format='%(asctime)s %(levelname)-7s %(name)s: %(message)s')
+
+    config = config_from_args(args)
     try:
         service = Service(config)
     except (ProfileError, RuleError) as e:
