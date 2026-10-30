@@ -2,7 +2,7 @@
 
 ## v1.9.0 — Watching this PC's own traffic, review mode, and an audit of your network
 
-**2088 unit tests** (up from 1456) plus 14 integration checks. The suite no
+**2100 unit tests** (up from 1456) plus 14 integration checks. The suite no
 longer downloads threat feeds, so it runs in about a minute.
 
 ### This PC's own traffic is inspected
@@ -123,6 +123,10 @@ effect without hunting for the process. `--monitor` starts monitoring as soon as
 the window opens. A dashboard tab left open across a restart picks up the new
 copy's token by itself, rather than answering every button with "missing or
 wrong token" until it is reloaded. The tray uses pystray (LGPL-3.0) and Pillow.
+
+The mouse wheel scrolls whatever is under the pointer. Three pages bound it for
+the whole window, so one turn scrolled all three, on whatever tab each was on,
+while the Incidents, ML, Settings and Forensics lists did not scroll at all.
 
 ### What the first review of real alerts found
 
