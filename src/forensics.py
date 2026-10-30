@@ -20,12 +20,71 @@ Designed for PCAP analysis but can also run on live traffic.
 import re
 import logging
 import base64
-from collections import defaultdict, Counter
+import itertools
+from collections import defaultdict, Counter, deque
 from datetime import datetime
 
 from src.ipcache import is_private as _is_private
 
 logger = logging.getLogger("NetSentinel.Forensics")
+
+# Live, this engine runs for as long as the app does, and every one of these
+# grew without limit. The caps keep the newest findings.
+MAX_CREDENTIALS = 1000
+MAX_SENSITIVE = 2000
+MAX_SECURITY_FINDINGS = 2000
+MAX_TIMELINE = 5000
+MAX_FLOWS = 20000
+MAX_CONTEXT_IPS = 20000
+
+
+class BoundedLog:
+    """
+    An append-only list that keeps only the newest `maxlen` entries.
+
+    len() and indices count every entry ever appended, so a reader holding a
+    cursor (`log[cursor:]`, then `cursor = len(log)`, as the app does to alert
+    on new findings) keeps working after old entries are dropped. Iteration
+    yields what is retained.
+    """
+
+    __slots__ = ('_items', '_total')
+
+    def __init__(self, maxlen):
+        self._items = deque(maxlen=maxlen)
+        self._total = 0
+
+    def append(self, item):
+        self._items.append(item)
+        self._total += 1
+
+    def __len__(self):
+        return self._total
+
+    def __iter__(self):
+        return iter(list(self._items))
+
+    @property
+    def dropped(self):
+        return self._total - len(self._items)
+
+    def __getitem__(self, index):
+        offset = self._total - len(self._items)    # absolute index of the oldest kept
+        if isinstance(index, slice):
+            start, stop, step = index.indices(self._total)
+            if step != 1:
+                return [self[i] for i in range(start, stop, step) if i >= offset]
+            lo = max(start, offset) - offset
+            hi = max(stop, offset) - offset
+            return list(itertools.islice(self._items, lo, hi))
+        if index < 0:
+            index += self._total
+        if index < offset or index >= self._total:
+            raise IndexError('entry no longer retained')
+        return self._items[index - offset]
+
+    def __repr__(self):
+        return f"<BoundedLog {len(self._items)} kept of {self._total}>"
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -465,13 +524,20 @@ MALICIOUS_USER_AGENTS = [
     # Malware families that identify in UA
     b'botnet', b'mirai', b'muhstik', b'tsunami',
     b'gafgyt', b'hajime', b'satori',
-    # Suspicious generic agents
-    b'python-requests', b'python-urllib', b'go-http-client',
-    b'libwww-perl', b'lwp-', b'wget/', b'curl/',
-    b'java/', b'okhttp', b'httpclient',
-    b'winhttp', b'httpie',
     # Shell / command injection markers
     b'${jndi', b'() { :',  # Log4Shell, Shellshock
+]
+
+# Programming-library and command-line clients. They used to be in the CRITICAL
+# list above, which called Windows' own curl.exe and every Android app (okhttp is
+# Android's default HTTP stack) an attack framework. Malware does use them, so
+# they are still noted, at the level that fits a library: LOW for the ones every
+# device runs, MEDIUM for scripting libraries a workstation rarely needs.
+SCRIPTED_CLIENT_USER_AGENTS = [
+    (b'okhttp', 'LOW'), (b'curl/', 'LOW'), (b'winhttp', 'LOW'),
+    (b'python-requests', 'MEDIUM'), (b'python-urllib', 'MEDIUM'),
+    (b'go-http-client', 'MEDIUM'), (b'libwww-perl', 'MEDIUM'), (b'lwp-', 'MEDIUM'),
+    (b'wget/', 'MEDIUM'), (b'java/', 'MEDIUM'), (b'httpie', 'MEDIUM'),
 ]
 
 # HIGH: Suspicious but may have legitimate uses (flag with context)
@@ -740,13 +806,13 @@ class NetworkForensics:
 
     def __init__(self, forensics_db=None):
         self.db = forensics_db  # ForensicsDB for persistent storage
-        # Credential findings
-        self.credentials_found = []
-        self.sensitive_data = []
+        # Credential findings (bounded; see BoundedLog for why len() is a total)
+        self.credentials_found = BoundedLog(MAX_CREDENTIALS)
+        self.sensitive_data = BoundedLog(MAX_SENSITIVE)
 
         # Security audit findings
         self.insecure_services = {}  # {(ip, port): service_info}
-        self.security_findings = []
+        self.security_findings = BoundedLog(MAX_SECURITY_FINDINGS)
 
         # DHCP device inventory
         self.dhcp_devices = {}  # {mac: {ip, hostname, vendor_class, first_seen, last_seen}}
@@ -806,15 +872,34 @@ class NetworkForensics:
         })
 
         # Timeline events
-        self.timeline = []
+        self.timeline = BoundedLog(MAX_TIMELINE)
 
         # Stats
         self.packets_scanned = 0
         self.unencrypted_packets = 0
 
-    def analyze_packet(self, pkt_info):
-        """Analyze a single packet for all forensic indicators."""
+    def _evict_flows(self):
+        """Drop the least recently seen quarter of the flow table."""
+        oldest = sorted(self.flows, key=lambda k: self.flows[k]['last_seen'])
+        for key in oldest[:max(1, len(oldest) // 4)]:
+            del self.flows[key]
+
+    def _bound_context(self):
+        """The session-context maps grow per address; clear them past a cap."""
+        for store in (self._tls_ips, self._cdn_ips, self._ip_to_domains,
+                      self._dual_port_ips, self._http_methods, self._http_has_form_fields,
+                      self._mdns_responders, self._llmnr_responders):
+            if len(store) > MAX_CONTEXT_IPS:
+                store.clear()
+
+    def analyze_packet(self, pkt_info, payload=None):
+        """
+        Analyze a single packet for all forensic indicators. `payload` is the raw
+        transport payload when the caller has it; otherwise pkt_info's own.
+        """
         self.packets_scanned += 1
+        if self.packets_scanned % 5000 == 0:
+            self._bound_context()
 
         # Update flow
         flow_key = (
@@ -822,6 +907,8 @@ class NetworkForensics:
             max(pkt_info.src_ip, pkt_info.dst_ip),
             pkt_info.dst_port, pkt_info.protocol
         )
+        if flow_key not in self.flows and len(self.flows) >= MAX_FLOWS:
+            self._evict_flows()
         flow = self.flows[flow_key]
         flow['src_ip'] = pkt_info.src_ip
         flow['dst_ip'] = pkt_info.dst_ip
@@ -875,18 +962,23 @@ class NetworkForensics:
         # Check for insecure protocols
         self._check_insecure_protocol(pkt_info)
 
-        # Scan payload for credentials and sensitive data
-        if pkt_info.payload_size > 0 and pkt_info._raw_payload is not None:
-            self._scan_payload_bytes(pkt_info, pkt_info._raw_payload)
+        # Scan payload for credentials and sensitive data — once.
+        if payload is None:
+            payload = pkt_info._raw_payload
+        if payload:
+            self._scan_payload_bytes(pkt_info, payload)
         elif pkt_info.payload_size > 0:
             # Even without raw payload, flag based on port
             self._flag_unencrypted_data(pkt_info)
 
     def analyze_packet_with_payload(self, pkt_info, raw_payload):
-        """Analyze a packet that includes raw payload bytes."""
-        self.analyze_packet(pkt_info)
-        if raw_payload:
-            self._scan_payload_bytes(pkt_info, raw_payload)
+        """
+        Analyze a packet that includes raw payload bytes. This used to call
+        analyze_packet, which already scanned pkt_info._raw_payload, and then scan
+        the same bytes again — every finding was looked for twice, and the
+        timeline got every event twice.
+        """
+        self.analyze_packet(pkt_info, payload=raw_payload or None)
 
     def _check_insecure_protocol(self, pkt_info):
         """Flag insecure protocol usage."""
@@ -1636,6 +1728,26 @@ class NetworkForensics:
 
     # ─── HTTP Request Inspection ─────────────────────────────
 
+    def _note_scripted_client(self, ua_lower, ua_str, payload, src, dst, port, ts):
+        """A library or command-line HTTP client: noted once per source at its
+        own level (see SCRIPTED_CLIENT_USER_AGENTS). True if one matched."""
+        for sig, risk in SCRIPTED_CLIENT_USER_AGENTS:
+            if sig not in ua_lower:
+                continue
+            dedup_key = (src, sig.decode('ascii'))
+            if dedup_key not in self._http_ua_alerted:
+                self._http_ua_alerted.add(dedup_key)
+                host = ''
+                host_match = HTTP_HOST_RE.search(payload)
+                if host_match:
+                    host = host_match.group(1).decode('utf-8', errors='replace')
+                self._add_sensitive_data('Scripted HTTP Client',
+                    f'Library or command-line HTTP client: "{ua_str[:80]}" → '
+                    f'{host or dst}:{port}',
+                    src, dst, port, ts, risk=risk)
+            return True
+        return False
+
     def _inspect_http_request(self, pkt_info, payload, ts, src, dst, port):
         """
         Inspect outbound HTTP requests for:
@@ -1700,9 +1812,12 @@ class NetworkForensics:
                         })
                     break  # Only match first
 
-            # Check for SUSPICIOUS user agents (HIGH)
+            # Check for SUSPICIOUS user agents (HIGH), after the scripted-client
+            # tier (LOW or MEDIUM)
             else:
-                for sus_ua in SUSPICIOUS_USER_AGENTS:
+                for sus_ua in ([] if self._note_scripted_client(
+                        ua_lower, ua_str, payload, src, dst, port, ts)
+                        else SUSPICIOUS_USER_AGENTS):
                     if sus_ua in ua_lower:
                         dedup_key = (src, sus_ua.decode('utf-8', errors='replace'))
                         if dedup_key not in self._http_ua_alerted:
@@ -1901,6 +2016,74 @@ class NetworkForensics:
 
     # ─── FEATURE 2: mDNS / LLMNR Poisoning Detection ────────
 
+    def _note_name_responder(self, responders, protocol, query_name, pkt_info, port, ts,
+                             risk):
+        """
+        Record who answered a name, and note a name answered by more than one
+        host. A host is its MAC when the frame has one: one machine answering
+        over IPv4 and IPv6 used to count as two responders and was reported as
+        poisoning itself.
+
+        Filed as a security finding (man-in-the-middle), not as "sensitive data in
+        transit", which it never was. The live alert for this is the IDS engine's
+        NAME-POISONING (src/lan_threats.py), which looks for the Responder
+        pattern: one host answering for many names.
+        """
+        identity = (pkt_info.src_mac or '').lower() or pkt_info.src_ip
+        owners = responders[query_name]
+        owners.add((identity, pkt_info.src_ip))
+        hosts = {ident for ident, _ in owners}
+        if len(hosts) <= 1:
+            return
+        alert_key = f"{protocol}:{query_name}"
+        if alert_key in self._mdns_poisoning_alerts:
+            return
+        self._mdns_poisoning_alerts.add(alert_key)
+        addresses = sorted({ip for _, ip in owners})
+        self.security_findings.append({
+            'type': 'name_poisoning',
+            'risk': risk,
+            'title': f'Several hosts answering "{query_name}" over {protocol}',
+            'description': (f'{len(hosts)} different hosts answered {protocol} lookups for '
+                            f'"{query_name}": {", ".join(addresses[:6])}. One of them may be '
+                            f'answering for a name it does not own (Responder and similar '
+                            f'tools do this to capture credentials).'),
+            'details': {'name': query_name, 'protocol': protocol,
+                        'responders': addresses[:10], 'hosts': len(hosts)},
+            'recommendation': ('Find which host owns this name. Disable LLMNR and NetBIOS '
+                               'name resolution where they are not needed.'),
+        })
+        self._add_timeline_event(ts, 'security',
+            f"{protocol}: several hosts answered for {query_name} ({', '.join(addresses[:4])})")
+
+    def _note_smb1_service(self, pkt_info, size, ts):
+        """SMBv1 on a server, as an insecure service (the server is the 445 side)."""
+        server = pkt_info.dst_ip if pkt_info.dst_port == 445 else pkt_info.src_ip
+        client = pkt_info.src_ip if server == pkt_info.dst_ip else pkt_info.dst_ip
+        key = (server, 445, 'smbv1')
+        svc = self.insecure_services.get(key)
+        if svc is None:
+            svc = self.insecure_services[key] = {
+                'ip': server,
+                'port': 445,
+                'service': 'SMBv1',
+                'risk': 'CRITICAL',
+                'description': ('SMBv1 is responsible for EternalBlue, WannaCry, NotPetya '
+                                'and many other major attacks. It should be disabled on all '
+                                'systems.'),
+                'secure_alternative': 'SMB 3 (disable SMBv1: Disable-WindowsOptionalFeature '
+                                      '-Online -FeatureName SMB1Protocol)',
+                'first_seen': ts,
+                'packet_count': 0,
+                'bytes': 0,
+                'src_ips': set(),
+                'has_https': False,
+            }
+        svc['packet_count'] += 1
+        svc['bytes'] += size
+        if isinstance(svc['src_ips'], set):
+            svc['src_ips'].add(client)
+
     def _check_mdns_poisoning(self, pkt_info, payload, ts):
         """
         Detect mDNS poisoning. In normal mDNS, devices respond about themselves.
@@ -1916,7 +2099,6 @@ class NetworkForensics:
             ancount = int.from_bytes(payload[6:8], 'big')
 
             if is_response and ancount > 0:
-                responder = pkt_info.src_ip
                 # Simple heuristic: if the same query gets responses from
                 # different IPs, one of them might be poisoning
                 # Extract query name (simplified)
@@ -1932,18 +2114,8 @@ class NetworkForensics:
                     query_name = ''
 
                 if query_name:
-                    self._mdns_responders[query_name].add(responder)
-
-                    # If more than one IP responds for the same name → suspicious
-                    if len(self._mdns_responders[query_name]) > 1:
-                        alert_key = query_name
-                        if alert_key not in self._mdns_poisoning_alerts:
-                            self._mdns_poisoning_alerts.add(alert_key)
-                            responders = list(self._mdns_responders[query_name])
-                            self._add_sensitive_data('mDNS Poisoning',
-                                f'Multiple devices responding for "{query_name}": '
-                                f'{", ".join(responders)} — possible mDNS poisoning attack',
-                                pkt_info.src_ip, pkt_info.dst_ip, 5353, ts, risk='HIGH')
+                    self._note_name_responder(self._mdns_responders, 'mDNS', query_name,
+                                              pkt_info, 5353, ts, risk='HIGH')
         except Exception:
             pass
 
@@ -1960,7 +2132,6 @@ class NetworkForensics:
             ancount = int.from_bytes(payload[6:8], 'big')
 
             if is_response and ancount > 0:
-                responder = pkt_info.src_ip
                 try:
                     name_parts = []
                     i = 12
@@ -1973,17 +2144,8 @@ class NetworkForensics:
                     query_name = ''
 
                 if query_name:
-                    self._llmnr_responders[query_name].add(responder)
-
-                    if len(self._llmnr_responders[query_name]) > 1:
-                        alert_key = f"llmnr:{query_name}"
-                        if alert_key not in self._mdns_poisoning_alerts:
-                            self._mdns_poisoning_alerts.add(alert_key)
-                            responders = list(self._llmnr_responders[query_name])
-                            self._add_sensitive_data('LLMNR Poisoning',
-                                f'Multiple devices responding for "{query_name}" via LLMNR: '
-                                f'{", ".join(responders)} — possible LLMNR poisoning (Responder/MITM tool)',
-                                pkt_info.src_ip, pkt_info.dst_ip, 5355, ts, risk='CRITICAL')
+                    self._note_name_responder(self._llmnr_responders, 'LLMNR', query_name,
+                                              pkt_info, 5355, ts, risk='CRITICAL')
         except Exception:
             pass
 
@@ -2026,27 +2188,12 @@ class NetworkForensics:
                                     0x75: 'Tree Connect', 0x25: 'Transaction'}
                         cmd_name = SMB_CMDS.get(cmd, f'Cmd 0x{cmd:02x}')
 
-                        self._add_sensitive_data('SMBv1',
-                            f'SMBv1 connection detected: {src} ↔ {dst} ({cmd_name}). '
-                            f'SMBv1 is CRITICALLY insecure (EternalBlue, WannaCry). '
-                            f'Disable SMBv1 immediately.',
-                            src, dst, 445, ts, risk='CRITICAL')
-
-                        self.security_findings.append({
-                            'type': 'smb_v1',
-                            'risk': 'CRITICAL',
-                            'title': f'SMBv1 Active: {src} ↔ {dst}',
-                            'description': ('SMBv1 is responsible for EternalBlue, WannaCry, '
-                                'NotPetya, and many other major attacks. It should be disabled '
-                                'on ALL systems.'),
-                            'details': {
-                                'hosts': [src, dst],
-                                'command': cmd_name,
-                            },
-                            'recommendation': ('Disable SMBv1 on both hosts: '
-                                'Windows: Disable-WindowsOptionalFeature -Online -FeatureName SMB1Protocol. '
-                                'Linux: set "min protocol = SMB2" in smb.conf.'),
-                        })
+                        self._add_timeline_event(ts, 'security',
+                            f"SMBv1 in use: {src} ↔ {dst} ({cmd_name})")
+                    # Filed as the insecure service it is. It used to be "sensitive
+                    # data in transit", which it is not, and a separate security
+                    # finding, which the live app never turned into an alert.
+                    self._note_smb1_service(pkt_info, len(payload), ts)
 
                 elif header == smb2_marker:
                     self._smb_sessions[session_key] = 'SMBv2/3'
@@ -2269,13 +2416,13 @@ class NetworkForensics:
             })
 
         return {
-            'credentials': self.credentials_found,
-            'sensitive_data': self.sensitive_data,
+            'credentials': list(self.credentials_found),
+            'sensitive_data': list(self.sensitive_data),
             'insecure_services': [
                 {k: v for k, v in svc.items() if k != 'src_ips' or not isinstance(v, set)}
                 for svc in self.insecure_services.values()
             ],
-            'security_findings': self.security_findings,
+            'security_findings': list(self.security_findings),
             'flow_classifications': flow_classifications,
             'dhcp_devices': self.dhcp_devices,
             'http_servers': self._http_servers,
@@ -2330,7 +2477,7 @@ class NetworkForensics:
             lines.append("-" * 30)
             if cred_count:
                 lines.append(f"  *** {cred_count} CREDENTIALS FOUND IN PLAINTEXT ***")
-                for cred in self.credentials_found[:10]:
+                for cred in list(self.credentials_found)[:10]:
                     lines.append(f"    - {cred['protocol']} {cred['credential_type']}: "
                                f"{cred['source_ip']} → {cred['destination_ip']}:{cred['port']}")
             if insecure_count:

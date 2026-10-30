@@ -14,8 +14,10 @@ import itertools
 from collections import Counter, defaultdict, deque
 from datetime import datetime
 
-from src.dns_analysis import DnsResponseMonitor
+from src.cloud_ranges import get_cloud_ranges
+from src.dns_analysis import DnsResponseMonitor, DnsTunnelMonitor
 from src.ipcache import is_private
+from src.lan_threats import LanThreatMonitor
 
 logger = logging.getLogger("NetSentinel.IDS")
 
@@ -105,6 +107,40 @@ _PORT_NAMES = {**_BUILTIN_PORT_NAMES, **_RULE_PACK_PORTS}
 _HIGH_ABUSE_TLDS = frozenset(_BUILTIN_HIGH_ABUSE_TLDS | _RULE_PACK_TLDS)
 
 
+def load_mining_pools():
+    """
+    rules/mining_pools.json: pool domains (matched as suffixes) and Stratum
+    ports. A user copy in ~/.netsentinel/rules/ overrides the bundled one, as
+    for the rule pack. Returns (domains: frozenset, ports: frozenset).
+    """
+    candidates = []
+    try:
+        from src.config import RULES_DIR
+        candidates.append(os.path.join(RULES_DIR, 'mining_pools.json'))
+    except Exception:
+        pass
+    base = getattr(sys, '_MEIPASS', None) or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    candidates.append(os.path.join(base, 'rules', 'mining_pools.json'))
+    for path in candidates:
+        if not os.path.exists(path):
+            continue
+        try:
+            with open(path, encoding='utf-8') as f:
+                data = json.load(f)
+            domains = frozenset(str(d).lower().strip('.') for d in data.get('domains', []) if d)
+            ports = frozenset(int(p) for p in data.get('ports', []))
+            return domains, ports
+        except Exception as e:
+            logger.error("Could not load mining pool list %s: %s", path, e)
+    return frozenset(), frozenset()
+
+
+_MINING_POOLS, _MINING_PORTS = load_mining_pools()
+
+# DNS record types tunnels use for the data coming back (for evidence wording).
+_QTYPE_NAMES = {1: 'A', 5: 'CNAME', 10: 'NULL', 15: 'MX', 16: 'TXT', 28: 'AAAA', 255: 'ANY'}
+
+
 def _domain_matches(domain, domain_set):
     """Match a domain against a set of suffixes, walking up the label hierarchy."""
     if not domain or not domain_set:
@@ -128,6 +164,40 @@ def _tld_of(domain):
         return ''
     domain = domain.rstrip('.').lower()
     return domain.rsplit('.', 1)[-1] if '.' in domain else ''
+
+
+def _is_address(value):
+    """An IPv4/IPv6 literal (a DNS answer that is an address, not a CNAME)."""
+    if not isinstance(value, str) or not value:
+        return False
+    if ':' in value:
+        return True
+    parts = value.split('.')
+    return len(parts) == 4 and all(p.isdigit() and len(p) <= 3 for p in parts)
+
+
+def _pool_suffix(name):
+    """The mining-pool domain `name` is (or is under), or None."""
+    name = (name or '').lower().rstrip('.')
+    if name in _MINING_POOLS:
+        return name
+    idx = name.find('.')
+    while idx != -1:
+        if name[idx + 1:] in _MINING_POOLS:
+            return name[idx + 1:]
+        idx = name.find('.', idx + 1)
+    return None
+
+
+def _request_url(pkt_info):
+    """The absolute URL of a plaintext HTTP request, as the feed would list it."""
+    host = pkt_info.http_host or pkt_info.dst_ip
+    if ':' in pkt_info.dst_ip and host == pkt_info.dst_ip:
+        host = f'[{host}]'
+    if pkt_info.dst_port not in (0, 80) and not host.endswith(f':{pkt_info.dst_port}') \
+            and not host.endswith(']') and host.count(':') == 0:
+        host = f'{host}:{pkt_info.dst_port}'
+    return f"http://{host}{pkt_info.http_path or '/'}"
 
 
 # Service names for brute force alert descriptions
@@ -187,6 +257,17 @@ class SlidingPortWindow:
         """Distinct destinations in the window. Only called when an alert fires."""
         return {dst for _, _, dst in self._events if dst}
 
+    def max_ports_per_destination(self):
+        """
+        The most distinct ports any single destination received. A scan probes
+        many ports on its targets; peer-to-peer and voice apps reach many peers on
+        one or two ports each, which adds up to many ports but none per peer.
+        """
+        per_dst = {}
+        for _, port, dst in self._events:
+            per_dst.setdefault(dst, set()).add(port)
+        return max((len(p) for p in per_dst.values()), default=0)
+
     @property
     def last_seen(self):
         return self._events[-1][0] if self._events else 0
@@ -201,9 +282,9 @@ class Alert:
 
     def __init__(self, rule_id, severity, title, description,
                  src_ip="", dst_ip="", src_port=0, dst_port=0,
-                 protocol="", evidence=None, category=""):
+                 protocol="", evidence=None, category="", timestamp=None):
         self.id = next(Alert._id_gen)
-        self.timestamp = time.time()
+        self.timestamp = timestamp if timestamp else time.time()
         self.rule_id = rule_id
         self.severity = severity
         self.title = title
@@ -247,11 +328,16 @@ class IDSEngine:
     data exfiltration, ARP spoofing, and more.
     """
 
-    def __init__(self, config, alert_callback=None, threat_intel=None, net_env=None):
+    def __init__(self, config, alert_callback=None, threat_intel=None, net_env=None,
+                 offline=False):
         self.config = config
         self.alert_callback = alert_callback
         self.threat_intel = threat_intel
         self.net_env = net_env
+        # Offline = reading a capture file. Every time window then runs on packet
+        # time (always true, live or not: see _now), and alerts carry the time of
+        # the packet that raised them rather than the moment of analysis.
+        self.offline = offline
         self.enabled = config.get('ids', 'enabled', default=True)
         self.baseline_whitelist = None  # Set by app after init
 
@@ -316,10 +402,41 @@ class IDSEngine:
         # Queries alone cannot see either — both live in the answer section.
         self.dns_monitor = DnsResponseMonitor(config)
 
+        # DNS tunnelling: long encoded names, many names under one domain, and
+        # TXT-heavy query rates, per host and registered domain.
+        self.dns_tunnel = DnsTunnelMonitor(config, exempt=self._dns_trusted)
+
+        # Attacks on the LAN itself, and new devices. See src/lan_threats.py.
+        self.lan = LanThreatMonitor(config, net_env=net_env, offline=offline)
+
+        # Published cloud/CDN ranges, to keep attacker feeds from condemning
+        # shared infrastructure this machine connects to.
+        self.cloud_ranges = get_cloud_ranges()
+        self.cloud_exempted = 0
+
+        # Country and ASN in alert evidence, from local DB-IP files. Off unless
+        # geoip.enabled; the module is only imported when it is on.
+        self.geoip = None
+        if config.get('geoip', 'enabled', default=False):
+            try:
+                from src.geoip import get_geoip
+                self.geoip = get_geoip(config)
+            except Exception as e:
+                logger.warning("GeoIP unavailable: %s", e)
+
+        # Hold-downs set by the modules' findings: {key: until}. Separate from
+        # the cooldowns, which are pruned at 5x cooldown_sec.
+        self._holds = {}
+
+        # The latest packet time seen. Pruning and windows run on this clock, so a
+        # capture file replays at its own pace rather than in a two-second burst.
+        self._clock = 0.0
+
         # Statistics
         self.alerts_generated = 0
         self.total_packets_inspected = 0
         self.threat_intel_hits = 0
+        self.certificates_checked = 0
 
         # Threat intel lookup cache: avoid checking the same IP/domain repeatedly
         # {ip_or_domain: (result_or_None, timestamp)}
@@ -327,15 +444,30 @@ class IDSEngine:
         self._ti_cache_ttl = 300  # Cache results for 5 minutes
         self._ti_cache_max = 10000
 
-        # Periodic state cleanup
-        self._last_cleanup = time.time()
+        # Periodic state cleanup. 0 until the first run: seeding it from the wall
+        # clock meant a capture replayed with older packet times never pruned.
+        self._last_cleanup = 0
         self._cleanup_interval = 60  # Prune stale state every 60 seconds
         self._packets_since_cleanup = 0
 
         logger.info("IDS Engine initialized. Rules active. Threat intel: %s",
                      "enabled" if threat_intel else "disabled")
 
-    def _periodic_cleanup(self, force=False):
+    def _now(self, pkt_info):
+        """
+        The time to judge a packet by: its own timestamp. Live, that is the moment
+        it was captured; in a capture file, when it was sent. Every window and
+        cooldown runs on this, so replaying a ten-minute capture in two seconds
+        does not look like a ten-minute flood in two seconds.
+        """
+        ts = getattr(pkt_info, 'timestamp', 0) or 0
+        if ts <= 0:
+            ts = time.time()
+        if ts > self._clock:
+            self._clock = ts
+        return ts
+
+    def _periodic_cleanup(self, force=False, now=None):
         """Prune stale entries from all state-tracking dicts to prevent memory leaks."""
         # Only check time every 1000 packets to avoid time.time() overhead
         if not force:
@@ -344,10 +476,13 @@ class IDSEngine:
                 return
             self._packets_since_cleanup = 0
 
-        now = time.time()
-        if now - self._last_cleanup < self._cleanup_interval:
+        now = now or self._clock or time.time()
+        if self._last_cleanup and 0 <= now - self._last_cleanup < self._cleanup_interval:
             return
         self._last_cleanup = now
+
+        for k in [k for k, until in self._holds.items() if until < now]:
+            del self._holds[k]
 
         # Prune alert cooldowns older than 5x the cooldown window
         max_cooldown_age = self.cooldown_sec * 5
@@ -424,8 +559,10 @@ class IDSEngine:
             return []
 
         self.total_packets_inspected += 1
-        self._periodic_cleanup()
+        now = self._now(pkt_info)
+        self._periodic_cleanup(now=now)
         alerts = []
+        is_dns_query = bool(pkt_info.dns_query) and pkt_info.dns_rcode < 0
 
         # ─── TLS SNI: the destination name for encrypted traffic ──────
         # The ClientHello is plaintext even under TLS 1.3, so this is a direct
@@ -435,9 +572,9 @@ class IDSEngine:
             entry = self._ja4_seen.get(pkt_info.tls_ja4)
             if entry is None:
                 if len(self._ja4_seen) < 5000:
-                    self._ja4_seen[pkt_info.tls_ja4] = [time.time(), 1]
+                    self._ja4_seen[pkt_info.tls_ja4] = [now, 1]
             else:
-                entry[0] = time.time()
+                entry[0] = now
                 entry[1] += 1
 
         if pkt_info.tls_sni and pkt_info.dst_ip:
@@ -446,29 +583,24 @@ class IDSEngine:
                 self._ip_to_domains[pkt_info.dst_ip].add(pkt_info.tls_sni)
 
         # ─── DNS Resolution Tracking (always runs, lightweight) ────────
-        # Track every DNS query so we can map IPs to domains later
+        # An address is tied to a name only when the answer said so, or the
+        # handshake named it (above). The old guess — whatever the host connects
+        # to within 30 seconds of a lookup came from that lookup — tied random
+        # addresses to whatever was last looked up, which is how an unrelated
+        # address became "github.com" in a threat-intel alert.
         if pkt_info.dns_query:
-            now = time.time()
-            # O(1) index: remember most recent DNS query per source IP
-            self._latest_dns_by_ip[pkt_info.src_ip] = (pkt_info.dns_query, now)
-            # When we see a DNS response, map the domain to the destination
-            if pkt_info.dns_response:
-                self._dns_to_ip[pkt_info.dns_query] = (pkt_info.dns_response, now)
-                resp_ip = pkt_info.dns_response
-                if len(self._ip_to_domains.get(resp_ip, set())) < self._ip_to_domains_max:
-                    self._ip_to_domains[resp_ip].add(pkt_info.dns_query)
-
-        # Also infer domain from recent DNS queries:
-        # If we just saw a DNS query for "docs.google.com" and now see a TCP connection
-        # to an IP, that IP likely resolved from that domain.
-        # Uses O(1) index lookup instead of scanning the full recent_dns deque.
-        if pkt_info.dst_ip and pkt_info.protocol in ('TCP', 'UDP') and not pkt_info.dns_query:
-            entry = self._latest_dns_by_ip.get(pkt_info.src_ip)
-            if entry:
-                domain, ts = entry
-                if time.time() - ts < 30:
-                    if len(self._ip_to_domains.get(pkt_info.dst_ip, set())) < self._ip_to_domains_max:
-                        self._ip_to_domains[pkt_info.dst_ip].add(domain)
+            if is_dns_query:
+                # O(1) index: remember most recent DNS query per source IP
+                self._latest_dns_by_ip[pkt_info.src_ip] = (pkt_info.dns_query, now)
+            if pkt_info.dns_rcode in (-1, 0):
+                addresses = [a for a in (pkt_info.dns_answers or ()) if _is_address(a)]
+                if not addresses and pkt_info.dns_response and _is_address(pkt_info.dns_response):
+                    addresses = [pkt_info.dns_response]
+                if addresses:
+                    self._dns_to_ip[pkt_info.dns_query] = (addresses[0], now)
+                for resp_ip in addresses[:16]:
+                    if len(self._ip_to_domains.get(resp_ip, ())) < self._ip_to_domains_max:
+                        self._ip_to_domains[resp_ip].add(pkt_info.dns_query)
 
         # Manual whitelist = skip everything entirely
         if pkt_info.src_ip in self.whitelist_ips or pkt_info.dst_ip in self.whitelist_ips:
@@ -499,7 +631,9 @@ class IDSEngine:
                 category="Blacklist"
             ))
 
-        # Smart auto-whitelist: skip HEURISTIC rules for known infrastructure
+        # Skip HEURISTIC rules only for traffic that is noise by nature (multicast,
+        # broadcast, link-local discovery) and for devices the user listed. This
+        # machine's own traffic, its gateway and its DNS servers are inspected.
         skip_heuristics = False
         if self.net_env:
             skip_heuristics = self.net_env.should_skip_ids(
@@ -508,10 +642,34 @@ class IDSEngine:
             )
 
         # === Rule 1: Threat Intel - IP Reputation (cloud-aware) ===
+        # One alert per connection: both directions of a connection to a listed
+        # address used to raise their own alert, since the cooldown key had the
+        # addresses in packet order. The key now names the listed address and its
+        # peer, whichever way the packet goes.
         if self.threat_intel:
-            for ip_field, direction in [(pkt_info.src_ip, 'inbound'), (pkt_info.dst_ip, 'outbound')]:
+            ends = ((pkt_info.src_ip, pkt_info.src_port, pkt_info.dst_ip, pkt_info.dst_port),
+                    (pkt_info.dst_ip, pkt_info.dst_port, pkt_info.src_ip, pkt_info.src_port))
+            for ip_field, ip_port, peer_ip, peer_port in ends:
                 result = self._cached_ti_check('ip', ip_field)
                 if result:
+                    # Which end is the server: the lower port, when there are ports.
+                    if ip_port and peer_port:
+                        listed_is_server = ip_port < peer_port or (
+                            ip_port == peer_port and ip_field == pkt_info.dst_ip)
+                    else:
+                        listed_is_server = ip_field == pkt_info.dst_ip
+                    direction = 'outbound' if listed_is_server else 'inbound'
+
+                    # A feed of attacking hosts says where scans came from. When
+                    # this machine is the one connecting, to an address a cloud
+                    # or CDN publishes as its own, the address is shared or
+                    # recycled and the listing is about someone else.
+                    if result.get('attacker_feed') and listed_is_server:
+                        provider = self.cloud_ranges.provider(ip_field)
+                        if provider:
+                            self.cloud_exempted += 1
+                            continue
+
                     self.threat_intel_hits += 1
 
                     # Get all domains associated with this IP
@@ -567,8 +725,7 @@ class IDSEngine:
                         sev = Severity.CRITICAL if result['category'] in ('Botnet C2', 'Malicious SSL') \
                             else Severity.HIGH
                         title = f"Known Malicious IP ({result['category']})"
-                        desc = (f"{direction.title()} traffic "
-                                f"{'from' if direction == 'inbound' else 'to'} "
+                        desc = (f"{'Connection from' if direction == 'inbound' else 'Connection to'} "
                                 f"known malicious IP {ip_field}")
                         if associated_domains:
                             desc += f" (domain: {', '.join(list(associated_domains)[:3])})"
@@ -596,14 +753,52 @@ class IDSEngine:
                             'protocol': pkt_info.protocol,
                             'process': pkt_info.process_name or 'Unknown',
                             'recommendation': recommendation,
+                            **({'matched_network': result['matched_network']}
+                               if result.get('matched_network') else {}),
                         },
-                        category="Threat Intelligence"
+                        category="Threat Intelligence",
+                        cooldown_key=f"THREAT-INTEL-IP:{ip_field}:{peer_ip}",
                     ))
+
+        # === Rule 1b: Threat Intel - exact malware URL ===
+        # URLhaus lists download links. Only plaintext HTTP shows the path; that
+        # is also where most malware loaders still fetch their payloads.
+        if self.threat_intel and getattr(pkt_info, 'http_path', ''):
+            url = _request_url(pkt_info)
+            result = self._cached_ti_check('url', url)
+            if result:
+                self.threat_intel_hits += 1
+                alerts.append(self._create_alert(
+                    "THREAT-INTEL-URL", Severity.CRITICAL,
+                    f"Malware Download URL ({result.get('category', 'URLhaus')})",
+                    f"HTTP request for a URL listed as distributing malware: {url[:200]}",
+                    pkt_info,
+                    evidence={
+                        'url': url[:500],
+                        'http_method': pkt_info.http_method,
+                        'host': pkt_info.http_host,
+                        'threat_feed': result.get('feed', ''),
+                        'threat_category': result.get('category', ''),
+                        'feed_description': result.get('description', ''),
+                        'requesting_ip': pkt_info.src_ip,
+                        'process': pkt_info.process_name or 'Unknown',
+                        'description': ('This exact URL is in URLhaus, a list of links '
+                                        'currently serving malware. Unlike a domain match, '
+                                        'an exact URL match is specific even on shared '
+                                        'hosting.'),
+                        'recommendation': ('Find what made this request and whether the '
+                                           'file was downloaded or run. Scan the machine.'),
+                    },
+                    category="Threat Intelligence",
+                    cooldown_key=f"THREAT-INTEL-URL:{pkt_info.src_ip}:{url}",
+                ))
 
         # === Rule 2: Threat Intel - Domain Reputation ===
         # observed_domain is the DNS query when we saw one, otherwise the TLS SNI.
         # Before SNI was parsed, this rule could not fire at all on HTTPS traffic.
-        observed_domain = pkt_info.dns_query or pkt_info.tls_sni
+        # Only the query, not the response carrying the same name back: each raised
+        # its own alert, from the resolver's side and the client's.
+        observed_domain = (pkt_info.dns_query if is_dns_query else '') or pkt_info.tls_sni
         if self.threat_intel and observed_domain:
             # FIRST: Check if this is a first-party cloud domain (docs.google.com,
             # outlook.office365.com, etc.). These appear in feeds like URLhaus
@@ -669,15 +864,52 @@ class IDSEngine:
                         category="Threat Intelligence"
                     ))
 
-        # If this is auto-whitelisted infrastructure traffic (gateway, DNS, broadcast, etc.)
-        # emit any threat intel alerts found above but skip all heuristic rules below
+            # === Rule 2a: Newly registered domain ===
+            # Weak alone (new domains are mostly harmless), but phishing and fresh
+            # C2 almost always use one, so it is worth a LOW line once a day.
+            if not is_first_party_cloud and not self._dns_trusted(observed_domain):
+                fresh = self._cached_ti_check('nrd', observed_domain)
+                if fresh:
+                    alerts.append(self._create_alert(
+                        "NEWLY-REGISTERED-DOMAIN", Severity.LOW,
+                        "Newly Registered Domain",
+                        f"{observed_domain} belongs to {fresh['registered_domain']}, "
+                        f"registered in the last few days",
+                        pkt_info,
+                        evidence={
+                            'queried_domain': observed_domain,
+                            'registered_domain': fresh['registered_domain'],
+                            'observed_via': 'DNS query' if is_dns_query else 'TLS SNI',
+                            'lists_checked': fresh.get('lists_checked', ''),
+                            'source': 'WhoisDS daily newly registered domains',
+                            'requesting_ip': pkt_info.src_ip,
+                            'process': pkt_info.process_name or 'Unknown',
+                            'description': fresh['description'] + (
+                                ' Phishing sites and new command-and-control servers '
+                                'usually use domains days old; most new domains are '
+                                'harmless.'),
+                            'recommendation': ('If nothing you use explains it, check what '
+                                               'made this lookup.'),
+                        },
+                        category="Suspicious DNS",
+                        cooldown_key=f"NRD:{fresh['registered_domain']}",
+                        hold_sec=86400,
+                    ))
+
+        # === LAN attacks and inventory (before the skip below) ===
+        # ARP, DHCP, router advertisements and the name protocols are broadcast
+        # and multicast by design, which is exactly what the skip below drops.
+        try:
+            for finding in self.lan.observe(pkt_info, now, outbound=self._is_outbound(pkt_info)):
+                alerts.append(self._alert_from_finding(finding, pkt_info))
+        except Exception as e:
+            logger.debug("LAN monitor error: %s", e)
+
+        # Traffic that is noise by nature (multicast, broadcast, link-local) and
+        # user-listed known devices: emit what was found above, skip the
+        # heuristic rules below.
         if skip_heuristics:
-            valid_alerts = [a for a in alerts if a is not None]
-            for alert in valid_alerts:
-                if self.alert_callback:
-                    self.alert_callback(alert)
-            self.alerts_generated += len(valid_alerts)
-            return valid_alerts
+            return self._emit(alerts)
 
         # === Rule 2b: Known-bad TLS client fingerprint ===
         # JA3/JA4 identify the client *stack*, not the site, so this matches malware
@@ -714,6 +946,47 @@ class IDSEngine:
                     },
                     category="Threat Intelligence"
                 ))
+
+        # JA3 against the downloaded list (abuse.ch SSLBL). MEDIUM, not HIGH: the
+        # list stopped growing in 2021, was never tested against good traffic, and
+        # JA3 itself collides between unrelated clients.
+        if pkt_info.tls_ja3 and self.threat_intel and \
+                pkt_info.tls_ja3.lower() not in self.blocked_ja3:
+            listed = self._cached_ti_check('ja3', pkt_info.tls_ja3)
+            sni = pkt_info.tls_sni
+            if listed and not (sni and self.net_env and self.net_env.is_known_cloud_domain(sni)):
+                alerts.append(self._create_alert(
+                    "TLS-FINGERPRINT-FEED", Severity.MEDIUM,
+                    f"TLS Client Matches Malware Fingerprint ({listed.get('malware') or 'JA3'})",
+                    f"JA3 {pkt_info.tls_ja3} is listed by abuse.ch as "
+                    f"{listed.get('malware') or 'a malware client'}",
+                    pkt_info,
+                    evidence={
+                        'fingerprint_type': 'JA3',
+                        'fingerprint': pkt_info.tls_ja3,
+                        'listed_as': listed.get('malware', ''),
+                        'list_last_seen': listed.get('last_seen', ''),
+                        'threat_feed': listed.get('feed', ''),
+                        'server_name': sni or 'none (direct IP)',
+                        'tls_ja4': pkt_info.tls_ja4,
+                        'process': pkt_info.process_name or 'Unknown',
+                        'description': (
+                            'The TLS options this client offered hash to a fingerprint '
+                            'abuse.ch recorded for malware. JA3 is a weak identifier on '
+                            'its own (unrelated software can share one), and the list '
+                            'has not been updated since 2021.'),
+                        'recommendation': (
+                            'Check the process behind this connection. If it is a '
+                            'browser or a tool you know, this is a collision.'),
+                    },
+                    category="Threat Intelligence",
+                    cooldown_key=f"TLS-FINGERPRINT-FEED:{pkt_info.src_ip}:{pkt_info.tls_ja3}",
+                    hold_sec=3600,
+                ))
+
+        # === Rule 2d: Server certificate (TLS 1.2 and earlier) ===
+        if getattr(pkt_info, '_tls_certs', ()):
+            alerts.extend(self._check_certificate(pkt_info, now))
 
         # === Rule 2c: DNS response analysis (DGA bursts, fast-flux) ===
         if pkt_info.dns_rcode >= 0 and pkt_info.dns_query:
@@ -758,8 +1031,19 @@ class IDSEngine:
                 category="Blacklist"
             ))
 
+        # === Rule 3b: Cryptocurrency mining ===
+        # A lookup or handshake for a pool, the Stratum protocol itself, or a
+        # Stratum port on an address that a pool name resolved to.
+        pool = self._mining_pool(pkt_info, observed_domain)
+        if pool or getattr(pkt_info, 'app_protocol', '') == 'stratum':
+            alerts.append(self._mining_alert(pkt_info, pool, observed_domain))
+
         # === Rule 4: Suspicious Ports ===
-        if pkt_info.dst_port in self.known_bad_ports:
+        # 4444 and 5555 are also two of the commonest Stratum ports; to a known
+        # pool, the mining alert above is the right description, not
+        # "Metasploit" or "Android ADB".
+        if pkt_info.dst_port in self.known_bad_ports and not (
+                pool and pkt_info.dst_port in _MINING_PORTS):
             alerts.append(self._create_alert(
                 "BAD-PORT", Severity.HIGH,
                 "Known Malicious Port",
@@ -788,9 +1072,11 @@ class IDSEngine:
         #     server responding to client connections, not probing for services.
         #   - Single-service fan-out: a device responding on one service port (8008,
         #     8009, 80, 443) to many clients' ephemeral ports is normal.
+        #   - Spread over many peers: peer-to-peer and voice apps reach dozens of
+        #     peers on one high port each. Now that this machine's own traffic is
+        #     inspected, that added up to a "scan"; a real one probes many ports on
+        #     its targets.
         if pkt_info.src_ip and pkt_info.dst_port:
-            now = time.time()
-
             # Don't track as "scanning" if src is sending FROM a well-known service
             # port — that's response traffic, not reconnaissance
             src_is_service_response = pkt_info.src_port in _COMMON_SERVICE_PORTS
@@ -807,8 +1093,10 @@ class IDSEngine:
                     # Check if ALL scanned ports are ephemeral (>= 1024)
                     # If so, this is a server responding to many clients, not a scan
                     has_low_ports = scanned_ports[0] < 1024
+                    concentrated = window.max_ports_per_destination() >= max(
+                        2, self.port_scan_threshold // 2)
 
-                    if has_low_ports:
+                    if has_low_ports and concentrated:
                         alerts.append(self._create_alert(
                             "PORT-SCAN", Severity.HIGH,
                             "Port Scan Detected",
@@ -829,22 +1117,34 @@ class IDSEngine:
                         ))
 
         # === Rule 6: Brute Force / Failed Connections ===
+        # Only on login services, and keyed by client and server however the
+        # reset travels. Counting every RST by packet direction made a browser
+        # closing connections to one CDN look like a brute force on port 443 —
+        # invisible while this machine's own traffic was skipped, constant since.
         if pkt_info.flags and 'R' in pkt_info.flags:
-            now = time.time()
-            key = f"{pkt_info.src_ip}->{pkt_info.dst_ip}:{pkt_info.dst_port}"
+            if pkt_info.dst_port in _SERVICE_NAMES:
+                client, server, service_port = pkt_info.src_ip, pkt_info.dst_ip, pkt_info.dst_port
+            elif pkt_info.src_port in _SERVICE_NAMES:
+                client, server, service_port = pkt_info.dst_ip, pkt_info.src_ip, pkt_info.src_port
+            else:
+                client = server = service_port = None
+        else:
+            client = server = service_port = None
+        if service_port:
+            key = f"{client}->{server}:{service_port}"
             self._conn_failures[key].append(now)
             recent = [t for t in self._conn_failures[key]
                        if now - t < self.brute_force_window]
             if len(recent) >= self.brute_force_threshold:
-                service = _SERVICE_NAMES.get(pkt_info.dst_port, f'port {pkt_info.dst_port}')
+                service = _SERVICE_NAMES.get(service_port, f'port {service_port}')
                 alerts.append(self._create_alert(
                     "BRUTE-FORCE", Severity.HIGH,
                     f"Potential Brute Force ({service})",
                     f"{len(recent)} failed connections to {service} in {self.brute_force_window}s",
                     pkt_info,
                     evidence={
-                        'attacker_ip': pkt_info.src_ip,
-                        'target': f"{pkt_info.dst_ip}:{pkt_info.dst_port}",
+                        'attacker_ip': client,
+                        'target': f"{server}:{service_port}",
                         'target_service': service,
                         'failed_attempts': len(recent),
                         'window_seconds': self.brute_force_window,
@@ -853,7 +1153,8 @@ class IDSEngine:
                             'guessing. Consider blocking the source IP and checking '
                             'authentication logs.',
                     },
-                    category="Brute Force"
+                    category="Brute Force",
+                    cooldown_key=f"BRUTE-FORCE:{client}:{server}:{service_port}",
                 ))
 
         # === Rule 7: SYN Flood Detection ===
@@ -866,8 +1167,6 @@ class IDSEngine:
         # for local machines making outbound connections to standard ports.
         if pkt_info.protocol == "TCP" and pkt_info.flags:
             if 'S' in pkt_info.flags and 'A' not in pkt_info.flags:
-                now = time.time()
-
                 # Track per (src, dst) pair — this is the key change
                 pair_key = f"syn-{pkt_info.src_ip}->{pkt_info.dst_ip}"
                 if pair_key not in self._conn_failures:
@@ -924,8 +1223,10 @@ class IDSEngine:
                         ))
 
         # === Rule 8: ICMP Flood ===
-        if pkt_info.protocol == "ICMP":
-            now = time.time()
+        # Not from the gateway: during a traceroute or a path-MTU problem it sends
+        # this machine streams of time-exceeded and unreachable messages.
+        if pkt_info.protocol == "ICMP" and not (
+                self.net_env and self.net_env.is_gateway(pkt_info.src_ip)):
             self._icmp_flood_tracker[pkt_info.src_ip].append(now)
             recent = [t for t in self._icmp_flood_tracker[pkt_info.src_ip]
                        if now - t < 10]
@@ -948,13 +1249,13 @@ class IDSEngine:
 
         # === Rule 9: Suspicious DNS (with full detail) ===
         # Runs on the TLS SNI as well: a connection to a high-abuse TLD is the same
-        # signal whether the name came from a DNS query or the handshake.
-        if pkt_info.dns_query or pkt_info.tls_sni:
-            query = pkt_info.dns_query or pkt_info.tls_sni
-            if pkt_info.dns_query:
-                self._dns_queries_by_ip[pkt_info.src_ip].append((time.time(), query))
-            query_parts = query.split('.')
-            subdomain = query_parts[0] if query_parts else ''
+        # signal whether the name came from a DNS query or the handshake. Never on
+        # a response, which carries the question back: it doubled every alert and
+        # charged the resolver with its clients' lookups.
+        query = (pkt_info.dns_query if is_dns_query else '') or pkt_info.tls_sni
+        if query:
+            if is_dns_query:
+                self._dns_queries_by_ip[pkt_info.src_ip].append((now, query))
 
             # Skip DNS heuristics for known cloud/CDN domains
             is_known_cloud = False
@@ -966,37 +1267,12 @@ class IDSEngine:
             if self.baseline_whitelist and self.baseline_whitelist.is_learned_domain(query):
                 is_learned = True
 
-            # Long subdomain (possible DNS tunneling) — skip for known/learned domains
-            if len(query) > 60 and not is_known_cloud and not is_learned:
-                # Calculate entropy of subdomain
-                from collections import Counter
-                import math
-                char_freq = Counter(subdomain)
-                ent = -sum((c/len(subdomain)) * math.log2(c/len(subdomain))
-                           for c in char_freq.values()) if subdomain else 0
-
-                alerts.append(self._create_alert(
-                    "DNS-TUNNEL", Severity.HIGH,
-                    "Possible DNS Tunneling",
-                    f"Unusually long DNS query ({len(query)} chars) with high entropy",
-                    pkt_info,
-                    evidence={
-                        'full_query': query,
-                        'query_length': len(query),
-                        'subdomain': subdomain[:80],
-                        'subdomain_length': len(subdomain),
-                        'subdomain_entropy': round(ent, 2),
-                        'domain_levels': len(query_parts),
-                        'requesting_ip': pkt_info.src_ip,
-                        'process': pkt_info.process_name or 'Unknown',
-                        'description': 'DNS tunneling encodes data in DNS queries to '
-                            'exfiltrate information or establish covert communication channels. '
-                            'High entropy subdomains are a strong indicator.',
-                        'recommendation': 'Identify the process making these queries. '
-                            'Legitimate software rarely uses subdomains this long.',
-                    },
-                    category="Exfiltration"
-                ))
+            # DNS tunnelling: query type, volume per registered domain, TXT rate,
+            # and an entropy gate on long names. See dns_analysis.DnsTunnelMonitor.
+            if is_dns_query:
+                for finding in self.dns_tunnel.observe_query(
+                        pkt_info.src_ip, query, getattr(pkt_info, 'dns_qtype', 0), now):
+                    alerts.append(self._alert_from_tunnel_finding(finding, pkt_info))
 
             # Suspicious TLD check — skip for known cloud or learned domains
             tld = _tld_of(query)
@@ -1023,11 +1299,14 @@ class IDSEngine:
                     category="Suspicious DNS"
                 ))
 
-            # High DNS query rate from single source
-            now = time.time()
+            # High DNS query rate from single source. Not to this machine's own
+            # resolver: a browser opening a news page makes 50 lookups in seconds.
+            # Tunnels through that resolver are what DnsTunnelMonitor is for.
+            to_own_resolver = bool(self.net_env) and \
+                self.net_env.is_configured_resolver(pkt_info.dst_ip)
             recent_dns = [t for t, _ in self._dns_queries_by_ip[pkt_info.src_ip]
                           if now - t < 10]
-            if len(recent_dns) > 50:  # 50+ DNS queries in 10 seconds
+            if len(recent_dns) > 50 and not to_own_resolver:  # 50+ DNS queries in 10 seconds
                 recent_domains = [q for t, q in self._dns_queries_by_ip[pkt_info.src_ip]
                                   if now - t < 10]
                 unique_domains = list(set(recent_domains))
@@ -1051,33 +1330,16 @@ class IDSEngine:
                 ))
 
         # === Rule 10: ARP Spoofing ===
-        if pkt_info.protocol == "ARP" and pkt_info.src_ip and pkt_info.src_mac:
-            if pkt_info.src_ip in self._arp_table:
-                if self._arp_table[pkt_info.src_ip] != pkt_info.src_mac:
-                    alerts.append(self._create_alert(
-                        "ARP-SPOOF", Severity.CRITICAL,
-                        "ARP Spoofing Detected",
-                        f"IP {pkt_info.src_ip} changed MAC address",
-                        pkt_info,
-                        evidence={
-                            'ip_address': pkt_info.src_ip,
-                            'previous_mac': self._arp_table[pkt_info.src_ip],
-                            'new_mac': pkt_info.src_mac,
-                            'description': 'ARP spoofing is a man-in-the-middle attack where '
-                                'an attacker sends fake ARP messages to associate their MAC '
-                                'address with a legitimate IP, allowing traffic interception.',
-                            'recommendation': 'Verify your gateway MAC address. Someone on your '
-                                'local network may be intercepting traffic.',
-                        },
-                        category="MITM"
-                    ))
-            self._arp_table[pkt_info.src_ip] = pkt_info.src_mac
+        # In LanThreatMonitor (above the skip), which reads the sender from the ARP
+        # payload, pins the gateway's MAC and knows failover and randomised MACs.
 
         # === Rule 11: Large Data Transfer (potential exfil, escalating) ===
         # Only outbound counts. Accumulating against dst_ip unconditionally meant every
         # large download was reported as data "sent to" the user's own machine.
+        # Scaled by the sampling weight: under load one packet stands for several.
         if pkt_info.payload_size > 0 and self._is_outbound(pkt_info):
-            self._data_transfer[pkt_info.dst_ip] += pkt_info.payload_size
+            weight = max(1, int(getattr(pkt_info, 'sample_weight', 1) or 1))
+            self._data_transfer[pkt_info.dst_ip] += pkt_info.payload_size * weight
             self._active_transfer_ips.add(pkt_info.dst_ip)
             mb_sent = self._data_transfer[pkt_info.dst_ip] / (1024 * 1024)
 
@@ -1123,13 +1385,14 @@ class IDSEngine:
                 self._exfil_thresholds[pkt_info.dst_ip] = ip_threshold * 2
 
         # === Rule 12: Unusual time-of-day activity ===
-        # Only alert once per source IP per hour window (not per packet)
-        hour = datetime.now().hour
+        # Only alert once per source IP per hour window (not per packet). Offline,
+        # the hour is the packet's, so a capture file is judged by when it was
+        # recorded (live, the two are the same).
+        hour = (datetime.fromtimestamp(now) if self.offline else datetime.now()).hour
         if hour >= 2 and hour <= 5:
             if pkt_info.payload_size > 50000:  # 50KB minimum, not 10KB
                 # Custom cooldown: source IP + hour, so max 1 alert per IP per hour
                 odd_key = f"ODD-HOURS:{pkt_info.src_ip}:h{hour}"
-                now = time.time()
                 # Kept out of _alert_cooldowns: that dict is pruned at cooldown_sec*5
                 # (150s by default), which silently reduced this to ~24 alerts/hour.
                 if now - self._long_suppressions.get(odd_key, 0) > 3600:
@@ -1151,7 +1414,10 @@ class IDSEngine:
                         category="Anomaly"
                     ))
 
-        # Filter and emit
+        return self._emit(alerts)
+
+    def _emit(self, alerts):
+        """Deliver this packet's alerts (dropping the ones a cooldown suppressed)."""
         valid_alerts = [a for a in alerts if a is not None]
         for alert in valid_alerts:
             if self.alert_callback:
@@ -1171,14 +1437,188 @@ class IDSEngine:
         return False
 
     def _is_local_ip(self, ip):
-        """Is this address one of ours, or on a private network?"""
+        """
+        Is this address one of ours, or on a private network? Not "any address in
+        the auto-whitelist": that holds 8.8.8.8 and 1.1.1.1, so an upload to a
+        public resolver's address was never treated as leaving the network.
+        """
         if not ip:
             return False
-        if self.net_env:
-            if ip in getattr(self.net_env, 'local_ips', ()) or \
-               ip in getattr(self.net_env, 'auto_whitelist_ips', ()):
-                return True
+        if self.net_env and ip in getattr(self.net_env, 'local_ips', ()):
+            return True
         return is_private(ip)
+
+    def _dns_trusted(self, name):
+        """Names the DNS heuristics leave alone: first-party cloud services and
+        domains learned during the baseline period."""
+        if not name:
+            return False
+        if self.net_env and self.net_env.is_known_cloud_domain(name):
+            return True
+        if self.baseline_whitelist and self.baseline_whitelist.is_learned_domain(name):
+            return True
+        return False
+
+    def _mining_pool(self, pkt_info, observed_domain):
+        """The pool domain this packet is about, by name or by a Stratum port on
+        an address a pool name resolved to; else None."""
+        if not _MINING_POOLS:
+            return None
+        if observed_domain:
+            pool = _pool_suffix(observed_domain)
+            if pool:
+                return pool
+        if pkt_info.dst_port in _MINING_PORTS and pkt_info.protocol == 'TCP':
+            for name in self._get_domains_for_ip(pkt_info.dst_ip):
+                pool = _pool_suffix(name)
+                if pool:
+                    return pool
+        return None
+
+    def _mining_alert(self, pkt_info, pool, observed_domain):
+        stratum = getattr(pkt_info, 'app_protocol', '') == 'stratum'
+        how = ('Stratum mining protocol seen in the payload' if stratum and not pool else
+               f'lookup of mining pool {pool}' if observed_domain and pool and
+               _pool_suffix(observed_domain) else
+               f'connection to {pkt_info.dst_ip}:{pkt_info.dst_port}, an address of {pool}')
+        return self._create_alert(
+            "MINING-POOL" if not stratum else "MINING-STRATUM", Severity.HIGH,
+            "Cryptocurrency Mining",
+            f"{pkt_info.src_ip}: {how}",
+            pkt_info,
+            evidence={
+                'pool': pool or 'unknown (protocol match)',
+                'observed_name': observed_domain or None,
+                'stratum_protocol_seen': stratum,
+                'destination': f"{pkt_info.dst_ip}:{pkt_info.dst_port}",
+                'miner_ip': pkt_info.src_ip,
+                'process': pkt_info.process_name or 'Unknown',
+                'description': ('Mining pools hand out work to miners over Stratum. '
+                                'On a machine nobody set up to mine, this is cryptojacking '
+                                'malware using its CPU or GPU.'),
+                'recommendation': ('Find the process. Unexplained high CPU or GPU use '
+                                   'alongside this confirms it.'),
+            },
+            category="Cryptomining",
+            cooldown_key=f"MINING:{pkt_info.src_ip}:{pool or pkt_info.dst_ip}",
+            hold_sec=3600,
+        )
+
+    def _check_certificate(self, pkt_info, now):
+        """
+        Self-signed or expired server certificates, from a TLS <= 1.2 handshake.
+        Only for servers on the internet: printers, NAS boxes and router admin
+        pages on the LAN use self-signed certificates as a matter of course (the
+        subnet audit is the place to judge those).
+        """
+        server = pkt_info.src_ip
+        if self._is_local_ip(server):
+            return []
+        from src.tls_certs import inspect_certificate
+        info = inspect_certificate(pkt_info._tls_certs[0], now)
+        self.certificates_checked += 1
+        if not info:
+            return []
+        problems = [p for p, flag in (('self-signed', info['self_signed']),
+                                      ('expired', info['expired']),
+                                      ('not yet valid', info['not_yet_valid'])) if flag]
+        if not problems:
+            return []
+        names = self._get_domains_for_ip(server)
+        if any(self.net_env and self.net_env.is_known_cloud_domain(n) for n in names):
+            return []
+        rule = "TLS-CERT-SELF-SIGNED" if info['self_signed'] else "TLS-CERT-INVALID"
+        return [self._create_alert(
+            rule, Severity.MEDIUM,
+            f"Untrusted Server Certificate ({', '.join(problems)})",
+            f"{server}:{pkt_info.src_port} presented a {' and '.join(problems)} certificate",
+            pkt_info,
+            evidence={
+                'server': f"{server}:{pkt_info.src_port}",
+                'server_names': sorted(names)[:5],
+                'certificate_subject': info['subject'],
+                'certificate_issuer': info['issuer'],
+                'certificate_names': info['dns_names'],
+                'valid_from': info['not_before'],
+                'valid_until': info['not_after'],
+                'days_past_expiry': info['days_past_expiry'],
+                'self_signed': info['self_signed'],
+                'sha256': info['sha256'],
+                'chain_length': len(pkt_info._tls_certs),
+                'description': ('A browser would refuse this certificate. Malware '
+                                'command-and-control servers often use self-signed or '
+                                'long-expired ones, because nothing they talk to checks.'),
+                'recommendation': ('Find the client making this connection. Software you '
+                                   'trust connecting to a server like this is still worth '
+                                   'questioning.'),
+            },
+            category="Suspicious TLS",
+            cooldown_key=f"{rule}:{server}",
+            hold_sec=3600,
+        )]
+
+    def _alert_from_finding(self, finding, pkt_info):
+        """An alert from a LanThreatMonitor finding."""
+        evidence = dict(finding.get('evidence') or {})
+        evidence.setdefault('process', pkt_info.process_name or 'Unknown')
+        return self._create_alert(
+            finding['rule_id'], finding['severity'], finding['title'],
+            finding['description'], pkt_info, evidence=evidence,
+            category=finding.get('category', ''),
+            cooldown_key=finding.get('cooldown_key'),
+            hold_sec=finding.get('hold_sec'))
+
+    def _alert_from_tunnel_finding(self, finding, pkt_info):
+        """An alert from a DnsTunnelMonitor finding. The long-name case keeps the
+        DNS-TUNNEL rule and the evidence fields the verifier reads."""
+        query = finding.get('query') or finding.get('sample_query', '')
+        if finding['type'] == 'long_name':
+            labels = query.split('.')
+            rule, title = "DNS-TUNNEL", "Possible DNS Tunneling"
+            evidence = {
+                'full_query': query,
+                'query_length': len(query),
+                'subdomain': labels[0][:80] if labels else '',
+                'subdomain_length': len(labels[0]) if labels else 0,
+                'encoded_length': finding['encoded_length'],
+                'subdomain_entropy': finding['entropy'],
+                'domain_levels': len(labels),
+                'registered_domain': finding['domain'],
+                'record_type': finding.get('record_type', ''),
+            }
+        elif finding['type'] == 'volume':
+            rule, title = "DNS-TUNNEL-VOLUME", "Possible DNS Tunneling (many names)"
+            evidence = {
+                'registered_domain': finding['domain'],
+                'distinct_names': finding['distinct_names'],
+                'window_seconds': finding['window_sec'],
+                'mean_encoded_length': finding['mean_encoded_length'],
+                'mean_entropy': finding['mean_entropy'],
+                'sample_query': query,
+            }
+        else:
+            rule, title = "DNS-TUNNEL-TXT", "Possible DNS Tunneling (record-type rate)"
+            evidence = {
+                'registered_domain': finding['domain'],
+                'queries_per_minute': finding['queries_per_minute'],
+                'record_type': finding.get('record_type', ''),
+                'sample_query': query,
+            }
+        evidence.update({
+            'requesting_ip': finding['src_ip'],
+            'process': pkt_info.process_name or 'Unknown',
+            'description': finding['description'] + (
+                ' DNS tunneling encodes data in DNS queries to exfiltrate information '
+                'or establish covert communication channels.'),
+            'recommendation': finding['recommendation'],
+        })
+        # The volume and rate findings repeat on every query past the threshold,
+        # so they are held for ten minutes; one long name is one alert per cooldown.
+        return self._create_alert(
+            rule, finding['severity'], title, finding['description'], pkt_info,
+            evidence=evidence, category="Exfiltration",
+            cooldown_key=f"{rule}:{finding['src_ip']}:{finding['domain']}",
+            hold_sec=None if finding['type'] == 'long_name' else 600)
 
     def _is_outbound(self, pkt_info):
         """True when traffic leaves a local host for an external destination."""
@@ -1256,6 +1696,8 @@ class IDSEngine:
         if not value or not self.threat_intel:
             return None
 
+        # Wall clock, not packet time: this caches the feed's answer, and the
+        # feed changes in real time whatever the packets say.
         now = time.time()
         cache_key = f"{check_type}:{value}"
 
@@ -1265,11 +1707,18 @@ class IDSEngine:
             if now - cached_at < self._ti_cache_ttl:
                 return result  # Cache hit (may be None = known clean)
 
-        # Cache miss — do the actual lookup
+        # Cache miss — do the actual lookup. The newer lookups are optional on
+        # the threat-intel object, so a stand-in (tests, a minimal feed) works.
         if check_type == 'ip':
             result = self.threat_intel.check_ip(value)
         elif check_type == 'domain':
             result = self.threat_intel.check_domain(value)
+        elif check_type == 'url' and hasattr(self.threat_intel, 'check_url'):
+            result = self.threat_intel.check_url(value)
+        elif check_type == 'ja3' and hasattr(self.threat_intel, 'check_ja3'):
+            result = self.threat_intel.check_ja3(value)
+        elif check_type == 'nrd' and hasattr(self.threat_intel, 'check_new_domain'):
+            result = self.threat_intel.check_new_domain(value)
         else:
             result = None
 
@@ -1284,15 +1733,28 @@ class IDSEngine:
         return result
 
     def _create_alert(self, rule_id, severity, title, description,
-                      pkt_info, evidence=None, category=""):
-        """Create an alert with cooldown deduplication and auto-enriched context."""
-        # Cooldown check
-        cooldown_key = f"{rule_id}:{pkt_info.src_ip}:{pkt_info.dst_ip}"
-        now = time.time()
-        if cooldown_key in self._alert_cooldowns:
-            if now - self._alert_cooldowns[cooldown_key] < self.cooldown_sec:
-                return None  # Suppress duplicate
-        self._alert_cooldowns[cooldown_key] = now
+                      pkt_info, evidence=None, category="", cooldown_key=None,
+                      hold_sec=None):
+        """
+        Create an alert with cooldown deduplication and auto-enriched context.
+
+        `cooldown_key` replaces the default rule:src:dst key when a rule knows
+        better what "the same alert" means (a connection either way, a host, a
+        domain). `hold_sec` suppresses repeats of that key for that long instead
+        of the ordinary cooldown.
+        """
+        now = self._now(pkt_info)
+        if hold_sec:
+            key = cooldown_key or f"{rule_id}:{pkt_info.src_ip}:{pkt_info.dst_ip}"
+            if self._holds.get(key, -1.0) >= now:
+                return None
+            self._holds[key] = now + hold_sec
+        else:
+            cooldown_key = cooldown_key or f"{rule_id}:{pkt_info.src_ip}:{pkt_info.dst_ip}"
+            if cooldown_key in self._alert_cooldowns:
+                if 0 <= now - self._alert_cooldowns[cooldown_key] < self.cooldown_sec:
+                    return None  # Suppress duplicate
+            self._alert_cooldowns[cooldown_key] = now
 
         # Auto-enrich evidence with connection context
         # This gives every alert domain info, packet details, etc.
@@ -1310,7 +1772,17 @@ class IDSEngine:
         for k, v in evidence.items():
             enriched[k] = v
 
+        # Country and network operator of the public end(s), from local files.
+        if self.geoip is not None:
+            try:
+                for ip, prefix in ((pkt_info.src_ip, 'src'), (pkt_info.dst_ip, 'dst')):
+                    for k, v in self.geoip.annotate(ip, prefix).items():
+                        enriched.setdefault(k, v)
+            except Exception as e:
+                logger.debug("GeoIP enrichment failed: %s", e)
+
         return Alert(
+            timestamp=pkt_info.timestamp if self.offline else None,
             rule_id=rule_id,
             severity=severity,
             title=title,
@@ -1330,11 +1802,17 @@ class IDSEngine:
             'alerts_generated': self.alerts_generated,
             'packets_inspected': self.total_packets_inspected,
             'tracked_sources': len(self._port_access),
-            'arp_entries': len(self._arp_table),
+            'arp_entries': len(self.lan._arp),
             'threat_intel_hits': self.threat_intel_hits,
             'tls_fingerprints_seen': len(self._ja4_seen),
             'dns': self.dns_monitor.get_stats(),
+            'dns_tunnel': self.dns_tunnel.get_stats(),
+            'lan': self.lan.get_stats(),
+            'cloud_range_exemptions': self.cloud_exempted,
+            'certificates_checked': self.certificates_checked,
         }
+        if self.geoip is not None:
+            stats['geoip'] = self.geoip.get_stats()
         if self.threat_intel:
             stats['threat_intel'] = self.threat_intel.get_stats()
         return stats

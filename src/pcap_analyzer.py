@@ -10,8 +10,12 @@ Supports:
 - .pcapng files (next-gen Wireshark format)
 - .cap files (various capture tools)
 
-If tshark (Wireshark CLI) is installed, uses it for faster parsing.
-Falls back to Scapy's rdpcap if tshark is not available.
+Packets are read with Scapy, one at a time, through the same parser live
+capture uses (CaptureEngine._extract_packet_info in offline mode), so a file
+gets TLS SNI and fingerprints, the full DNS answer section and IPv6 ports just
+as live traffic does. It used to run an older parser of its own — no SNI, no
+DNS answers, IPv6 with no ports — and to prefer tshark for big files, whose
+field output had even less. tshark is now only the fallback without Scapy.
 """
 
 import os
@@ -26,12 +30,20 @@ from datetime import datetime
 logger = logging.getLogger("NetSentinel.PCAP")
 
 try:
-    from scapy.all import rdpcap, PcapReader
+    from scapy.all import PcapReader
     SCAPY_AVAILABLE = True
 except ImportError:
     SCAPY_AVAILABLE = False
 
 import subprocess
+
+# Forensics security-finding types -> (rule id, alert category).
+_FINDING_RULES = {
+    'insecure_protocol': ('FORENSICS-INSECURE-SVC', 'Insecure Service'),
+    'malicious_user_agent': ('FORENSICS-USER-AGENT', 'Suspicious HTTP'),
+    'http_attack': ('FORENSICS-HTTP-ATTACK', 'Web Attack'),
+    'http_info_leak': ('FORENSICS-SERVER-INFO', 'Information Disclosure'),
+}
 
 
 def find_tshark():
@@ -169,45 +181,35 @@ class PcapAnalyzer:
                 callback(alert)
 
         # Create a temporary IDS engine for this analysis
-        # (so we don't pollute the live engine's state)
+        # (so we don't pollute the live engine's state). Offline: windows and
+        # alert times run on packet time, and nothing about this network's own
+        # history (pinned gateway MAC, known devices) is read or written.
         from src.ids_engine import IDSEngine
         analysis_ids = IDSEngine(
             self.config,
             alert_callback=on_alert,
             threat_intel=self.threat_intel,
             net_env=self.net_env,
+            offline=True,
         )
 
         # Forensics engine for credential/security scanning
         from src.forensics import NetworkForensics
         forensics = NetworkForensics(forensics_db=self.forensics_db)
 
+        first_ts = last_ts = None
         try:
             # Parse packets
             self.progress_text = "Parsing packets..."
 
-            if self.tshark_path and file_size > 5 * 1024 * 1024:
-                # Use tshark for large files (faster than scapy)
-                packets = self._parse_with_tshark(filepath, stats)
-            elif SCAPY_AVAILABLE:
-                packets = self._parse_with_scapy(filepath, stats)
+            if SCAPY_AVAILABLE:
+                packets = self._iter_with_scapy(filepath, file_size)
+            elif self.tshark_path:
+                packets = iter(self._parse_with_tshark(filepath, stats))
             else:
                 raise RuntimeError("No packet parser available. Install Scapy or Wireshark.")
 
-            stats['total_packets'] = len(packets)
-            self.total_packets = len(packets)
-
-            # Capture time range
-            if packets:
-                timestamps = [p.timestamp for p in packets if p.timestamp > 0]
-                if timestamps:
-                    stats['capture_start'] = datetime.fromtimestamp(min(timestamps)).strftime(
-                        '%Y-%m-%d %H:%M:%S')
-                    stats['capture_end'] = datetime.fromtimestamp(max(timestamps)).strftime(
-                        '%Y-%m-%d %H:%M:%S')
-                    stats['capture_duration'] = f"{max(timestamps) - min(timestamps):.1f} seconds"
-
-            # Analyze each packet
+            # Analyze each packet as it is read: the whole file is never in memory.
             self.progress_text = "Running detection engines..."
             for i, pkt_info in enumerate(packets):
                 if self._cancel:
@@ -215,11 +217,14 @@ class PcapAnalyzer:
                     break
 
                 self.packets_processed = i + 1
-                self.progress = int((i + 1) / max(len(packets), 1) * 100)
+                self.total_packets = i + 1
+                if pkt_info.timestamp > 0:
+                    first_ts = pkt_info.timestamp if first_ts is None else min(first_ts, pkt_info.timestamp)
+                    last_ts = pkt_info.timestamp if last_ts is None else max(last_ts, pkt_info.timestamp)
 
                 if i % 100 == 0:
                     self.progress_text = (
-                        f"Analyzing packet {i+1}/{len(packets)} "
+                        f"Analyzing packet {i+1} "
                         f"({self.progress}%) — {len(alert_list)} alerts"
                     )
 
@@ -284,6 +289,12 @@ class PcapAnalyzer:
             logger.error("PCAP analysis error: %s", e)
             stats['error'] = str(e)
 
+        stats['total_packets'] = stats['packets_analyzed']
+        if first_ts is not None:
+            stats['capture_start'] = datetime.fromtimestamp(first_ts).strftime('%Y-%m-%d %H:%M:%S')
+            stats['capture_end'] = datetime.fromtimestamp(last_ts).strftime('%Y-%m-%d %H:%M:%S')
+            stats['capture_duration'] = f"{last_ts - first_ts:.1f} seconds"
+
         # Finalize forensics
         try:
             forensics_results = forensics.finalize()
@@ -322,12 +333,20 @@ class PcapAnalyzer:
             on_alert(alert)
 
         for svc_finding in forensics.security_findings:
+            kind = svc_finding.get('type', 'insecure_protocol')
+            if kind == 'name_poisoning':
+                continue    # the IDS engine's NAME-POISONING covers it, with more context
+            # Each kind under its own rule and an honest category: everything used
+            # to be filed as an "Insecure Service", user agents and server banners
+            # included.
+            rule_id, category = _FINDING_RULES.get(
+                kind, ('FORENSICS-INSECURE-SVC', 'Insecure Service'))
             alert = Alert(
-                rule_id='FORENSICS-INSECURE-SVC',
+                rule_id=rule_id,
                 severity=svc_finding['risk'],
                 title=svc_finding['title'],
                 description=svc_finding['description'],
-                category="Insecure Service",
+                category=category,
                 evidence=svc_finding.get('details', {}),
             )
             alert.evidence['recommendation'] = svc_finding.get('recommendation', '')
@@ -412,7 +431,7 @@ class PcapAnalyzer:
                 'stats': self.stats,
                 'alerts': [a.to_dict() for a in self.alerts],
             }
-            with open(filepath, 'w') as f:
+            with open(filepath, 'w', encoding='utf-8') as f:
                 json.dump(data, f, indent=2, default=str)
 
         elif format == 'csv':
@@ -432,101 +451,52 @@ class PcapAnalyzer:
 
     # ─── Parsers ─────────────────────────────────────────────────
 
-    def _parse_with_scapy(self, filepath, stats):
-        """Parse PCAP with Scapy's rdpcap."""
-        from src.capture import PacketInfo
+    def _extractor(self):
+        """A capture engine used only for its parser (never started), so its
+        handshake reassembly state belongs to this one file."""
+        from src.capture import CaptureEngine
+        return CaptureEngine(self.config)
 
-        # Import scapy packet layers
-        from scapy.all import (
-            IP, IPv6, TCP, UDP, ICMP, DNS, ARP, Raw, Ether
-        )
-
-        self.progress_text = "Loading with Scapy (this may take a moment for large files)..."
-
+    def _iter_with_scapy(self, filepath, file_size=0):
+        """
+        Yield a PacketInfo per packet, read with PcapReader (one at a time — rdpcap
+        held the whole file as Scapy objects) and parsed by the live capture's own
+        extractor in offline mode.
+        """
+        self.progress_text = "Reading with Scapy..."
+        extractor = self._extractor()
         try:
-            raw_packets = rdpcap(filepath)
+            reader = PcapReader(filepath)
         except Exception as e:
-            logger.error("Scapy rdpcap error: %s", e)
+            logger.error("Scapy could not open %s: %s", filepath, e)
             raise
-
-        packets = []
-        for i, packet in enumerate(raw_packets):
-            if self._cancel:
-                break
-
-            if i % 500 == 0:
-                self.progress_text = f"Parsing packet {i+1}/{len(raw_packets)}..."
-
-            info = PacketInfo()
-            info.timestamp = float(packet.time) if hasattr(packet, 'time') else time.time()
-            info.length = len(packet)
-
-            if packet.haslayer(Ether):
-                info.src_mac = packet[Ether].src
-                info.dst_mac = packet[Ether].dst
-
-            if packet.haslayer(IP):
-                info.src_ip = packet[IP].src
-                info.dst_ip = packet[IP].dst
-                info.ttl = packet[IP].ttl
-
-                if packet.haslayer(TCP):
-                    info.protocol = "TCP"
-                    info.src_port = packet[TCP].sport
-                    info.dst_port = packet[TCP].dport
-                    info.flags = str(packet[TCP].flags)
-                    if packet.haslayer(Raw):
-                        info.payload_size = len(packet[Raw].load)
-                    if info.dst_port == 443 or info.src_port == 443:
-                        info.is_encrypted = True
-                elif packet.haslayer(UDP):
-                    info.protocol = "UDP"
-                    info.src_port = packet[UDP].sport
-                    info.dst_port = packet[UDP].dport
-                    if packet.haslayer(Raw):
-                        info.payload_size = len(packet[Raw].load)
-                elif packet.haslayer(ICMP):
-                    info.protocol = "ICMP"
-                else:
-                    info.protocol = "IP/Other"
-            elif packet.haslayer(IPv6):
-                info.src_ip = packet[IPv6].src
-                info.dst_ip = packet[IPv6].dst
-                info.protocol = "IPv6"
-            elif packet.haslayer(ARP):
-                info.protocol = "ARP"
-                info.src_ip = packet[ARP].psrc
-                info.dst_ip = packet[ARP].pdst
-            else:
-                info.protocol = "Other"
-
-            if packet.haslayer(DNS):
+        try:
+            handle = getattr(reader, 'f', None)
+            for i, packet in enumerate(reader):
+                if self._cancel:
+                    break
+                if file_size and handle is not None and i % 200 == 0:
+                    try:
+                        self.progress = min(99, int(handle.tell() / file_size * 100))
+                    except (OSError, ValueError):
+                        pass
                 try:
-                    dns = packet[DNS]
-                    if dns.qr == 0 and dns.qd:
-                        info.dns_query = dns.qd.qname.decode('utf-8', errors='ignore').rstrip('.')
-                    elif dns.qr == 1 and dns.an:
-                        info.dns_response = str(dns.an.rdata) if hasattr(dns.an, 'rdata') else ""
-                except Exception:
-                    pass
-
-            info.process_name = ""
-            info.process_pid = 0
-            info.raw_summary = ""
-            info.dns_response = getattr(info, 'dns_response', '')
-
-            # Extract raw payload for credential/forensics scanning
+                    yield extractor._extract_packet_info(packet, offline=True)
+                except Exception as e:
+                    logger.debug("Packet %d not parsed: %s", i, e)
+        finally:
             try:
-                if packet.haslayer(Raw):
-                    info._raw_payload = bytes(packet[Raw].load)
-                else:
-                    info._raw_payload = None
+                reader.close()
             except Exception:
-                info._raw_payload = None
+                pass
 
-            packets.append(info)
-
-        return packets
+    def _parse_with_scapy(self, filepath, stats=None):
+        """Every packet of a file as PacketInfo. Kept for callers that want a list."""
+        try:
+            size = os.path.getsize(filepath)
+        except OSError:
+            size = 0
+        return list(self._iter_with_scapy(filepath, size))
 
     def _parse_with_tshark(self, filepath, stats):
         """Parse PCAP with tshark for better performance on large files."""

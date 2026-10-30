@@ -9,7 +9,10 @@ import time
 import logging
 from collections import defaultdict, deque
 
-from src.tls_inspect import looks_like_tls_handshake, parse_client_hello
+from src.tls_inspect import (
+    ClientHelloReassembler, QuicHelloReassembler, looks_like_quic,
+)
+from src.tls_certs import ServerHandshakeReassembler
 
 logger = logging.getLogger("NetSentinel.Capture")
 
@@ -26,6 +29,74 @@ except ImportError:
     logger.warning("Scapy not available. Install with: pip install scapy")
 
 try:
+    # Separate from the import above so a stub scapy (tests) still loads the rest.
+    from scapy.all import AsyncSniffer
+except ImportError:
+    AsyncSniffer = None
+
+# Cap on the per-flow list of names looked up, which used to grow without limit
+# for a long-lived DNS flow (every query to the resolver shares one flow).
+MAX_FLOW_DNS_QUERIES = 64
+
+_HTTP_METHODS = (b'GET ', b'POST ', b'HEAD ', b'PUT ', b'DELETE ', b'OPTIONS ',
+                 b'PATCH ')
+_HTTP_HEADER_LIMIT = 4096
+
+
+def parse_http_request(payload):
+    """
+    (method, host, path) from the start of a plaintext HTTP request, or None.
+
+    Only the request line and Host header, read from the first few KB. Values are
+    reduced to printable ASCII so a crafted request cannot carry control
+    characters into alerts.
+    """
+    if not payload or not payload.startswith(_HTTP_METHODS):
+        return None
+    head = payload[:_HTTP_HEADER_LIMIT]
+    line_end = head.find(b'\r\n')
+    if line_end < 0:
+        line_end = head.find(b'\n')
+    if line_end < 0:
+        return None
+    parts = head[:line_end].split(b' ')
+    if len(parts) < 3 or not parts[2].startswith(b'HTTP/'):
+        return None
+    method = parts[0].decode('ascii', 'replace')
+    target = parts[1][:2048]
+    host = b''
+    lower = head.lower()
+    idx = lower.find(b'\nhost:')
+    if idx >= 0:
+        end = head.find(b'\n', idx + 1)
+        host = head[idx + 6:end if end >= 0 else len(head)].strip()
+    if target.startswith((b'http://', b'https://')):
+        # Absolute form, as sent to a proxy: the host is in the target.
+        rest = target.split(b'://', 1)[1]
+        slash = rest.find(b'/')
+        host = host or (rest[:slash] if slash >= 0 else rest)
+        target = rest[slash:] if slash >= 0 else b'/'
+
+    def _clean(value, limit):
+        text = value.decode('ascii', 'replace')[:limit]
+        return ''.join(c for c in text if 32 < ord(c) < 127)
+
+    host = _clean(host, 253).lower()
+    path = _clean(target, 2048)
+    if not path.startswith('/'):
+        return None
+    return method, host, path
+
+
+def _looks_like_stratum(payload):
+    """Plaintext Stratum (mining pool JSON-RPC): cheap enough for the packet path."""
+    if not payload or payload[:1] != b'{':
+        return False
+    head = payload[:512]
+    return (b'"mining.' in head or
+            (b'"method"' in head and b'"login"' in head and b'"agent"' in head))
+
+try:
     import psutil
     PSUTIL_AVAILABLE = True
 except ImportError:
@@ -40,8 +111,11 @@ class PacketInfo:
         'dns_query', 'dns_response', 'is_encrypted', 'raw_summary',
         'src_mac', 'dst_mac', 'process_name', 'process_pid',
         'tls_sni', 'tls_ja3', 'tls_ja4', 'tls_version',
-        'dns_rcode', 'dns_ttl', 'dns_answers',
-        '_raw_payload',
+        'dns_rcode', 'dns_ttl', 'dns_answers', 'dns_qtype',
+        'arp_op', 'arp_hwsrc', 'icmp_type',
+        'http_method', 'http_host', 'http_path', 'app_protocol',
+        'sample_weight',
+        '_raw_payload', '_tls_certs',
     ]
 
     def __init__(self):
@@ -75,7 +149,22 @@ class PacketInfo:
         self.dns_rcode = -1        # -1 = not a response; 0 = NOERROR, 3 = NXDOMAIN
         self.dns_ttl = -1          # Lowest TTL across the answers
         self.dns_answers = ()      # Every rdata in the answer section
+        self.dns_qtype = 0         # Question type: 1 = A, 16 = TXT, 28 = AAAA ...
+        # ARP sender detail from the ARP payload itself. The Ethernet source is
+        # the frame's sender, which a proxy or a spoofing tool can make differ.
+        self.arp_op = 0            # 1 = who-has (request), 2 = is-at (reply)
+        self.arp_hwsrc = ""
+        self.icmp_type = -1        # ICMP or ICMPv6 type (134 = router advertisement)
+        # Plaintext HTTP request line, for exact-URL threat matching.
+        self.http_method = ""
+        self.http_host = ""
+        self.http_path = ""
+        self.app_protocol = ""     # 'http' or 'stratum' when recognised in the payload
+        # How many packets this one stands for: under adaptive sampling only one in
+        # N reaches the rules, so byte-counting rules scale by this.
+        self.sample_weight = 1
         self._raw_payload = None
+        self._tls_certs = ()       # DER certificates from a TLS <= 1.2 server flight
 
     def to_dict(self):
         return {attr: getattr(self, attr) for attr in self.__slots__ if not attr.startswith('_')}
@@ -112,7 +201,7 @@ class NetworkFlow:
         self.flags_seen = set()
         self.inter_arrival_times = deque(maxlen=500)
         self._last_packet_time = self.start_time
-        self.dns_queries = []
+        self.dns_queries = deque(maxlen=MAX_FLOW_DNS_QUERIES)
         self.is_established = False
         self.syn_count = 0
         self.rst_count = 0
@@ -205,19 +294,22 @@ def _get_process_for_port(port):
     return _port_process_cache.get(port, ("", 0))
 
 
-def _process_map_refresher(should_run):
+def _process_map_refresher(stop):
     """
     Keep the port->process map warm from a background thread.
 
     psutil.net_connections() takes tens of milliseconds and used to run inline in the
     capture callback, stalling packet capture every couple of seconds.
+
+    `stop` is the run's threading.Event, so the thread exits as soon as that run
+    ends instead of after its next sleep — or, after a quick restart, never.
     """
-    while should_run():
+    while not stop.is_set():
         try:
             _refresh_port_process_map(force=True)
         except Exception as e:
             logger.debug("Process map refresh error: %s", e)
-        time.sleep(_PORT_CACHE_TTL)
+        stop.wait(_PORT_CACHE_TTL)
 
 
 # Ports where raw payloads are extracted for credential scanning.
@@ -252,6 +344,8 @@ _CREDENTIAL_PORTS = frozenset({
     6667, 6668, 6669,
     # CouchDB
     5984,
+    # NetBIOS name service and IPv6 DHCP, for the LAN-attack checks
+    137, 546, 547,
 })
 
 
@@ -306,8 +400,20 @@ class CaptureEngine:
         self.packet_callback = packet_callback
         self.raw_packet_callback = raw_packet_callback  # For PCAP writer
         self._running = False
+        # Each run gets its own stop event, and every thread of that run waits on
+        # it. One shared flag let a quick stop()+start() revive the old run's
+        # threads beside the new ones.
+        self._stop_event = threading.Event()
+        self._stop_event.set()
+        self._lifecycle_lock = threading.Lock()
+        self._sniffer = None
         self._thread = None
         self._lock = threading.Lock()
+
+        # Handshakes that span packets, joined per flow (bounded; see each class).
+        self._hello_reassembler = ClientHelloReassembler()
+        self._quic_reassembler = QuicHelloReassembler()
+        self._cert_reassembler = ServerHandshakeReassembler()
         self._stats_lock = threading.Lock()  # Lightweight lock for rate calculations
 
         # Queue-based processing: capture thread enqueues, worker dequeues
@@ -339,8 +445,12 @@ class CaptureEngine:
             'top_talkers': defaultdict(int),
             'dns_queries': deque(maxlen=1000),
             'packets_dropped': 0,
+            # Packets adaptive sampling kept from the rules. Counted apart from
+            # drops: they were captured and tracked, just not inspected.
+            'packets_sampled_out': 0,
             'sample_rate': 1,
         }
+        self._sampled_out = 0
         self._pps_counter = 0
         self._bps_counter = 0
         self._last_rate_calc = 0
@@ -394,10 +504,19 @@ class CaptureEngine:
         fast-flux analysis need.
         """
         try:
-            if dns.qd is not None:
-                qname = getattr(dns.qd, 'qname', b'')
+            question = dns.qd
+            if isinstance(question, list):
+                # Scapy 2.7+: a list (which also proxies to its first element,
+                # with a deprecation warning on every packet).
+                question = question[0] if len(question) else None
+            if question is not None:
+                qname = getattr(question, 'qname', b'')
                 if qname:
                     info.dns_query = qname.decode('utf-8', errors='ignore').rstrip('.').lower()
+                try:
+                    info.dns_qtype = int(getattr(question, 'qtype', 0) or 0)
+                except (TypeError, ValueError):
+                    info.dns_qtype = 0
 
             if dns.qr != 1:
                 return
@@ -455,13 +574,29 @@ class CaptureEngine:
         original = getattr(packet, 'original', None)
         return original if original else bytes(packet)
 
-    def _extract_packet_info(self, packet) -> PacketInfo:
-        """Extract structured metadata from a Scapy packet."""
+    def _extract_packet_info(self, packet, offline=False, raw=None) -> PacketInfo:
+        """
+        Extract structured metadata from a Scapy packet.
+
+        `offline` is for reading a capture file: the timestamp comes from the
+        packet rather than the clock, and there is no process lookup (the
+        processes that sent it are long gone, and the ports now belong to others).
+        This is the one parser for live capture and file analysis, so a file
+        gets the same SNI, DNS and IPv6 detail as the live view.
+        """
         info = PacketInfo()
-        info.timestamp = time.time()
-        raw = self._raw_bytes(packet)
+        if offline:
+            try:
+                info.timestamp = float(packet.time)
+            except (AttributeError, TypeError, ValueError):
+                info.timestamp = time.time()
+        else:
+            info.timestamp = time.time()
+        if raw is None:
+            raw = self._raw_bytes(packet)
         info.length = len(raw)
         payload = b''
+        tcp_seq = None
 
         # Ethernet layer
         if packet.haslayer(Ether):
@@ -469,45 +604,29 @@ class CaptureEngine:
             info.dst_mac = packet[Ether].dst
 
         # IP layer
+        ip_layer = None
+        is_v6 = False
         if packet.haslayer(IP):
-            info.src_ip = packet[IP].src
-            info.dst_ip = packet[IP].dst
-            info.ttl = packet[IP].ttl
-
-            if packet.haslayer(TCP):
-                info.protocol = "TCP"
-                info.src_port = packet[TCP].sport
-                info.dst_port = packet[TCP].dport
-                flags = packet[TCP].flags
-                info.flags = str(flags)
-                payload = self._transport_payload(packet)
-                info.payload_size = len(payload)
-                if info.dst_port == 443 or info.src_port == 443:
-                    info.is_encrypted = True
-
-            elif packet.haslayer(UDP):
-                info.protocol = "UDP"
-                info.src_port = packet[UDP].sport
-                info.dst_port = packet[UDP].dport
-                payload = self._transport_payload(packet)
-                info.payload_size = len(payload)
-
-            elif packet.haslayer(ICMP):
-                info.protocol = "ICMP"
-            else:
-                info.protocol = "IP/Other"
-
+            ip_layer = packet[IP]
+            info.src_ip = ip_layer.src
+            info.dst_ip = ip_layer.dst
+            info.ttl = ip_layer.ttl
         elif packet.haslayer(IPv6):
-            info.src_ip = packet[IPv6].src
-            info.dst_ip = packet[IPv6].dst
+            ip_layer = packet[IPv6]
+            is_v6 = True
+            info.src_ip = ip_layer.src
+            info.dst_ip = ip_layer.dst
+            info.ttl = ip_layer.hlim
 
+        if ip_layer is not None:
             # IPv6 carries TCP/UDP the same way as IPv4
             if packet.haslayer(TCP):
+                tcp = packet[TCP]
                 info.protocol = "TCP"
-                info.src_port = packet[TCP].sport
-                info.dst_port = packet[TCP].dport
-                flags = packet[TCP].flags
-                info.flags = str(flags)
+                info.src_port = tcp.sport
+                info.dst_port = tcp.dport
+                info.flags = str(tcp.flags)
+                tcp_seq = tcp.seq
                 payload = self._transport_payload(packet)
                 info.payload_size = len(payload)
                 if info.dst_port == 443 or info.src_port == 443:
@@ -518,15 +637,30 @@ class CaptureEngine:
                 info.dst_port = packet[UDP].dport
                 payload = self._transport_payload(packet)
                 info.payload_size = len(payload)
-            elif packet.haslayer(ICMP):
+            elif is_v6 and ip_layer.nh == 58:
+                # ICMPv6 dissects into a class per message type, none of them ICMP,
+                # so it used to fall through to "IPv6/Other" and lose the type that
+                # tells a router advertisement from an echo.
                 info.protocol = "ICMPv6"
+                body = ip_layer.payload
+                first = getattr(body, 'type', None)
+                if first is None:
+                    load = getattr(body, 'load', b'')
+                    first = load[0] if load else None
+                info.icmp_type = int(first) if first is not None else -1
+            elif packet.haslayer(ICMP):
+                info.protocol = "ICMPv6" if is_v6 else "ICMP"
+                info.icmp_type = int(packet[ICMP].type)
             else:
-                info.protocol = "IPv6/Other"
+                info.protocol = "IPv6/Other" if is_v6 else "IP/Other"
 
         elif packet.haslayer(ARP):
+            arp = packet[ARP]
             info.protocol = "ARP"
-            info.src_ip = packet[ARP].psrc
-            info.dst_ip = packet[ARP].pdst
+            info.src_ip = arp.psrc
+            info.dst_ip = arp.pdst
+            info.arp_op = int(arp.op)
+            info.arp_hwsrc = str(arp.hwsrc or '').lower()
 
         else:
             info.protocol = "Other"
@@ -538,39 +672,64 @@ class CaptureEngine:
         # Process attribution. The expensive part (enumerating sockets) happens on a
         # background thread; this is a dict lookup, so every packet can be attributed
         # instead of roughly one per refresh interval.
-        proc_name, proc_pid = _get_process_for_port(info.src_port)
-        if not proc_name:
-            proc_name, proc_pid = _get_process_for_port(info.dst_port)
-        info.process_name = proc_name
-        info.process_pid = proc_pid
+        if not offline:
+            proc_name, proc_pid = _get_process_for_port(info.src_port)
+            if not proc_name:
+                proc_name, proc_pid = _get_process_for_port(info.dst_port)
+            info.process_name = proc_name
+            info.process_pid = proc_pid
 
-        # Extract raw payload ONLY for unencrypted protocols where we need
-        # to scan for credentials. This is a tiny fraction of traffic.
-        if (info.payload_size > 0 and
-            (info.dst_port in _CREDENTIAL_PORTS or info.src_port in _CREDENTIAL_PORTS)):
-            info._raw_payload = payload
-
-        # TLS handshake inspection. Only the first packets of a connection carry a
-        # ClientHello, and looks_like_tls_handshake() rejects everything else in four
-        # byte comparisons, so this costs almost nothing on established connections.
-        elif (info.payload_size > 0 and info.protocol == 'TCP'
-                and (info.dst_port in _TLS_PORTS or info.src_port in _TLS_PORTS)
-                and looks_like_tls_handshake(payload)):
-            hello = parse_client_hello(payload)
-            if hello:
-                info.tls_sni = hello['sni'] or ''
-                info.tls_ja3 = hello['ja3']
-                info.tls_ja4 = hello['ja4']
-                info.tls_version = hello['version']
-
-        # QUIC rides UDP/443 and would otherwise be indistinguishable from any other
-        # UDP traffic — no flags, and is_encrypted left False.
-        if (info.protocol == 'UDP' and not info.is_encrypted
-                and (info.dst_port == 443 or info.src_port == 443)):
-            info.is_encrypted = True
-            info.tls_version = 'QUIC'
+        if info.payload_size > 0:
+            self._inspect_payload(info, payload, tcp_seq)
 
         return info
+
+    def _inspect_payload(self, info, payload, tcp_seq):
+        """What can be read from the transport payload: kept bytes for the
+        credential scanners, TLS and QUIC handshakes, and plaintext requests."""
+        # Raw payload ONLY for unencrypted protocols where we scan for credentials.
+        # This is a tiny fraction of traffic.
+        if info.dst_port in _CREDENTIAL_PORTS or info.src_port in _CREDENTIAL_PORTS:
+            info._raw_payload = payload
+
+        if info.protocol == 'TCP':
+            # TLS handshakes. A separate test from the one above, not an elif: 8443
+            # and 5061 are on both lists, so their handshakes were never parsed.
+            # The reassemblers reject anything that is not a handshake start in a
+            # few byte comparisons, so established connections cost almost nothing.
+            if info.dst_port in _TLS_PORTS or info.src_port in _TLS_PORTS:
+                key = (info.src_ip, info.src_port, info.dst_ip, info.dst_port)
+                hello = self._hello_reassembler.feed(key, payload, tcp_seq, info.timestamp)
+                if hello:
+                    info.tls_sni = hello['sni'] or ''
+                    info.tls_ja3 = hello['ja3']
+                    info.tls_ja4 = hello['ja4']
+                    info.tls_version = hello['version']
+                elif info.src_port in _TLS_PORTS:
+                    certs = self._cert_reassembler.feed(
+                        key, payload, tcp_seq, info.timestamp)
+                    if certs:
+                        info._tls_certs = certs
+
+            if payload[:1] in (b'G', b'P', b'H', b'D', b'O'):
+                request = parse_http_request(payload)
+                if request:
+                    info.http_method, info.http_host, info.http_path = request
+                    info.app_protocol = 'http'
+            elif _looks_like_stratum(payload):
+                info.app_protocol = 'stratum'
+
+        elif info.protocol == 'UDP' and (info.dst_port == 443 or info.src_port == 443):
+            # QUIC rides UDP/443 and would otherwise be indistinguishable from any
+            # other UDP traffic — no flags, and is_encrypted left False.
+            info.is_encrypted = True
+            info.tls_version = 'QUIC'
+            if info.dst_port == 443 and looks_like_quic(payload):
+                hello = self._quic_reassembler.feed(payload, info.timestamp)
+                if hello:
+                    info.tls_sni = hello['sni'] or ''
+                    info.tls_ja3 = hello['ja3']
+                    info.tls_ja4 = hello['ja4']
 
     def _capture_callback(self, packet):
         """
@@ -579,12 +738,15 @@ class CaptureEngine:
         Only extracts minimal info and enqueues for processing.
         """
         try:
-            pkt_info = self._extract_packet_info(packet)
+            raw = self._raw_bytes(packet)
+            pkt_info = self._extract_packet_info(packet, raw=raw)
 
-            # Buffer raw bytes for PCAP writer (before PPS cap for complete captures)
+            # Buffer raw bytes for PCAP writer (before PPS cap for complete captures).
+            # The wire bytes as captured: bytes(packet) re-serialised every layer,
+            # once more per packet on this thread, and could differ from the wire.
             if self.raw_packet_callback:
                 try:
-                    self.raw_packet_callback(bytes(packet))
+                    self.raw_packet_callback(raw)
                 except Exception:
                     pass
 
@@ -629,7 +791,7 @@ class CaptureEngine:
         except Exception as e:
             logger.debug("Capture callback error: %s", e)
 
-    def _worker_loop(self):
+    def _worker_loop(self, stop=None):
         """
         Worker thread that processes packets from the queue.
         Handles IDS inspection, flow tracking, and ML callbacks.
@@ -637,11 +799,12 @@ class CaptureEngine:
         never blocks packet capture.
         """
         import queue
+        stop = stop or self._stop_event
         logger.info("Packet processing worker started.")
         batch = []
         batch_size = 10  # Process up to 10 packets at a time
 
-        while self._running:
+        while not stop.is_set():
             try:
                 # Collect a batch of packets (with timeout so we can check _running)
                 try:
@@ -671,6 +834,7 @@ class CaptureEngine:
                     self._sample_rate = 1  # Process all
                 self.stats['sample_rate'] = self._sample_rate
                 self.stats['packets_dropped'] = self._dropped_packets
+                self.stats['packets_sampled_out'] = self._sampled_out
 
                 for pkt_info in batch:
                     try:
@@ -692,12 +856,17 @@ class CaptureEngine:
                                     self.flows[key].add_packet(pkt_info)
                             self.stats['flows_active'] = len(self.flows)
 
-                        # IDS / ML callback (sampling under load)
+                        # IDS / ML callback (sampling under load). A skipped packet
+                        # is counted, and the one that goes through carries the
+                        # rate, so volume rules can scale what they see.
                         self._sample_counter += 1
                         if self._sample_counter >= self._sample_rate:
                             self._sample_counter = 0
+                            pkt_info.sample_weight = self._sample_rate
                             if self.packet_callback:
                                 self.packet_callback(pkt_info)
+                        else:
+                            self._sampled_out += 1
 
                     except Exception as e:
                         logger.debug("Worker packet error: %s", e)
@@ -710,10 +879,10 @@ class CaptureEngine:
 
         logger.info("Packet processing worker stopped.")
 
-    def _cleanup_flows(self):
+    def _cleanup_flows(self, stop=None):
         """Remove expired flows and prune stats periodically."""
-        while self._running:
-            time.sleep(30)
+        stop = stop or self._stop_event
+        while not stop.wait(30):
             now = time.time()
             with self._lock:
                 expired = [
@@ -733,15 +902,15 @@ class CaptureEngine:
                     pruned = defaultdict(int, {k: tt[k] for k in top_keys})
                     self.stats['top_talkers'] = pruned
 
-    def _watchdog_loop(self):
+    def _watchdog_loop(self, stop=None):
         """
         Monitors the capture thread and restarts it if it dies.
         Also monitors the worker thread.
         """
-        while self._running:
-            time.sleep(5)
-
+        stop = stop or self._stop_event
+        while not stop.wait(5):
             # Check capture thread
+            self._note_sniffer_failure()
             if self._fatal_capture_error:
                 logger.error("Capture cannot start with the current configuration. "
                              "Watchdog standing down.")
@@ -753,17 +922,39 @@ class CaptureEngine:
                         "Capture thread died. Restarting (attempt %d/%d)...",
                         self._restart_count, self._max_restarts
                     )
-                    self._start_capture_thread()
+                    self._start_capture_thread(stop)
                 else:
                     logger.error("Capture thread exceeded max restarts (%d). Giving up.",
                                  self._max_restarts)
 
             # Check worker thread
-            if self._worker_thread and not self._worker_thread.is_alive():
+            if self._worker_thread and not self._worker_thread.is_alive() \
+                    and not stop.is_set():
                 logger.warning("Worker thread died. Restarting...")
                 self._worker_thread = threading.Thread(
-                    target=self._worker_loop, daemon=True, name="PacketWorker")
+                    target=self._worker_loop, args=(stop,), daemon=True,
+                    name="PacketWorker")
                 self._worker_thread.start()
+
+    def _note_sniffer_failure(self):
+        """
+        Log why a sniffer thread ended, once. AsyncSniffer catches the exception
+        its thread raised and keeps it; a TypeError means an option this Scapy
+        build rejects, which restarting cannot fix.
+        """
+        sniffer = self._sniffer
+        error = getattr(sniffer, 'exception', None) if sniffer is not None else None
+        if error is None or getattr(sniffer, '_ns_reported', False):
+            return
+        sniffer._ns_reported = True
+        if isinstance(error, PermissionError):
+            logger.error("Permission denied. Run as Administrator (Windows) or "
+                         "as root / with CAP_NET_RAW (Linux) for packet capture.")
+        elif isinstance(error, TypeError):
+            logger.error("Capture rejected an option (%s). Not retrying.", error)
+            self._fatal_capture_error = True
+        else:
+            logger.error("Capture error: %s", error)
 
     def _supported_sniff_kwargs(self, desired):
         """
@@ -794,32 +985,55 @@ class CaptureEngine:
                         "ignoring: %s", ', '.join(sorted(skipped)))
         return supported
 
-    def _start_capture_thread(self):
-        """Start (or restart) the Scapy capture thread."""
+    def _start_capture_thread(self, stop=None):
+        """
+        Start (or restart) the capture for the run that owns `stop`.
+
+        AsyncSniffer, because plain sniff() checks stop_filter only when a packet
+        arrives: on a quiet interface a stopped capture stayed blocked, and after
+        a quick restart the old sniffer kept capturing beside the new one.
+        AsyncSniffer.stop() wakes its loop directly. `_thread` is the sniffer's
+        thread, which the app joins before it starts a new run.
+        """
+        stop = stop or self._stop_event
+        if stop.is_set() or stop is not self._stop_event:
+            return      # a late restart from a run that has already been stopped
         iface = self._select_interface()
         bpf = self.config.get('capture', 'bpf_filter', default='')
         sniff_options = self._supported_sniff_kwargs({
             'promisc': self.config.get('capture', 'promiscuous', default=True),
             'snaplen': self.config.get('capture', 'snap_length', default=65535),
         })
+        logger.info("Capture starting on interface: %s", iface)
 
+        if AsyncSniffer is not None:
+            sniffer = AsyncSniffer(
+                iface=iface,
+                prn=self._capture_callback,
+                store=False,
+                stop_filter=lambda _: stop.is_set(),
+                filter=bpf if bpf else None,
+                **sniff_options,
+            )
+            sniffer.start()
+            self._sniffer = sniffer
+            self._thread = sniffer.thread
+            if stop.is_set():           # stopped while this was starting
+                self._stop_sniffer(sniffer)
+            return
+
+        # A Scapy too old for AsyncSniffer: sniff in one-second slices, so the
+        # loop notices the stop event even when nothing arrives.
         def _capture_loop():
-            logger.info("Capture started on interface: %s", iface)
             try:
-                sniff(
-                    iface=iface,
-                    prn=self._capture_callback,
-                    store=False,
-                    stop_filter=lambda _: not self._running,
-                    filter=bpf if bpf else None,
-                    **sniff_options,
-                )
+                while not stop.is_set():
+                    sniff(iface=iface, prn=self._capture_callback, store=False,
+                          stop_filter=lambda _: stop.is_set(), timeout=1,
+                          filter=bpf if bpf else None, **sniff_options)
             except PermissionError:
                 logger.error("Permission denied. Run as Administrator (Windows) or "
                              "as root / with CAP_NET_RAW (Linux) for packet capture.")
             except TypeError as e:
-                # An option this Scapy build rejects. Restarting cannot help, and
-                # the watchdog would otherwise retry it ten times.
                 logger.error("Capture rejected an option (%s). Not retrying.", e)
                 self._fatal_capture_error = True
             except Exception as e:
@@ -827,9 +1041,30 @@ class CaptureEngine:
             finally:
                 logger.info("Capture thread exited.")
 
+        self._sniffer = None
         self._thread = threading.Thread(
             target=_capture_loop, daemon=True, name="CaptureThread")
         self._thread.start()
+
+    @staticmethod
+    def _stop_sniffer(sniffer, wait=1.0):
+        """
+        Stop an AsyncSniffer. Its stop() refuses until the thread has marked
+        itself running, which a stop straight after a start can beat, so allow
+        it a moment to get there rather than leave it capturing.
+        """
+        deadline = time.time() + wait
+        while True:
+            thread = getattr(sniffer, 'thread', None)
+            if getattr(sniffer, 'running', False):
+                try:
+                    sniffer.stop(join=False)
+                except Exception as e:
+                    logger.debug("Sniffer stop: %s", e)
+                return
+            if thread is None or not thread.is_alive() or time.time() >= deadline:
+                return
+            time.sleep(0.02)
 
     def start(self):
         """Start the capture engine with worker threads and watchdog."""
@@ -837,52 +1072,65 @@ class CaptureEngine:
             logger.error("Cannot start capture: Scapy is not installed.")
             return False
 
-        if self._running:
+        with self._lifecycle_lock:
+            if self._running:
+                return True
+
+            stop = self._stop_event = threading.Event()
+            self._running = True
+            self._fatal_capture_error = False
+            self.stats['start_time'] = time.time()
+            self._last_rate_calc = time.time()
+            self._restart_count = 0
+
+            # Start capture thread
+            try:
+                self._start_capture_thread(stop)
+            except Exception as e:
+                logger.error("Capture could not start: %s", e)
+                stop.set()
+                self._running = False
+                return False
+
+            # Start worker thread (processes packets from queue)
+            self._worker_thread = threading.Thread(
+                target=self._worker_loop, args=(stop,), daemon=True, name="PacketWorker")
+            self._worker_thread.start()
+
+            # Start flow cleanup
+            self._cleanup_thread = threading.Thread(
+                target=self._cleanup_flows, args=(stop,), daemon=True, name="FlowCleanup")
+            self._cleanup_thread.start()
+
+            # Start watchdog (auto-restarts crashed threads)
+            self._watchdog_thread = threading.Thread(
+                target=self._watchdog_loop, args=(stop,), daemon=True, name="Watchdog")
+            self._watchdog_thread.start()
+
+            # Keep the port->process map warm without blocking the capture thread
+            if PSUTIL_AVAILABLE:
+                self._procmap_thread = threading.Thread(
+                    target=_process_map_refresher, args=(stop,),
+                    daemon=True, name="ProcMapRefresh")
+                self._procmap_thread.start()
+
+            logger.info("Capture engine started with queue-based processing.")
             return True
-
-        self._running = True
-        self.stats['start_time'] = time.time()
-        self._last_rate_calc = time.time()
-        self._restart_count = 0
-
-        # Start capture thread
-        self._start_capture_thread()
-
-        # Start worker thread (processes packets from queue)
-        self._worker_thread = threading.Thread(
-            target=self._worker_loop, daemon=True, name="PacketWorker")
-        self._worker_thread.start()
-
-        # Start flow cleanup
-        self._cleanup_thread = threading.Thread(
-            target=self._cleanup_flows, daemon=True, name="FlowCleanup")
-        self._cleanup_thread.start()
-
-        # Start watchdog (auto-restarts crashed threads)
-        self._watchdog_thread = threading.Thread(
-            target=self._watchdog_loop, daemon=True, name="Watchdog")
-        self._watchdog_thread.start()
-
-        # Keep the port->process map warm without blocking the capture thread
-        if PSUTIL_AVAILABLE:
-            self._procmap_thread = threading.Thread(
-                target=_process_map_refresher, args=(lambda: self._running,),
-                daemon=True, name="ProcMapRefresh")
-            self._procmap_thread.start()
-
-        logger.info("Capture engine started with queue-based processing.")
-        return True
 
     def stop(self):
         """Stop the capture engine and wait for its threads to wind down."""
-        self._running = False
-        # The capture thread is the one that can outlive this: Scapy only evaluates
-        # stop_filter when a packet arrives, so on a quiet interface it stays blocked.
-        # It is a daemon thread, so that does not prevent process exit.
-        for t in (self._worker_thread, self._thread):
-            if t is not None and t.is_alive():
-                t.join(timeout=5)
-        logger.info("Capture engine stopped. Dropped packets: %d", self._dropped_packets)
+        with self._lifecycle_lock:
+            self._running = False
+            self._stop_event.set()
+            if self._sniffer is not None:
+                self._stop_sniffer(self._sniffer)
+            # Every thread of this run waits on the event, so these return promptly.
+            for t in (self._thread, self._worker_thread, self._watchdog_thread,
+                      self._cleanup_thread, self._procmap_thread):
+                if t is not None and t.is_alive() and t is not threading.current_thread():
+                    t.join(timeout=5)
+            logger.info("Capture engine stopped. Dropped packets: %d, sampled out: %d",
+                        self._dropped_packets, self._sampled_out)
 
     def get_flows_snapshot(self):
         """Return a snapshot of current flows for analysis."""
