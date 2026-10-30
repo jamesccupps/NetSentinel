@@ -1,4 +1,4 @@
-# Handoff: v1.9.0 pushed (11366aa), CI and a test exe next
+# Handoff: v1.9.0 pushed, CI green on Linux and Windows; a test exe next
 
 Kept current during the work so it survives a context reset. Last updated
 2026-10-29 by the local Claude Code session on James's desktop. Read `CLAUDE.md`
@@ -61,8 +61,11 @@ How the work was done:
 
 ## Next steps
 
-1. CI on Linux and Windows for `11366aa`. The Windows job and the Node 24 actions
-   are running on GitHub for the first time.
+1. CI is green on all jobs (Linux 3.10, 3.11 and 3.12; Windows 3.12; lint) as of
+   `b061c65`. The Windows job had failed since it was added. GitHub's runner
+   has no Npcap, and test frames built with a bare `Ether()` made Scapy look up
+   interfaces that are not there. Failing tests now show up as public
+   annotations (`tools/ci_failures.py`), because the logs need a GitHub sign-in.
 2. Run the `release` workflow by hand to build a test exe (Actions → release →
    Run workflow). James tests it. Check that the exe bundles `py7zr`'s
    compiled extensions, `maxminddb`, `Evtx` and scapy's manuf table.
