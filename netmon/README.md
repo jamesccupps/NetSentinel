@@ -38,9 +38,15 @@ For the web UI:
 
 ```
 python -m netmon.web --profile my-site.yaml --unifi flows.csv
+python -m netmon.web --profile my-site.yaml --state /var/lib/netmon/state --allow-edit
 ```
 
-It binds to localhost and will not write anything without `--allow-edit`.
+It binds to localhost, refuses any request whose Host header is not a loopback
+name while it does (so a page elsewhere cannot rebind its own hostname to
+127.0.0.1 and read it), and will not write anything without `--allow-edit`.
+`--state` points it at the service's state directory, so it shows — and with
+`--allow-edit` changes — the acknowledgements and snoozes the running service
+applies. `--allow-summarise` adds the model-triage button; see *Model triage*.
 
 ---
 
@@ -53,7 +59,11 @@ It binds to localhost and will not write anything without `--allow-edit`.
 | `events.py` | one event type for every source, plus enrichment |
 | `rules_engine.py` | the YAML rule language |
 | `handlers.py` | the rules that need memory |
-| `rules/core.yaml` | 24 detection rules |
+| `rules/core.yaml` | 26 detection rules |
+| `rules/cloudflare-ranges.txt` | Cloudflare's published ranges, dated, never fetched |
+| `geoip.py` | country and network (ASN) from DB-IP Lite, offline |
+| `leakcheck.py` | restricted segments on disk, and outside their VLAN |
+| `window.py` | the day's findings, deduplicated and kept across restarts |
 | `sources/unifi_csv.py` | UniFi flow exports |
 | `sources/pcap.py` | capture files and live mirror ports |
 | `sources/unifi_api.py` | bootstrapping a profile from the controller |
@@ -159,6 +169,48 @@ Push is reserved for the `push` tier and, by default, `high` and above. A
 notification for something that can wait is how push gets muted, after which
 nothing gets through at all.
 
+**Each finding pushes once.** The service keeps the day's findings on disk
+(`findings.json` under `--state`, owner-only), one per rule, device and key,
+across capture files and restarts. A finding that recurs — every rotation, or
+after a restart — adds to its count instead of pushing again. A push nobody
+has acknowledged stays open: it is listed in every digest until a silence
+covers it or it has not been seen for a week, and while it is open it does not
+push again.
+
+### The digest
+
+Once a day, by ntfy and by email, whichever are configured. It leads with an
+**open-items checklist** — pushes not yet acknowledged, configuration that is
+wrong now (from the last controller check), and the silences in effect, each
+with its reason and end — and then lists the day's findings worst first, with
+acknowledged and maintenance findings marked as such. "Events" is packets and
+flows read since the last digest. The day's findings are kept until a digest
+is delivered, so one that could not be sent does not take them with it.
+
+### Email
+
+Add these to the secrets file; the credentials are read from there and nowhere
+else, under the same owner-only check:
+
+```json
+{
+  "smtp_host": "smtp.example.com",
+  "smtp_port": 587,
+  "smtp_security": "starttls",
+  "smtp_username": "sensor@example.com",
+  "smtp_password": "...",
+  "smtp_from": "sensor@example.com",
+  "smtp_to": ["ops@example.com"]
+}
+```
+
+`smtp_security` is `starttls` (587, the default) or `ssl` (SMTPS, 465); the
+server's certificate is verified. `none` is refused except to a relay on this
+machine with no credentials, because the digest names devices and weaknesses
+and a password sent in the clear is given away. `email_digest: false` turns it
+off without removing the settings. `analyze --digest` emails too when these
+are set.
+
 ---
 
 ## What leaves, and where it goes
@@ -175,7 +227,11 @@ and contains nothing regulated.
 **A summary sent to a model** gets all of the above, and nothing at all from a
 restricted segment — not the addresses, not the device names, not the fact that
 something happened there. The count of what was withheld is included, so the
-omission cannot be read as "nothing happened there".
+omission cannot be read as "nothing happened there". A finding counts as from a
+restricted segment if anything about it points there — its VLANs, its event's
+addresses and MACs, the device it names, the VLAN, zone, network or address in
+its evidence, or an address in its text — which is what catches canary hits and
+configuration findings, neither of which carries resolved VLAN fields.
 
 Evidence fields are allowlisted, not denylisted. Rules are edited by site
 operators and can name any field they like, so the question has to be "is this
@@ -294,6 +350,32 @@ tests demonstrate exactly that case. Extraction applies the same exclusion
 again, because a file on disk was written under whatever profile was current
 then.
 
+**And by address.** The filter also carries `not net` for each restricted
+subnet, written by byte offset for untagged, single-tagged and QinQ frames.
+The access-control subnet's traffic also arrives untagged (when it is the
+trunk's native VLAN), under another VLAN's tag (a routed copy, or a port in the
+wrong VLAN) or inside a QinQ frame, and none of those carries the tag the VLAN
+exclusion looks for. The VLAN exclusion itself checks both positions of a
+stacked tag and all three tag types (0x8100, 0x88a8, 0x9100): a filter that only
+knew 0x8100 read a QinQ frame as untagged and let it through.
+
+**And it is checked.** Every rotated file the service analyses is read for
+frames from a metadata-only segment — by any tag in the stack, or by address —
+and any there are is `restricted_capture_leak`, critical and pushed: the filter
+that wrote it is not the one `--command` prints, or this stack is not honouring
+it, and the file holds what it must not. An extract for an alert that had to
+leave such frames out raises the same finding. Separately, a restricted
+address seen untagged, under another VLAN's tag or inside QinQ is
+`restricted_outside_vlan` wherever it is seen; a listed router's relayed copy
+is routing and is left out, and with no `router_macs` only frames carrying the
+restricted device's own MAC are judged.
+
+`analyze --pcap` treats a file as an unfiltered sample — which is what a sample
+taken for `bpf --verify` is meant to be — so its restricted frames are read as
+metadata only and counted in a line of output, not reported as a leak. Pass
+`--from-ring` when the file came from the rolling capture to have it judged as
+the service judges one.
+
 Pruning never removes the newest file. It is the one being written, and deleting
 it leaves the capture writing to a deleted inode with no error anywhere. Age
 comes from the filename rather than the mtime, because a file still being
@@ -320,6 +402,35 @@ Model, daily token budget, API base URL and redaction level are all configurable
 `ANTHROPIC_BASE_URL`, `NETMON_SUMMARISER_REDACTION=minimal`), so a local model
 can be substituted and an unattended cron job cannot run up a bill. Set the base
 URL and the request drops the API-specific options a local model would reject.
+
+**The budget is enforced.** The day's spend is kept under `--state`
+(`summariser-spend.json`; `analyze` takes `--state` too, and falls back to the
+home directory for an interactive run). It used to live in `~/.cache`, which a
+systemd unit with `ProtectHome` cannot write, so every recording failed and the
+budget was silently zero; a location that cannot record spend now refuses the
+request instead. The check, the request and the recording happen under a lock,
+and a second request while one runs is refused. Output is capped at what the day
+has left, so a request overshoots by its input and a small floor at most, and
+there is an hourly cap (`summariser_hourly_sends` / `NETMON_SUMMARISER_HOURLY_SENDS`,
+default 6) and a timeout (`summariser_timeout`, default 120 seconds per attempt).
+
+### The button
+
+```
+python -m netmon serve ... --allow-summarise
+python -m netmon.web --profile my-site.yaml --unifi flows.csv \
+    --state /var/lib/netmon/state --secrets /etc/netmon/secrets.json --allow-summarise
+```
+
+Off unless `--allow-summarise`. The *Model triage* tab's first button sends
+nothing: it shows the exact message that would leave the sensor — redacted,
+nothing from a metadata-only segment, and the count of what was withheld —
+with an estimate of its size made locally (the API's token counter would mean
+sending it to count it) and where the day's budget stands. Only the second
+button sends that message, unchanged and once; a preview expires after ten
+minutes. Both are POSTs with the page's token and the Host and Origin checks of
+every other write, and the button's request has a 90-second timeout with no
+retries. What comes back is put on the page as text.
 
 Three things it deliberately does not do:
 
@@ -391,10 +502,23 @@ that will run it:
 
 ```
 python -m netmon.bpf --profile my-site.yaml --verify sample.pcap
+python -m netmon.bpf --diagnose-untagged sample.pcap
 ```
 
 Take the sample with no filter at all, on that machine, and it will tell you
-what your candidate actually keeps, per VLAN.
+what your candidate actually keeps, per VLAN. With `--profile`, it also counts
+what the filter kept from the metadata-only segments, by tag and by address,
+and **exits 3 if anything got through** — so it can gate a deployment script.
+`--diagnose-untagged` runs both ways of selecting untagged frames over the same
+sample and says which this stack honours; it exits 4 when the mixed
+tagged-and-untagged filters cannot be trusted here, in which case capture the
+two separately.
+
+One more trap, found by checking the builder against libpcap's own compiler:
+the `vlan` keyword shifts offsets for everything after it, `and` as much as
+`or`, so two both-forms terms in a row (drop a host, then a port) left the
+second one's untagged branch reading the wrong bytes. The builder now folds
+every term that needs the keyword into one block, last.
 
 ---
 
@@ -481,8 +605,17 @@ at 30 days. Anything longer belongs in the profile with a note saying why.
 
 Nothing can silence everything, and a silence file that cannot be read applies
 no silences. Both choices err towards noise. A running service picks up a
-change on its next pass. The web server exposes the same operations as
-API routes behind `--allow-edit`.
+change on its next pass, and silences apply to findings already kept as well as
+new ones: a snooze added this afternoon hides this morning's finding from the
+UI and the digest.
+
+In the UI, each finding has **Acknowledge**, **Snooze** and **Maintenance**
+buttons (or **Clear**, when one already covers it), with a reason box and a
+snooze length, and the silences in effect are listed. They need `--allow-edit`
+and somewhere to keep the silences: `serve --allow-edit` for the service's own
+UI, or `netmon web --state <the service's --state> --allow-edit` for a
+standalone one. Without `--allow-edit` the silences are shown and cannot be
+changed.
 
 ---
 
@@ -499,7 +632,13 @@ One process doing the recurring work: analyse each capture as it rotates, check
 the controller configuration every few hours, follow the canary log, prune the
 ring buffer, push what needs attention, send a daily digest, serve the UI.
 
-`--once` does a single pass and exits, for a cron entry.
+`--once` does a single pass and exits, for a cron entry. `--allow-edit` lets its
+UI write (the editors and the silence buttons); `--allow-summarise` adds the
+model-triage button. Both are off by default.
+
+Under `--state` it keeps: `processed.json` (which captures are done),
+`findings.json` (the day's findings and the open pushes), `silences.json`,
+`summariser-spend.json`, the canary read position and the controller snapshot.
 
 **It does not capture packets.** tcpdump does, under its own unit, with the
 filter `netmon capture --command` prints. Keeping them separate means a crash
@@ -519,14 +658,16 @@ nobody updates.
 
 ## Status
 
-Working: the profile, the rule engine and 21 rules, UniFi flow import, capture
-reading with BACnet / TLS / DNS / DHCP / ARP parsing, offline analysis, the web
-UI, and the capture-filter builder.
-
-Everything the spec listed is built: the profile, 24 rules, UniFi flow import,
+Everything the spec listed is built: the profile, 26 rules, UniFi flow import,
 capture reading with BACnet / TLS / DNS / DHCP / ARP / site-protocol parsing,
-the rolling capture, configuration drift, canary hits, ntfy alerting, model
-triage, the web UI, the capture-filter builder, and the service that runs them.
+the rolling capture and its leak check, configuration drift, canary hits, ntfy
+and email alerting with an open-items digest, GeoIP, model triage from the
+command line and the UI, the web UI with its silence buttons, the
+capture-filter builder, and the service that runs them.
+
+Not yet checked on the real site: the owner's captures, `netmon sync` for the
+real profile, `netmon bpf --verify` on the sensor, and whether a UniFi export
+records a port-forwarded flow under the WAN or the internal address.
 
 Test it with `python -m unittest discover -s netmon_tests -t .` from the
 repository root.
@@ -565,6 +706,70 @@ capture-to-alert path.
 
 ---
 
+## Where an address is
+
+```
+pip install maxminddb
+python -m netmon geoip --update --dir /var/lib/netmon/geoip
+python -m netmon geoip --dir /var/lib/netmon/geoip              # what is installed
+python -m netmon geoip --dir /var/lib/netmon/geoip --lookup 203.0.113.9
+```
+
+then, in the profile:
+
+```yaml
+geoip:
+  directory: /var/lib/netmon/geoip
+```
+
+Country and network (ASN) for internet addresses, from **DB-IP Lite** — IP
+Geolocation by DB-IP (https://db-ip.com), licensed CC BY 4.0 — read offline with
+`maxminddb`. Lookups never leave the sensor. `--update` is the only network call:
+it downloads the two files from DB-IP, sends nothing about this network, and is
+run by a person (or a monthly timer they set up), never by the service. Each
+file is downloaded beside the installed one, checked, and renamed into place,
+so a running service sees the old file or the new one and picks the new one up
+within five minutes; a failed or bogus download leaves the old one alone.
+
+Enrichment adds `dst_country`, `dst_asn` and `dst_as_org` (and `src_*` for
+inbound). A UniFi export's own `Src./Dst. Region` columns are kept as
+`src_region` / `dst_region`, and a two-letter one stands in for the country
+when there are no files. New-destination findings say where the destination
+is, and a role's `allowed_asns` is enforced: the `egress_unexpected_network`
+rule reports a device reaching a network its role does not list. Without the
+files, or without a list, it stays silent.
+
+---
+
+## Inbound around Cloudflare
+
+For a site that publishes services through Cloudflare, an origin should hear
+on 443 only from Cloudflare's ranges. List the origins in the profile:
+
+```yaml
+cloudflare:
+  origins: [bas-server]          # names, addresses, CIDRs or roles
+  # ranges: [...]                # replaces the shipped list for this site
+```
+
+and `inbound_https_bypass` reports a day on which an origin received well above
+its usual level from anywhere else (1 MB floor, four times its median day).
+Scanners reach every address on 443, so some of that is normal; a day of only
+Cloudflare traffic counts as a zero, so an origin that usually hears from
+nobody else still has a baseline. Cloudflare's ranges ship dated in
+`rules/cloudflare-ranges.txt` and are never fetched. Inert until `origins` is
+set.
+
+**Port forwards in a UniFi export — unverified.** In a capture from the inside,
+a port-forwarded connection carries the internal destination (the translation
+has happened). Whether a UniFi flow export records such a flow under the WAN
+address or the internal one has not been checked. If it is the WAN address,
+the flow reads as transit (both ends public), resolves to no device, and this
+rule does not see it in an export; check one known forwarded connection in an
+export before relying on it there.
+
+---
+
 ## Two things about reading a trunk mirror
 
 **Every routed packet appears twice** — once arriving from the sender on the
@@ -572,6 +777,12 @@ source VLAN, once leaving the router on the destination VLAN. In a measured
 seven-second sample, 3,178 packets appeared on both sides. Counting both doubles
 every byte total and attributes half the traffic to the router. List your
 routers under `router_macs` and the relayed copy is dropped.
+
+Except a frame from the internet. It crosses the mirror once, on its way in,
+with the router's MAC and the remote address — the shape of a relayed copy, but
+with no first copy unless the WAN port is mirrored too. Those are kept; until
+they were, every inbound internet frame was dropped, downloads were missing
+from the byte counts, and nothing could see a connection arrive from outside.
 
 **The capture interface should be silent.** No address, no protocol bindings.
 One left configured puts DHCP, NBNS, LLMNR, mDNS, SSDP and EAPOL onto the

@@ -21,6 +21,15 @@ they write, write atomically, and keep the previous version alongside. Writes
 require a token issued with the page and a same-origin check, so another page in
 the same browser cannot drive this one.
 
+Foreign Host headers
+--------------------
+While bound to loopback, a request whose Host header is not a loopback name is
+refused before anything is served. Without that, a page on any website can
+point its own hostname at 127.0.0.1 (DNS rebinding), read `/` as same-origin,
+and take the token off it — after which the token check protects nothing. A
+loopback bind is the only case where the legitimate names are knowable; bound
+anywhere else, the firewall is the boundary, as the warning says.
+
 Nothing here touches the network. It reads files and shows what is in them.
 """
 
@@ -33,6 +42,7 @@ import os
 import secrets
 import shutil
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
@@ -54,6 +64,20 @@ _STATIC_TYPES = {'.html': 'text/html; charset=utf-8',
                  '.css': 'text/css; charset=utf-8',
                  '.js': 'application/javascript; charset=utf-8',
                  '.svg': 'image/svg+xml'}
+
+#: The names a browser can legitimately use for a loopback listener. Anything
+#: else in the Host header, while bound to loopback, is a rebinding attempt.
+LOOPBACK_NAMES = frozenset({'127.0.0.1', 'localhost', '::1'})
+
+
+def _host_name(header):
+    """The name part of a Host header, without the port, lowercased."""
+    host = (header or '').strip().lower()
+    if host.startswith('['):
+        return host[1:host.find(']')] if ']' in host else host
+    # One colon is host:port. More than one is a bare IPv6 address, which a
+    # browser would have bracketed; it is compared as it stands.
+    return host.rsplit(':', 1)[0] if host.count(':') == 1 else host
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -77,9 +101,27 @@ class _Handler(BaseHTTPRequestHandler):
         finally:
             self._head_only = False
 
+    def _host_allowed(self):
+        """
+        Refuse a foreign Host header while bound to loopback.
+
+        Checked on every request, page and API alike: the page carries the
+        token, so serving it to a rebound hostname hands over the one thing the
+        write checks rely on.
+        """
+        allowed = self.server.netmon_app.allowed_hosts()
+        if allowed is None or _host_name(self.headers.get('Host')) in allowed:
+            return True
+        self._send_json({'error': 'unexpected Host header',
+                         'detail': 'this server answers only to a loopback name'},
+                        421)
+        return False
+
     # ─── GET ─────────────────────────────────────────────────────────────
 
     def do_GET(self):
+        if not self._host_allowed():
+            return
         parsed = urlparse(self.path)
         app = self.server.netmon_app
 
@@ -131,16 +173,23 @@ class _Handler(BaseHTTPRequestHandler):
         if raw is None:
             return self._refuse({'error': 'body shorter than Content-Length'}, 400)
 
-        if not app.allow_edit:
-            return self._send_json(
-                {'error': 'editing is off',
-                 'detail': 'start with --allow-edit to enable the editors'}, 403)
+        if not self._host_allowed():
+            return
+
+        refusal = app.permission_refusal(parsed.path)
+        if refusal is not None:
+            return self._send_json(refusal, 403)
 
         # Another page in this browser must not be able to drive this one. The
         # token is issued with the page; the Origin check catches the
         # form-submission case, where a token would not be readable anyway.
         origin = self.headers.get('Origin')
-        if origin and urlparse(origin).netloc != self.headers.get('Host'):
+        if origin is not None and (urlparse(origin).netloc.lower()
+                                   != (self.headers.get('Host') or '').lower()):
+            return self._send_json({'error': 'cross-origin request refused'}, 403)
+        # Browsers label a request another site initiated, whether or not they
+        # also send an Origin. A same-origin page never produces this value.
+        if (self.headers.get('Sec-Fetch-Site') or '').lower() == 'cross-site':
             return self._send_json({'error': 'cross-origin request refused'}, 403)
         if not secrets.compare_digest(
                 self.headers.get('X-Netmon-Token') or '', app.token):
@@ -155,6 +204,8 @@ class _Handler(BaseHTTPRequestHandler):
             body = json.loads(raw.decode('utf-8')) if raw else {}
         except (UnicodeDecodeError, json.JSONDecodeError) as e:
             return self._send_json({'error': 'body is not JSON', 'detail': str(e)}, 400)
+        if not isinstance(body, dict):
+            return self._send_json({'error': 'the body must be a JSON object'}, 400)
 
         try:
             payload, status = route(body)
@@ -205,11 +256,15 @@ class _Handler(BaseHTTPRequestHandler):
         content_type = _STATIC_TYPES.get(os.path.splitext(path)[1],
                                          'application/octet-stream')
         if relative == 'index.html':
-            data = data.replace(b'{{TOKEN}}',
-                                self.server.netmon_app.token.encode())
+            app = self.server.netmon_app
+            data = data.replace(b'{{TOKEN}}', app.token.encode())
             data = data.replace(b'{{EDITABLE}}',
-                                b'true' if self.server.netmon_app.allow_edit
+                                b'true' if app.allow_edit else b'false')
+            data = data.replace(b'{{SILENCES}}',
+                                b'true' if app.allow_edit and app.silences_path
                                 else b'false')
+            data = data.replace(b'{{SUMMARISE}}',
+                                b'true' if app.allow_summarise else b'false')
         self._send_bytes(data, content_type, 200)
 
     def _send_json(self, payload, status=200, close=False):
@@ -251,16 +306,34 @@ class WebServer:
     #: refusal reaches the client cleanly. Beyond it, the connection is closed.
     max_drain_bytes = 16 * 1024 * 1024
 
+    #: How long a summary preview can be sent, and how many may be waiting.
+    preview_seconds = 600
+    max_previews = 8
+
+    #: The summariser button's request timeout, per attempt, with no retries:
+    #: a person is waiting on it, and a handler thread is held while it runs.
+    summarise_timeout = 90
+
     def __init__(self, profile_path, rules_path=None, analyzer=None,
-                 host='127.0.0.1', port=8788, allow_edit=False, silences_path=''):
+                 host='127.0.0.1', port=8788, allow_edit=False, silences_path='',
+                 allow_summarise=False, state_dir='', secrets_path='',
+                 summariser_factory=None):
         self.profile_path = profile_path
         self.rules_path = rules_path or os.path.join(HERE, 'rules')
         self.analyzer = analyzer
         self.host = host
         self.port = port
         self.allow_edit = allow_edit
+        self.allow_summarise = bool(allow_summarise)
         self.token = secrets.token_urlsafe(32)
         self.silences_path = silences_path
+        self.state_dir = state_dir
+        self.secrets_path = secrets_path
+        # Injectable so the tests drive the real preview/send logic with a fake
+        # model client and no network.
+        self._summariser_factory = summariser_factory or self._default_summariser
+        self._previews = {}
+        self._previews_lock = threading.Lock()
 
         self.profile = load_profile(profile_path)
         self.rules = load_rules(self.rules_path)
@@ -285,7 +358,25 @@ class WebServer:
             '/api/reload': self._reload,
             '/api/silence': self._silence_add,
             '/api/silence/clear': self._silence_clear,
+            '/api/summarise/preview': self._summarise_preview,
+            '/api/summarise/send': self._summarise_send,
         }
+        #: Which switch each POST route sits behind. Anything not listed is an
+        #: editor route, so a route added without thinking about it is behind
+        #: --allow-edit rather than open.
+        self.post_permissions = {'/api/summarise/preview': 'summarise',
+                                 '/api/summarise/send': 'summarise'}
+
+    def permission_refusal(self, path):
+        """None if this POST route is switched on, else the refusal to send."""
+        needs = self.post_permissions.get(path, 'edit')
+        if needs == 'summarise' and not self.allow_summarise:
+            return {'error': 'the summariser is off',
+                    'detail': 'start with --allow-summarise to enable the button'}
+        if needs == 'edit' and not self.allow_edit:
+            return {'error': 'editing is off',
+                    'detail': 'start with --allow-edit to enable the editors'}
+        return None
 
     # ─── Lifecycle ───────────────────────────────────────────────────────
 
@@ -312,7 +403,18 @@ class WebServer:
         self._httpd = self._thread = None
 
     def url(self):
-        return f'http://{self.host}:{self.port}/'
+        host = f'[{self.host}]' if ':' in self.host else self.host
+        return f'http://{host}:{self.port}/'
+
+    def allowed_hosts(self):
+        """
+        The Host names to accept, or None for any.
+
+        Only a loopback bind has a knowable answer. Bound to an address on a
+        management network, the names it is reached by are the site's business
+        and the firewall is the boundary.
+        """
+        return LOOPBACK_NAMES if self.host in LOOPBACK_NAMES else None
 
     # ─── Read routes ─────────────────────────────────────────────────────
 
@@ -323,9 +425,30 @@ class WebServer:
             'rules': self.rules.summary(),
             'analysis': report,
             'editable': self.allow_edit,
+            'silences': bool(self.silences_path),
+            'summarise': self.allow_summarise,
             'profile_path': self.profile_path,
             'rules_path': self.rules_path,
         }
+
+    def _visible(self, findings, include_snoozed=False):
+        """
+        Findings with the silences applied as they stand now.
+
+        Applied on every request rather than once when the finding arrived, so
+        a snooze added a minute ago hides what it covers and an ack shows as
+        one straight away.
+        """
+        store = self._silences()
+        if store is None:
+            return list(findings)
+        shown = store.visible(findings)
+        if not include_snoozed:
+            return shown
+        # Asked for explicitly, so a snooze can be found and cleared. The
+        # snoozed ones are marked by the same pass that left them out.
+        kept = {id(f) for f in shown}
+        return shown + [f for f in findings if id(f) not in kept]
 
     def _findings(self, params):
         if self.analyzer is None:
@@ -334,12 +457,15 @@ class WebServer:
         tier = _one(params, 'tier')
         rule_id = _one(params, 'rule')
         device = _one(params, 'device')
+        include_snoozed = _one(params, 'snoozed') in ('1', 'true', 'yes')
 
-        findings = [f for f in self.analyzer.by_severity()
+        findings = [f for f in self._visible(self.analyzer.by_severity(),
+                                             include_snoozed)
                     if Severity.rank(f.severity) >= floor
                     and (not tier or f.tier == tier)
                     and (not rule_id or f.rule_id == rule_id)
                     and (not device or f.device == device)]
+        findings.sort(key=lambda f: (-Severity.rank(f.severity), f.ts))
         limit = _int(params, 'limit', 500, 5000)
         return {'count': len(findings),
                 'findings': [f.as_dict() for f in findings[:limit]]}
@@ -354,7 +480,7 @@ class WebServer:
         """
         seen, findings_by_device = {}, {}
         if self.analyzer is not None:
-            for finding in self.analyzer.findings:
+            for finding in self._visible(self.analyzer.findings):
                 findings_by_device.setdefault(finding.device, []).append(
                     {'rule_id': finding.rule_id, 'severity': finding.severity,
                      'description': finding.description, 'count': finding.count})
@@ -568,6 +694,106 @@ class WebServer:
             return {'ok': True}, 200
         return {'error': 'no such silence'}, 404
 
+    # ─── The summariser button ───────────────────────────────────────────
+
+    def _default_summariser(self):
+        from netmon.summarise import Summariser, load_summariser_config
+        config = load_summariser_config(self.secrets_path or None,
+                                        state_dir=self.state_dir)
+        config.timeout = min(config.timeout, self.summarise_timeout)
+        config.max_retries = 0
+        return Summariser(config)
+
+    def _summariser(self):
+        """A summariser, or an error payload saying why there is none."""
+        from netmon.alerting import AlertingError
+        from netmon.summarise import SummaryError
+        try:
+            return self._summariser_factory(), None
+        except (AlertingError, SummaryError, ValueError) as e:
+            return None, {'error': 'the summariser is not configured',
+                          'detail': str(e)}
+
+    def _summarise_preview(self, body):
+        """
+        Build the exact message a triage would send, and send nothing.
+
+        Shown to the person first, with its size and where the budget stands,
+        so what leaves the building is what they read. Device names in it come
+        from the network; the page puts all of it on screen as text.
+        """
+        from netmon.summarise import SummaryError
+        if self.analyzer is None:
+            return {'error': 'no analysis has been run, so there is nothing '
+                             'to summarise'}, 400
+        summariser, problem = self._summariser()
+        if problem is not None:
+            return problem, 400
+
+        view = _VisibleView(self.analyzer, self._visible)
+        device = str(body.get('device') or '').strip()
+        try:
+            prepared = (summariser.prepare_investigation(view, self.profile, device)
+                        if device else summariser.prepare(view, self.profile))
+        except SummaryError as e:
+            return {'error': str(e)}, 400
+
+        preview_id = secrets.token_urlsafe(18)
+        now = time.time()
+        with self._previews_lock:
+            self._expire_previews(now)
+            self._previews[preview_id] = (now, prepared)
+            while len(self._previews) > self.max_previews:
+                oldest = min(self._previews, key=lambda k: self._previews[k][0])
+                del self._previews[oldest]
+
+        payload = prepared['payload']
+        return {
+            'preview_id': preview_id,
+            'message': prepared['message'],
+            'system': prepared['system'],
+            'model': prepared['model'],
+            'estimated_input_tokens': prepared['estimated_input_tokens'],
+            'max_output_tokens': prepared['max_output_tokens'],
+            'findings_included': len(payload.get('findings') or []),
+            'withheld_from_restricted_segments':
+                payload.get('withheld_from_restricted_segments', 0),
+            'budget': summariser.budget(),
+            'expires_in': self.preview_seconds,
+            'note': 'Nothing has been sent. The estimate is made here, at about '
+                    'three characters a token, without asking the model.',
+        }, 200
+
+    def _expire_previews(self, now):
+        for key in [k for k, (made, _) in self._previews.items()
+                    if now - made > self.preview_seconds]:
+            del self._previews[key]
+
+    def _summarise_send(self, body):
+        """
+        Send a previewed message — that one, unchanged, once.
+
+        The preview is taken out of the store before anything else, so a
+        double click or a replayed request cannot send it twice.
+        """
+        from netmon.summarise import SummaryError
+        preview_id = str(body.get('preview_id') or '')
+        with self._previews_lock:
+            self._expire_previews(time.time())
+            entry = self._previews.pop(preview_id, None)
+        if entry is None:
+            return {'error': 'no such preview',
+                    'detail': 'it was already sent, or it expired; prepare '
+                              'another'}, 404
+        summariser, problem = self._summariser()
+        if problem is not None:
+            return problem, 400
+        try:
+            result = summariser.send(entry[1])
+        except SummaryError as e:
+            return {'error': str(e), 'budget': summariser.budget()}, 400
+        return {'ok': True, 'result': result, 'budget': summariser.budget()}, 200
+
     def _reload(self, body):
         try:
             self.profile = load_profile(self.profile_path)
@@ -576,6 +802,19 @@ class WebServer:
             return {'error': str(e)}, 400
         return {'ok': True, 'site': self.profile.summary(),
                 'rules': self.rules.summary()}, 200
+
+
+class _VisibleView:
+    """An analyzer, seen through the silences, for the summariser."""
+
+    def __init__(self, analyzer, visible):
+        self._analyzer = analyzer
+        self.findings = visible(analyzer.findings)
+        self.events_seen = analyzer.events_seen
+
+    def by_severity(self):
+        kept = {id(f) for f in self.findings}
+        return [f for f in self._analyzer.by_severity() if id(f) in kept]
 
 
 def _write_with_backup(path, source):
@@ -604,10 +843,30 @@ def _int(params, name, default, maximum):
     return max(1, min(value, maximum))
 
 
+def make_server(profile_path, rules_path=None, analyzer=None, host='127.0.0.1',
+                port=8788, allow_edit=False, state_dir='', allow_summarise=False,
+                secrets_path=''):
+    """
+    The UI as `netmon web` builds it, not yet listening.
+
+    `state_dir` is the service's state directory. The silences live there, so
+    pointing the UI at the same one shows — and, with editing on, changes — the
+    acknowledgements and snoozes the running service applies.
+    """
+    silences_path = os.path.join(state_dir, 'silences.json') if state_dir else ''
+    return WebServer(profile_path, rules_path, analyzer, host, port, allow_edit,
+                     silences_path=silences_path,
+                     allow_summarise=allow_summarise, state_dir=state_dir,
+                     secrets_path=secrets_path)
+
+
 def run_web(profile_path, rules_path=None, analyzer=None, host='127.0.0.1',
-            port=8788, allow_edit=False, open_browser=False):
+            port=8788, allow_edit=False, open_browser=False, state_dir='',
+            allow_summarise=False, secrets_path=''):
     """Start the UI and block until interrupted."""
-    server = WebServer(profile_path, rules_path, analyzer, host, port, allow_edit)
+    server = make_server(profile_path, rules_path, analyzer, host, port,
+                         allow_edit, state_dir, allow_summarise, secrets_path)
+    silences_path = server.silences_path
     server.start()
 
     print(f'netmon UI on {server.url()}')
@@ -618,6 +877,16 @@ def run_web(profile_path, rules_path=None, analyzer=None, host='127.0.0.1',
               f'{report["findings"]} findings')
     if allow_edit:
         print('  editing is ON — the profile and rules can be written from the browser')
+        if silences_path:
+            print(f'  acknowledge, snooze and maintenance write to {silences_path}')
+    if silences_path and not allow_edit:
+        print('  silences are shown; add --allow-edit to change them')
+    if allow_summarise:
+        print('  the summariser button is ON — a preview first, then a second '
+              'click sends it')
+        if not state_dir:
+            print('  WARNING: no --state, so token spend is kept under the home '
+                  'directory')
     if host not in ('127.0.0.1', 'localhost', '::1'):
         print()
         print(f'  WARNING: bound to {host}, not localhost.')
@@ -641,9 +910,8 @@ def run_web(profile_path, rules_path=None, analyzer=None, host='127.0.0.1',
     return 0
 
 
-def _main(argv=None):
+def _parser():
     import argparse
-    import sys
 
     parser = argparse.ArgumentParser(
         prog='python -m netmon.web',
@@ -665,10 +933,29 @@ def _main(argv=None):
                              'has no login')
     parser.add_argument('--port', type=int, default=8788)
     parser.add_argument('--allow-edit', action='store_true',
-                        help='let the profile and rule editors write to disk')
+                        help='let the profile and rule editors write to disk, '
+                             'and the acknowledge, snooze and maintenance '
+                             'buttons write silences under --state')
+    parser.add_argument('--state', default='', metavar='DIR',
+                        help="the service's state directory (its --state), "
+                             'where silences are kept')
+    parser.add_argument('--allow-summarise', '--allow-summarize',
+                        action='store_true', dest='allow_summarise',
+                        help='offer the model-triage button. It shows the exact '
+                             'redacted payload and an estimate first; only a '
+                             'second click sends it, within the daily budget')
+    parser.add_argument('--secrets', default='', metavar='FILE',
+                        help='the secrets file (mode 600) holding the '
+                             'summariser settings and API key')
     parser.add_argument('--open', action='store_true', help='open a browser')
     parser.add_argument('-v', '--verbose', action='store_true')
-    args = parser.parse_args(argv)
+    return parser
+
+
+def _main(argv=None):
+    import sys
+
+    args = _parser().parse_args(argv)
 
     logging.basicConfig(level=logging.INFO if args.verbose else logging.WARNING,
                         format='%(levelname)s: %(message)s')
@@ -692,7 +979,9 @@ def _main(argv=None):
 
     try:
         return run_web(args.profile, args.rules, analyzer, args.host, args.port,
-                       args.allow_edit, args.open)
+                       args.allow_edit, args.open, state_dir=args.state,
+                       allow_summarise=args.allow_summarise,
+                       secrets_path=args.secrets)
     except (ProfileError, RuleError) as e:
         print(f'{e}', file=sys.stderr)
         return 1

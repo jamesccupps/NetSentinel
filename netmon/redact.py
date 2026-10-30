@@ -18,8 +18,16 @@ contains nothing regulated.
 **AI** — a summary sent to an external model. Everything above, and nothing at
 all from a restricted segment: not the addresses, not the device names, not the
 fact that something happened there. The site's instruction was "never send
-anything from VLAN 12", and a summariser is not the place to start interpreting
-that narrowly.
+anything from the metadata-only VLAN" (40 and 50 in the example profile), and a
+summariser is not the place to start interpreting that narrowly.
+
+A finding counts as touching a restricted segment if anything about it points
+there: the VLANs enrichment resolved, the addresses and MACs on its event, the
+device it names, the VLAN, zone, network or address in its evidence, or an
+address in its text. Canary and drift findings never went through enrichment
+— a canary hit carries addresses and no VLAN, a configuration finding carries
+a VLAN list or a forward target and no packet at all — so checking only the
+resolved VLAN fields let both through.
 
 How it fails
 ------------
@@ -35,10 +43,12 @@ and so should anything adding a new destination.
 
 from __future__ import annotations
 
+import ipaddress
 import re
 
 __all__ = ['ALERT', 'AI', 'redact_finding', 'redact_findings', 'audit',
-           'SAFE_EVIDENCE_FIELDS', 'FORBIDDEN_SUBSTRINGS']
+           'SAFE_EVIDENCE_FIELDS', 'FORBIDDEN_SUBSTRINGS',
+           'device_is_restricted']
 
 ALERT = 'alert'
 AI = 'ai'
@@ -64,6 +74,12 @@ SAFE_EVIDENCE_FIELDS = frozenset({
     'known_destinations', 'days_of_history', 'quiet_hours', 'zone',
     'mac', 'ip', 'macs', 'vlans', 'search_target', 'queries', 'name',
     'destination_count', 'reason',
+    # Where an internet address is, from local GeoIP files or the gateway's
+    # own Region column: a country code, a network number and its name.
+    'dst_country', 'dst_asn', 'dst_as_org', 'src_country', 'src_asn',
+    'src_as_org', 'dst_region', 'src_region', 'dst_asn_allowed',
+    # Inbound from outside Cloudflare: who, how many, and the flags.
+    'sources', 'source_count', 'src_is_cloudflare', 'dst_is_cloudflare',
 })
 
 #: A name containing any of these is never transmitted, whatever the allowlist
@@ -99,32 +115,205 @@ def _restricted_vlans(profile):
     return set(getattr(profile, 'metadata_only_vlans', set()) or set())
 
 
-def _finding_touches_restricted(finding, profile):
+#: Evidence keys whose value is a VLAN id, or a list of them.
+_VLAN_KEYS = ('vlan', 'vlans', 'src_vlan', 'dst_vlan', 'observed_vlan')
+#: Evidence and event keys whose value is a zone name.
+_ZONE_KEYS = ('zone', 'src_zone', 'dst_zone')
+
+_ADDRESS_IN_TEXT = re.compile(
+    r'(?<![\d.])(?:\d{1,3}\.){3}\d{1,3}(?![\d.])'          # IPv4
+    r'|(?<![0-9a-f:])(?:[0-9a-f]{0,4}:){2,7}[0-9a-f]{0,4}(?![0-9a-f:])',  # IPv6
+    re.I)
+_MAC_IN_TEXT = re.compile(r'\b(?:[0-9a-f]{2}[:-]){5}[0-9a-f]{2}\b', re.I)
+
+
+class _Restricted:
+    """
+    Everything that identifies the restricted segments, worked out once.
+
+    VLAN ids, the subnets they carry, the zones nothing else shares, the names
+    of the networks, and the devices the profile places on them.
+    """
+
+    def __init__(self, profile):
+        self.profile = profile
+        self.vlans = _restricted_vlans(profile)
+        vlans = getattr(profile, 'vlans', {}) or {}
+        self.subnets = []
+        for vlan in vlans.values():
+            if vlan.id in self.vlans and vlan.subnet:
+                try:
+                    self.subnets.append(ipaddress.ip_network(vlan.subnet,
+                                                             strict=False))
+                except ValueError:
+                    continue
+        # Only zones that no unrestricted VLAN also uses. A zone shared with an
+        # ordinary segment says nothing about which one a finding came from.
+        inside = {v.zone.lower() for v in vlans.values()
+                  if v.zone and v.id in self.vlans}
+        outside = {v.zone.lower() for v in vlans.values()
+                   if v.zone and v.id not in self.vlans}
+        self.zones = inside - outside
+        self.network_names = {v.name.lower() for v in vlans.values()
+                              if v.name and v.id in self.vlans}
+        devices = getattr(profile, 'devices', {}) or {}
+        self.devices = [d for d in devices.values() if self._device_vlan_restricted(d)]
+        self.device_names = sorted({d.name.lower() for d in self.devices if d.name},
+                                   key=len, reverse=True)
+
+    def __bool__(self):
+        return bool(self.vlans)
+
+    def _device_vlan_restricted(self, device):
+        if device.vlan is not None:
+            try:
+                if int(device.vlan) in self.vlans:
+                    return True
+            except (TypeError, ValueError):
+                pass
+        return any(self.address(ip) for ip in device.ips)
+
+    def vlan(self, value):
+        """A VLAN id, or a list or "40 (access-control)" string of them."""
+        if isinstance(value, (list, tuple, set)):
+            return any(self.vlan(v) for v in value)
+        if value is None or isinstance(value, bool):
+            return False
+        text = str(value).strip().split(' ', 1)[0]
+        try:
+            return int(text) in self.vlans
+        except (TypeError, ValueError):
+            return False
+
+    def address(self, value):
+        try:
+            address = ipaddress.ip_address(str(value).strip().strip('[]'))
+        except ValueError:
+            return False
+        return any(address in net for net in self.subnets
+                   if net.version == address.version)
+
+    def mac(self, value):
+        device = self.profile.device_for_mac(value) \
+            if hasattr(self.profile, 'device_for_mac') else None
+        return device is not None and device in self.devices
+
+    def text(self, value):
+        """Whether free text names a restricted address, MAC or device."""
+        text = str(value or '')
+        if not text:
+            return False
+        for match in _ADDRESS_IN_TEXT.finditer(text):
+            if self.address(match.group(0)):
+                return True
+        for match in _MAC_IN_TEXT.finditer(text):
+            if self.mac(match.group(0).replace('-', ':').lower()):
+                return True
+        lowered = text.lower()
+        for name in self.device_names:
+            if re.search(r'(?<![\w-])' + re.escape(name) + r'(?![\w-])', lowered):
+                return True
+        return False
+
+    def device(self, label):
+        """The finding's device string: a name, a MAC or an address."""
+        label = str(label or '').strip()
+        if not label:
+            return False
+        lowered = label.lower()
+        if any(d.name.lower() == lowered or d.mac == lowered for d in self.devices):
+            return True
+        return self.address(label) or self.text(label)
+
+    def value(self, key, value):
+        """One evidence value, judged by what its key says it is."""
+        if key in _VLAN_KEYS and self.vlan(value):
+            return True
+        if key in _ZONE_KEYS and str(value or '').lower() in self.zones:
+            return True
+        if key in ('network', 'subnet', 'ip_subnet'):
+            if str(value or '').lower() in self.network_names:
+                return True
+            try:
+                network = ipaddress.ip_network(str(value), strict=False)
+                if any(network.overlaps(net) for net in self.subnets
+                       if net.version == network.version):
+                    return True
+            except ValueError:
+                pass
+        if isinstance(value, (list, tuple, set)):
+            return any(self.value(key, item) for item in value)
+        if isinstance(value, dict):
+            return any(self.value(str(k), v) for k, v in value.items())
+        if isinstance(value, str):
+            return self.text(value)
+        return False
+
+
+def _finding_touches_restricted(finding, profile, restricted=None):
     """
     Whether this finding involves a segment whose contents must not be
     transmitted to an external service.
 
-    Checked against the event's resolved VLANs rather than the description, so
-    it does not depend on how a rule happened to word itself.
+    Every route to "this came from there" is checked, because the findings
+    that matter most here are the ones that never went through enrichment.
+    A canary hit carries the visitor's address and no VLAN; a configuration
+    finding carries a VLAN list, a network name or a forward target and no
+    packet. Erring towards withholding costs the model one finding, which the
+    withheld count still accounts for; erring the other way sends the one
+    thing the site said must never leave.
     """
-    restricted = _restricted_vlans(profile)
+    restricted = restricted if restricted is not None else _Restricted(profile)
     if not restricted:
         return False
+
     event = finding.event
-    if event is None:
+    if event is not None:
+        for key in ('vlan', 'observed_vlan', 'src_vlan', 'dst_vlan'):
+            if restricted.vlan(event.get(key)):
+                return True
+        for key in ('src_zone', 'dst_zone'):
+            if str(event.get(key) or '').lower() in restricted.zones:
+                return True
+        for ip in (event.src_ip, event.dst_ip):
+            if ip and restricted.address(ip):
+                return True
+        for mac in (event.src_mac, event.dst_mac):
+            if mac and restricted.mac(mac):
+                return True
+        if event.fields.get('metadata_only') or \
+                event.fields.get('may_store_payload') is False:
+            return True
+
+    if restricted.device(finding.device):
+        return True
+    for name, value in (finding.evidence or {}).items():
+        if restricted.value(str(name), value):
+            return True
+    return any(restricted.text(text) for text in
+               (finding.description, finding.title, finding.key))
+
+
+def device_is_restricted(device, profile):
+    """
+    Whether a device named on the command line sits on a restricted segment.
+
+    For the on-demand "investigate this device" path, which would otherwise
+    send the device's name and role even when it has no findings to withhold.
+    """
+    restricted = _Restricted(profile)
+    if not restricted:
         return False
-    for key in ('vlan', 'observed_vlan', 'src_vlan', 'dst_vlan'):
-        value = event.get(key)
-        if value is not None:
-            try:
-                if int(value) in restricted:
-                    return True
-            except (TypeError, ValueError):
-                continue
+    if restricted.device(device):
+        return True
+    if hasattr(profile, 'identify'):
+        found = profile.identify(ip=device, mac=device)
+        return restricted.vlan(found.vlan) or any(
+            restricted.address(ip) for ip in found.ips)
     return False
 
 
-def redact_finding(finding, profile=None, audience=ALERT):
+def redact_finding(finding, profile=None, audience=ALERT, _restricted=None):
     """
     One finding, reduced to what this audience may receive.
 
@@ -133,7 +322,8 @@ def redact_finding(finding, profile=None, audience=ALERT):
     to know something was withheld should use `redact_findings`, which reports
     the count.
     """
-    if audience == AI and _finding_touches_restricted(finding, profile):
+    if audience == AI and _finding_touches_restricted(finding, profile,
+                                                      _restricted):
         return None
 
     evidence = {}
@@ -216,8 +406,9 @@ def redact_findings(findings, profile=None, audience=ALERT):
     which is a different and worse claim than "this was not sent".
     """
     records, withheld = [], 0
+    restricted = _Restricted(profile) if audience == AI else None
     for finding in findings:
-        record = redact_finding(finding, profile, audience)
+        record = redact_finding(finding, profile, audience, restricted)
         if record is None:
             withheld += 1
         else:

@@ -160,6 +160,9 @@ class Finding:
     event: Event | None = None
     count: int = 1
     evidence: dict = field(default_factory=dict)
+    # Set by netmon.silence when an ack, snooze or maintenance window covers
+    # this finding: {'kind', 'id', 'reason'}. None when nothing does.
+    silenced: dict | None = None
 
     def __post_init__(self):
         self.severity = Severity.normalise(self.severity)
@@ -177,6 +180,9 @@ class Finding:
             'device': self.device, 'key': self.key,
             'next_check': self.next_check, 'count': self.count,
             'evidence': dict(self.evidence),
+            # Without this the UI cannot say a finding was acknowledged, nor
+            # offer to clear the silence that covers it.
+            'silenced': dict(self.silenced) if self.silenced else None,
         }
         if include_event and self.event is not None:
             data['event'] = self.event.as_dict()
@@ -284,6 +290,19 @@ def enrich(event, profile, now=None):
         event.fields['direction'] = 'internal'
     event.fields['internet'] = dst_public or src_public
 
+    _geolocate(event, profile, src, src_public, dst_public)
+
+    # Cloudflare's ranges are a CIDR test against a shipped list, so this is
+    # cheap enough to answer for every event rather than for one rule.
+    is_cloudflare = getattr(profile, 'is_cloudflare', None)
+    event.fields['src_is_cloudflare'] = bool(
+        src_public and is_cloudflare is not None and is_cloudflare(event.src_ip))
+    event.fields['dst_is_cloudflare'] = bool(
+        dst_public and is_cloudflare is not None and is_cloudflare(event.dst_ip))
+    is_origin = getattr(profile, 'is_cloudflare_origin', None)
+    event.fields['dst_cloudflare_origin'] = bool(
+        not dst_public and is_origin is not None and is_origin(event.dst_ip))
+
     crosses = (event.fields['src_vlan'] is not None
                and event.fields['dst_vlan'] is not None
                and event.fields['src_vlan'] != event.fields['dst_vlan'])
@@ -345,6 +364,46 @@ def enrich(event, profile, now=None):
     event.fields['approved_remote_access'] = _is_approved_remote_access(
         event, getattr(profile, 'remote_access_allowed', ()))
     return event
+
+
+def _geolocate(event, profile, src_device, src_public, dst_public):
+    """
+    Country and network for the internet end of the event, and whether the
+    source's role expects that network.
+
+    Looked up from local DB-IP files (netmon.geoip); never a network call. A
+    UniFi export's own Region column stands in for the country when there are
+    no files, or they do not know the address.
+    """
+    reader = profile.geoip() if hasattr(profile, 'geoip') else None
+    for side, ip, public in (('dst', event.dst_ip, dst_public),
+                             ('src', event.src_ip, src_public)):
+        info = reader.lookup(ip) if (reader is not None and public) else {}
+        if info.get('country'):
+            event.fields[f'{side}_country'] = info['country']
+        elif not event.fields.get(f'{side}_country'):
+            region = str(event.fields.get(f'{side}_region') or '').strip()
+            # Only a code: what else the column holds varies by firmware and
+            # is unverified, and an invented country is worse than none.
+            if len(region) == 2 and region.isalpha():
+                event.fields[f'{side}_country'] = region.upper()
+        if info.get('asn'):
+            event.fields[f'{side}_asn'] = info['asn']
+        if info.get('as_org'):
+            event.fields[f'{side}_as_org'] = info['as_org']
+
+    # `allowed_asns` on a role: true, false, or None when there is nothing to
+    # judge — no list recorded, nothing on the internet, or no ASN known. None
+    # is not false: an incomplete profile, or no database, produces silence.
+    event.fields['dst_asn_allowed'] = None
+    roles = getattr(profile, 'roles', {}) or {}
+    role = roles.get(src_device.role)
+    allowed = getattr(role, 'allowed_asns', None) if role is not None else None
+    asn = event.fields.get('dst_asn')
+    if allowed and dst_public and asn:
+        from netmon.geoip import normalise_asn
+        permitted = {normalise_asn(a) for a in allowed} - {None}
+        event.fields['dst_asn_allowed'] = normalise_asn(asn) in permitted
 
 
 def _is_approved_remote_access(event, approved):

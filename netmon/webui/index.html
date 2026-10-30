@@ -7,7 +7,8 @@
 <link rel="stylesheet" href="/static/style.css">
 <link rel="icon" href="data:,">
 </head>
-<body data-token="{{TOKEN}}" data-editable="{{EDITABLE}}">
+<body data-token="{{TOKEN}}" data-editable="{{EDITABLE}}"
+      data-silences="{{SILENCES}}" data-summarise="{{SUMMARISE}}">
 
 <header>
   <h1>netmon</h1>
@@ -23,6 +24,7 @@
   <button data-tab="rules">Rules</button>
   <button data-tab="filter">Capture filter</button>
   <button data-tab="profile">Profile</button>
+  <button data-tab="triage" id="nav-triage" style="display:none">Model triage</button>
 </nav>
 
 <main>
@@ -45,12 +47,40 @@
         <option value="">all</option>
         <option value="push">needs attention now</option>
         <option value="digest">daily report</option>
+        <option value="weekly">weekly</option>
       </select>
     </label>
     <label>Rule <select id="f-rule"><option value="">all</option></select></label>
     <input type="text" id="f-search" placeholder="filter by device or text…">
+    <label><input type="checkbox" id="f-snoozed"> show snoozed</label>
   </div>
+
+  <div id="silence-controls" class="toolbar" style="display:none">
+    <label>Reason <input type="text" id="s-reason" maxlength="200"
+      placeholder="why — it goes in the record"></label>
+    <label>Snooze for
+      <select id="s-hours">
+        <option value="1">1 hour</option>
+        <option value="4" selected>4 hours</option>
+        <option value="24">1 day</option>
+        <option value="72">3 days</option>
+        <option value="168">1 week</option>
+      </select>
+    </label>
+    <span id="s-status" class="note"></span>
+  </div>
+
   <div id="finding-list"></div>
+
+  <div id="silences-wrap" style="display:none">
+    <h3>In effect</h3>
+    <p class="note">
+      An acknowledgement stops one finding pushing and leaves it in the digest.
+      Maintenance stops pushes for a device or rule and leaves everything in
+      the digest. A snooze hides a device or rule completely, so it always ends.
+    </p>
+    <div id="silence-list"></div>
+  </div>
 </section>
 
 <!-- ─── Devices ──────────────────────────────────────────────────────── -->
@@ -173,6 +203,37 @@
   <div class="toolbar">
     <button class="action" id="p-save">Validate and save</button>
     <span id="p-status" class="note"></span>
+  </div>
+</section>
+
+<!-- ─── Model triage ─────────────────────────────────────────────────── -->
+<section id="triage">
+  <p class="note">
+    Asks a model which findings matter and why. Advisory: nothing it returns is
+    run. Preparing sends nothing — it shows the exact message that would leave
+    this sensor, redacted, with nothing from a metadata-only segment, and an
+    estimate of its size. Only the second button sends it, once, within the
+    day's token budget.
+  </p>
+  <div class="toolbar">
+    <label>Device <input type="text" id="t-device"
+      placeholder="blank for the whole window"></label>
+    <button class="action" id="t-prepare" data-permission="summarise">Prepare</button>
+    <button class="action" id="t-send" data-permission="summarise" disabled>Send it</button>
+    <button class="ghost" id="t-discard" disabled>Discard</button>
+    <span id="t-status" class="note"></span>
+  </div>
+  <div id="t-preview" style="display:none">
+    <div class="cards" id="t-cards"></div>
+    <p class="note" id="t-note"></p>
+    <h3>The message, exactly as it would be sent</h3>
+    <pre class="out payload" id="t-message"></pre>
+    <h3>The fixed instructions sent with it</h3>
+    <pre class="out payload" id="t-system"></pre>
+  </div>
+  <div id="t-result" style="display:none">
+    <h3>Triage</h3>
+    <div id="t-result-body"></div>
   </div>
 </section>
 

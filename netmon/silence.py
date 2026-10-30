@@ -195,18 +195,18 @@ class Silences:
         now = self._clock() if now is None else now
         return [dict(e) for e in self.entries if not _expired(e, now)]
 
-    def match(self, finding, now=None):
+    def match(self, finding, now=None, entries=None):
         best = None
-        for entry in self.active(now):
+        for entry in (self.active(now) if entries is None else entries):
             if _applies(entry, finding) and (
                     best is None
                     or _PRECEDENCE[entry['kind']] < _PRECEDENCE[best['kind']]):
                 best = entry
         return best
 
-    def decide(self, finding, now=None):
+    def decide(self, finding, now=None, entries=None):
         """'push', 'digest' (ack or maintenance) or 'drop' (snooze)."""
-        entry = self.match(finding, now)
+        entry = self.match(finding, now, entries)
         if entry is None:
             return 'push'
         try:
@@ -215,6 +215,27 @@ class Silences:
         except AttributeError:
             pass
         return 'drop' if entry['kind'] == 'snooze' else 'digest'
+
+    def visible(self, findings, now=None):
+        """
+        Findings as they should be shown now: snoozed ones left out, acked and
+        maintenance ones marked.
+
+        Decided afresh on every call rather than once on arrival. A silence
+        added after a finding was kept has to hide it from the UI and the
+        digest too, and one cleared has to bring it back — so the mark left by
+        an earlier decision is wiped before deciding again.
+        """
+        entries = self.active(now)
+        shown = []
+        for finding in findings:
+            try:
+                finding.silenced = None
+            except AttributeError:
+                pass
+            if self.decide(finding, now, entries) != 'drop':
+                shown.append(finding)
+        return shown
 
 
 def _main(argv=None):
