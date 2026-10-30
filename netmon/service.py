@@ -29,7 +29,9 @@ Restarts
 --------
 What has been processed is kept on disk, so a restart does not re-analyse
 yesterday or re-alert on what was already sent. The alternative is a service
-nobody dares restart.
+nobody dares restart. So are the day's findings (netmon.window): one per
+identity across capture files and restarts, each pushed once, with unanswered
+pushes carried onto the digest's checklist until someone answers them.
 """
 
 from __future__ import annotations

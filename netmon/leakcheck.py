@@ -225,7 +225,7 @@ class LeakCounter:
         out = []
         if self.on_disk and self.frames:
             out.append(self._leak())
-        for (address, vlan_id, how), (count, ts, vlan) in sorted(
+        for (address, _, how), (count, ts, vlan) in sorted(
                 self.outside.items(), key=lambda kv: -kv[1][0]):
             out.append(self._outside(address, vlan, how, count, ts))
         return out
