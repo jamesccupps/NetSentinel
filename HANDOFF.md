@@ -71,9 +71,46 @@ How the work was done:
   - The ML warning "isolation_forest.pkl failed integrity check" is expected.
     The model is from April, before model files were signed, and is retrained
     at 200 samples.
-- **Review mode** is on in James's config (`~\.netsentinel\review`). Once alerts
-  come in: build the bundle, give each alert a verdict, and record the false
-  positives.
+- **Review mode** is on in James's config (`~\.netsentinel\review`).
+
+## First review, 2026-10-30 (6 alerts, 13:36–13:41, all false positives)
+
+This PC is 192.168.8.32 (Gigabyte NIC d8:5e:d3:07:16:a7).
+- **3× LOW "HTTP Server Info":** plain-HTTP requests to update.eset.com,
+  ctldl.windowsupdate.com and clientconfig.akamai.steamstatic.com. The "sensitive
+  data" was the servers' own `Server:` header.
+- **HIGH "Suspicious User Agent":** `HeadlessChrome ... Edg/157` fetching
+  edge.microsoft.com/browsernetworktime. It is James's own Beam perf test
+  (`node test\perf\windows-rc.mjs`, Desktop\beam), which runs headless Edge with
+  a throwaway profile under Temp and remote debugging on 127.0.0.1:8809.
+- **HIGH NAME-POISONING:** this PC answering mDNS for 4 UUID names, 5 seconds
+  after that test started Edge. Those are WebRTC's random `.local` names for its
+  own addresses.
+- **MEDIUM insecure HTTP service:** an Edge update download from
+  msedge.b.tlu.dl.delivery.mp.microsoft.com, which is plain HTTP by design (the
+  content is signed).
+
+No verdicts were recorded. A false-positive verdict suppresses by IP, and here
+that would hide real Responder alerts from this PC.
+
+**NetSentinel bugs this review found** (not yet fixed):
+1. **The PC's own address is listed as a gateway.**
+   `net_detect.detect_default_gateway` takes every address on the
+   `route print 0.0.0.0` line, including the Interface column. The log shows
+   `Gateways: ['192.168.8.1', '192.168.8.32']`.
+2. **The command-line bundle's traffic digests are unreadable.**
+   `python -m src.review build` never imports scapy's layers, so every packet
+   reads "Raw". Building in the app is fine.
+3. **The digest buries the alert's own connection.** When the alert involves
+   this PC, the snippet holds all of its traffic, and the digest's first 400
+   lines miss the alert's own flow.
+4. **NAME-POISONING counts WebRTC's UUID mDNS names.**
+5. **"HTTP Server Info" from internet servers** is reported as "[LIKELY THREAT]
+   Sensitive Data in Transit".
+6. **Plain-HTTP software updates** (Windows Update, Edge delivery) are reported
+   as insecure services.
+7. **The verifier calls every FORENSICS-SENSITIVE-DATA alert "LIKELY THREAT
+   70%"**, whatever the data type.
 
 ## Open questions for James
 
