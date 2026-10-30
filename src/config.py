@@ -170,6 +170,9 @@ DEFAULT_CONFIG = {
     "gui": {
         "refresh_rate_ms": 1000,
         "max_log_lines": 500,           # Max rows kept in the live packet log
+        # Closing the window hides it to the tray and monitoring carries on; the
+        # tray icon's menu quits. Off, closing quits.
+        "close_to_tray": True,
     },
     "performance": {
         # Below-normal CPU and I/O priority, so the desktop wins over the monitor.
