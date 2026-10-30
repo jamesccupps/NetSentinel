@@ -436,6 +436,15 @@ def scan(paths, analyzer, skip=(), on_alert=None, on_progress=None, cancelled=No
                                         ignore_cleanup_errors=True) as workdir:
         run.workdir = workdir
         run.scan_all(items)
+    for entry in report['files']:
+        if entry['type'] == 'archive':
+            # the desktop and browser file tables read these from every entry
+            # that is not a capture
+            entry.setdefault('indicators', 0)
+            entry.setdefault('secrets', 0)
+            members = entry.get('members', 0)
+            entry.setdefault('note', f"{entry.get('archive', '')} archive, {members} "
+                                     f"member{'' if members == 1 else 's'}")
 
     found = run.indicators.as_lists()
     threats, suspicious = _check_threats(found, threat_intel)

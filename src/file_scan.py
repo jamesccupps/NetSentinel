@@ -1054,7 +1054,6 @@ class _TextScan:
 
     def _password_exports(self):
         """Browser and password-manager CSV exports: every row's password."""
-        text = self.text
         for n, header in enumerate(self._find(_EXPORT_HEADER)):
             if n >= 3:
                 break
@@ -1125,7 +1124,7 @@ class _TextScan:
                     continue
                 value, start = value[1:close], start + 1
             else:
-                value = re.split(r'\s+#', value, 1)[0].rstrip()
+                value = re.split(r'\s+#', value, maxsplit=1)[0].rstrip()
             if len(value) < 4 or _PLACEHOLDERS.match(value):
                 continue
             self.add_secret('env_secret', 'Secret in a .env file', 'HIGH', start, start + len(value), value)
