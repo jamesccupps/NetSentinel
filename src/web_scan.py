@@ -75,12 +75,13 @@ class _Session:
 class ScanSessions:
     """Upload-then-scan sessions for the web dashboard."""
 
-    def __init__(self, analyzer_factory):
+    def __init__(self, analyzer_factory, ignore_list=None):
         self._analyzer_factory = analyzer_factory
         self._analyzer = None
         self._sessions = {}
         self._lock = threading.Lock()
         self._running = None
+        self._ignore = ignore_list
 
     def create(self):
         with self._lock:
@@ -212,3 +213,48 @@ class ScanSessions:
         for session in list(self._sessions.values()):
             session.cancel = True
             session.remove_files()
+
+    # ─── Ignore list ("Ignore this" on a finding) ───────────────────────
+
+    def _ignore_list(self):
+        if self._ignore is None:
+            from src.scan_ignore import IgnoreList
+            self._ignore = IgnoreList()
+        return self._ignore
+
+    def ignore(self, finding, note=''):
+        """
+        Stop reporting a finding taken from a report: a secret or script
+        finding by its kind and ignore_key, a card or SSN by kind, file and
+        line, an indicator by kind and value. Later scans leave it out.
+        Everything here is checked, since it arrives from the browser.
+        """
+        if not isinstance(finding, dict):
+            raise ScanError('expected a finding')
+        clean = {}
+        for key in ('kind', 'ignore_key', 'file', 'value', 'label'):
+            value = finding.get(key)
+            if value is not None:
+                if not isinstance(value, str) or len(value) > 4096:
+                    raise ScanError(f'bad {key}')
+                clean[key] = value
+        line = finding.get('line')
+        if line is not None:
+            if not isinstance(line, int) or isinstance(line, bool) or line < 0:
+                raise ScanError('bad line')
+            clean['line'] = line
+        if not clean.get('kind'):
+            raise ScanError('a finding needs its kind')
+        try:
+            return self._ignore_list().add_finding(clean, str(note or '')[:500])
+        except ValueError as e:
+            raise ScanError(str(e)) from e
+
+    def ignored(self):
+        """The ignore list, newest first."""
+        return self._ignore_list().entries()
+
+    def unignore(self, entry_id):
+        if not self._ignore_list().remove(str(entry_id or '')):
+            raise ScanError('no such ignore entry', 404)
+        return True
