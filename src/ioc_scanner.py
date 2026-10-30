@@ -43,8 +43,19 @@ SUSPICIOUS_LISTENING_PORTS = {
     7777, 65535, 1234, 8888, 9090, 2222, 3333,
 }
 
-# Known TOR directory authorities and common TOR ports
-TOR_PORTS = {9001, 9030, 9050, 9051, 9150}
+# Ports a Tor *client* listens on (SOCKS 9050/9150, control 9051). Reaching one on
+# another machine means someone is using it as a Tor proxy. 9001 and 9030, the
+# relay defaults, used to be here too: plenty of unrelated software uses 9001,
+# and relays commonly listen on 443 anyway, so they added noise and little Tor.
+TOR_PORTS = {9050, 9051, 9150}
+
+# A finding about a connection that stays open (Tor, DNS-over-HTTPS) is raised
+# once per source and destination per hour, not once per packet.
+CONNECTION_HOLD_SEC = 3600
+
+# DGA: distinct high-entropy names from one host inside this window.
+DGA_WINDOW_SEC = 600
+DGA_MIN_DOMAINS = 5
 
 # DNS over HTTPS providers (non-system, potential DNS bypass)
 DOH_ENDPOINTS = {
@@ -244,19 +255,26 @@ class IOCScanner:
     of baseline. Designed to catch pre-existing infections.
     """
 
-    def __init__(self, config, threat_intel=None, alert_callback=None):
+    def __init__(self, config, threat_intel=None, alert_callback=None, net_env=None):
         self.config = config
         self.threat_intel = threat_intel
         self.alert_callback = alert_callback
+        # Optional: lets the DoH check leave this machine's own resolvers alone.
+        self.net_env = net_env
         self.enabled = True
+        self._holds = {}                 # {key: until}
 
         # Track findings
         self.findings = []
         self.scan_count = 0
         self.last_scan_time = 0
 
-        # DGA tracking: domains seen in traffic, checked for entropy
-        self._high_entropy_domains = defaultdict(int)  # {domain: count}
+        # DGA tracking: high-entropy names per source, inside DGA_WINDOW_SEC. It
+        # used to be one dict for the whole session that was never emptied, so
+        # after five such names (a CDN hash here, a tracker there, over days),
+        # every later one raised IOC-DGA.
+        self._high_entropy_domains = {}                 # {domain: last seen}
+        self._dga_by_source = defaultdict(dict)         # {src_ip: {domain: ts}}
 
         # Merge config-driven DGA whitelist with built-in defaults
         extra_suffixes = config.get('whitelists', 'dga_whitelist_suffixes', default=[])
@@ -327,9 +345,11 @@ class IOCScanner:
         Returns list of finding dicts (may be empty).
         """
         findings = []
+        now = getattr(pkt_info, 'timestamp', 0) or time.time()
 
         # ─── TOR / Anonymizer Detection ──────────────────────
-        if pkt_info.dst_port in TOR_PORTS:
+        if pkt_info.dst_port in TOR_PORTS and self._hold(
+                f"IOC-TOR:{pkt_info.src_ip}:{pkt_info.dst_ip}", now):
             findings.append({
                 'rule_id': 'IOC-TOR',
                 'severity': 'HIGH',
@@ -350,7 +370,8 @@ class IOCScanner:
             })
 
         # ─── DGA Detection (high-entropy domains) ────────────
-        if pkt_info.dns_query:
+        # Queries only: a response repeats the name, which counted it twice.
+        if pkt_info.dns_query and getattr(pkt_info, 'dns_rcode', -1) < 0:
             domain = pkt_info.dns_query.lower()
 
             # Skip whitelisted domains (known-good high-entropy patterns)
@@ -391,11 +412,13 @@ class IOCScanner:
                     if len(label) >= DGA_MIN_LABEL_LENGTH:
                         ent = self._label_entropy(label)
                         if ent >= DGA_ENTROPY_THRESHOLD:
-                            self._high_entropy_domains[domain] += 1
-                            # Only alert if we've seen multiple high-entropy domains
+                            recent = self._note_high_entropy(pkt_info.src_ip, domain, now)
+                            # Only alert if one host produced several in a short time
                             # (one-off could be a CDN hash, but a pattern = DGA)
-                            total_dga = len(self._high_entropy_domains)
-                            if total_dga >= 5:
+                            total_dga = len(recent)
+                            if total_dga >= DGA_MIN_DOMAINS:
+                                # Reset, so the next alert needs a fresh burst.
+                                self._dga_by_source.pop(pkt_info.src_ip, None)
                                 findings.append({
                                     'rule_id': 'IOC-DGA',
                                     'severity': 'HIGH',
@@ -406,7 +429,9 @@ class IOCScanner:
                                         'latest_domain': domain,
                                         'domain_entropy': round(ent, 2),
                                         'total_dga_domains': total_dga,
-                                        'sample_domains': list(self._high_entropy_domains.keys())[:15],
+                                        'window_seconds': DGA_WINDOW_SEC,
+                                        'requesting_ip': pkt_info.src_ip,
+                                        'sample_domains': recent[:15],
                                         'description': 'Domain Generation Algorithms (DGA) are used by '
                                             'malware to generate random-looking domain names for C2 '
                                             'communication. A high number of high-entropy domains is '
@@ -418,7 +443,8 @@ class IOCScanner:
                                 })
 
         # ─── DNS bypass (DoH to non-configured providers) ─────
-        if pkt_info.dst_port == 443 and pkt_info.dst_ip in DOH_ENDPOINTS:
+        if pkt_info.dst_port == 443 and pkt_info.dst_ip in DOH_ENDPOINTS and not (
+                self.net_env and self.net_env.is_configured_resolver(pkt_info.dst_ip))                 and self._hold(f"IOC-DOH-BYPASS:{pkt_info.src_ip}:{pkt_info.dst_ip}", now):
             # Only flag if this IP isn't our configured DNS
             findings.append({
                 'rule_id': 'IOC-DOH-BYPASS',
@@ -462,6 +488,31 @@ class IOCScanner:
                 })
 
         return findings
+
+    def _hold(self, key, now, hold=CONNECTION_HOLD_SEC):
+        """True the first time `key` is seen in `hold` seconds (and starts the hold)."""
+        if self._holds.get(key, -1.0) >= now:
+            return False
+        self._holds[key] = now + hold
+        if len(self._holds) > 4096:
+            self._holds = {k: t for k, t in self._holds.items() if t >= now}
+        return True
+
+    def _note_high_entropy(self, src_ip, domain, now):
+        """Record one high-entropy name; the distinct ones this host looked up recently."""
+        names = self._dga_by_source[src_ip]
+        names[domain] = now
+        for old in [d for d, t in names.items() if now - t > DGA_WINDOW_SEC]:
+            del names[old]
+        self._high_entropy_domains[domain] = now
+        if len(self._high_entropy_domains) > 2000:
+            cutoff = now - DGA_WINDOW_SEC
+            self._high_entropy_domains = {d: t for d, t in self._high_entropy_domains.items()
+                                          if t >= cutoff}
+        if len(self._dga_by_source) > 1024:
+            self._dga_by_source.clear()
+            self._dga_by_source[src_ip] = names
+        return list(names)
 
     # ─── Startup Scan Methods ────────────────────────────────
 

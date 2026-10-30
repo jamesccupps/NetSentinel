@@ -82,14 +82,21 @@ KNOWN_TRANSFER_SERVICES = {
     'fbcdn.net',
 }
 
-# Common CDN patterns that generate high-entropy subdomains (not DGA)
+# Common CDN patterns that generate high-entropy subdomains (not DGA).
+#
+# These used to exonerate tunnels. A pure-hex label is exactly what dnscat2 and
+# many exfiltration tools send, and the bare words (cdn, edge, lb, pool...) were
+# matched anywhere in the label, so a long base32 string containing "lb" passed
+# as a load balancer. Now a word only counts as a whole leading label word, and
+# the hash-shaped patterns only count under a known cloud or CDN domain.
 CDN_SUBDOMAIN_PATTERNS = [
-    r'^[a-f0-9]{24,}$',        # Hex hashes (CDN cache keys)
-    r'^[a-z0-9]{20,}-[a-z0-9]+$',  # CDN asset IDs
-    r'^v\d+\.',                 # Version prefixes
-    r'^[a-z]{2}\d*\.',          # Region codes (us1, eu2, etc.)
-    r'cdn', r'cache', r'static', r'assets', r'media',
-    r'edge', r'origin', r'lb', r'pool',
+    r'^(?:cdn|cache|static|assets|media|edge|origin|lb|pool|img|images)(?:\d{0,3}|-[a-z0-9-]{1,20})$',
+    r'^v\d{1,3}$',                         # Version labels: v1, v2
+    r'^[a-z]{2}\d{0,2}$',                  # Region codes: us, eu2
+]
+CDN_HASH_PATTERNS = [
+    r'^[a-f0-9]{24,64}$',                  # Hex hashes (CDN cache keys)
+    r'^[a-z0-9]{20,}-[a-z0-9]+$',          # CDN asset IDs
 ]
 
 
@@ -596,18 +603,22 @@ class AlertVerifier:
         entropy = evidence.get('subdomain_entropy', 0)
         query_len = evidence.get('query_length', 0)
 
-        # Check if it matches known CDN patterns
+        # Check if parent domain is known cloud
         parts = query.split('.')
         subdomain = parts[0] if parts else ''
-        for pattern in CDN_SUBDOMAIN_PATTERNS:
+        parent = '.'.join(parts[-2:]) if len(parts) >= 2 else ''
+        parent_is_cloud = bool(self.net_env and self.net_env.is_known_cloud_domain(parent))
+
+        # Check if it matches known CDN patterns: word labels anywhere, hash-shaped
+        # labels only under a known cloud domain (elsewhere they look like a tunnel).
+        patterns = CDN_SUBDOMAIN_PATTERNS + (CDN_HASH_PATTERNS if parent_is_cloud else [])
+        for pattern in patterns:
             if re.search(pattern, subdomain, re.IGNORECASE):
                 reasoning.append(f"Subdomain matches CDN/cache pattern: {pattern}")
                 score -= 2
                 break
 
-        # Check if parent domain is known cloud
-        parent = '.'.join(parts[-2:]) if len(parts) >= 2 else ''
-        if self.net_env and self.net_env.is_known_cloud_domain(parent):
+        if parent_is_cloud:
             reasoning.append(f"Parent domain is known cloud service: {parent}")
             score -= 2
 
