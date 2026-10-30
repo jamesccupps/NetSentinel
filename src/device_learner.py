@@ -37,6 +37,20 @@ from src.ipcache import classify
 
 logger = logging.getLogger("NetSentinel.DeviceLearner")
 
+# A MAC seen with more addresses than this is a router fronting a routed
+# network (every packet from beyond it carries its MAC), not one device.
+_ROUTER_MAC_IPS = 3
+
+
+def _usable_mac(mac):
+    mac = (mac or '').lower()
+    if not mac or mac == '00:00:00:00:00:00':
+        return False
+    try:
+        return not int(mac[:2], 16) & 0x01         # unicast only
+    except ValueError:
+        return False
+
 # Behavioral classification rules (port-based heuristics)
 _DEVICE_SIGNATURES = {
     'printer':    {'listen_ports': {515, 631, 9100}, 'min_match': 1},
@@ -127,8 +141,14 @@ class DeviceLearner:
         self.config = config
         self.net_env = net_env
 
-        # Device inventory: {ip: DeviceProfile}
+        # Device inventory: {key: DeviceProfile}. The key is the MAC when the
+        # device is on this segment and its MAC is known, else the IP. Keyed by
+        # IP alone, one laptop became a new "device" every time DHCP moved it,
+        # and an ARP flood of invented addresses grew the table without limit.
         self.devices = {}
+        self._ip_index = {}          # {ip: key} for lookups by address
+        self._mac_ips = {}           # {mac: {ip, ...}} to spot router MACs
+        self.max_devices = int(config.get('analysis', 'max_devices', default=2000))
         # MAC → IP mapping (from ARP)
         self._mac_to_ip = {}
         # Track which IPs respond to ARP for many targets (gateway detection)
@@ -154,14 +174,15 @@ class DeviceLearner:
         with self._lock:
             # Track source device
             if self._is_local_device(pkt_info.src_ip):
-                dev = self._get_or_create(pkt_info.src_ip)
+                src_mac = getattr(pkt_info, 'arp_hwsrc', '') or pkt_info.src_mac
+                dev = self._get_or_create(pkt_info.src_ip, src_mac)
                 dev.last_seen = now
                 dev.packet_count += 1
                 dev.byte_count += pkt_info.length
                 dev.protocols_used[pkt_info.protocol] += 1
 
-                if pkt_info.src_mac and not dev.mac:
-                    dev.mac = pkt_info.src_mac.lower()
+                if src_mac and not dev.mac:
+                    dev.mac = src_mac.lower()
                     self._mac_to_ip[dev.mac] = pkt_info.src_ip
 
                 # If this device is sending FROM a low port, it's serving that port
@@ -193,7 +214,7 @@ class DeviceLearner:
 
             # Track destination device (lighter — just note it exists)
             if self._is_local_device(pkt_info.dst_ip):
-                dev = self._get_or_create(pkt_info.dst_ip)
+                dev = self._get_or_create(pkt_info.dst_ip, pkt_info.dst_mac)
                 # If something is connecting TO this device on a low port, it's a service
                 if pkt_info.dst_port and pkt_info.dst_port < 1024:
                     dev.services_seen.add(pkt_info.dst_port)
@@ -206,7 +227,7 @@ class DeviceLearner:
     def observe_dhcp(self, mac, ip, hostname="", vendor_class=""):
         """Called when DHCP traffic reveals device info."""
         with self._lock:
-            dev = self._get_or_create(ip)
+            dev = self._get_or_create(ip, mac)
             if mac:
                 dev.mac = mac.lower()
                 self._mac_to_ip[mac.lower()] = ip
@@ -239,11 +260,70 @@ class DeviceLearner:
                 return True
         return False
 
-    def _get_or_create(self, ip):
+    def _on_link(self, ip):
+        """Whether frames from `ip` carry its own MAC: same subnet as this machine."""
+        subnet = getattr(self.net_env, 'local_subnet', None) if self.net_env else None
+        if not subnet:
+            return True
+        try:
+            import ipaddress
+            return ipaddress.ip_address(ip) in ipaddress.ip_network(subnet, strict=False)
+        except ValueError:
+            return True
+
+    def _device_key(self, ip, mac):
+        mac = (mac or '').lower()
+        if not _usable_mac(mac) or ':' in ip or not self._on_link(ip):
+            return ip
+        if self.net_env and ip in (getattr(self.net_env, 'gateways', None) or ()):
+            return ip
+        ips = self._mac_ips.setdefault(mac, set())
+        if len(ips) <= _ROUTER_MAC_IPS:
+            ips.add(ip)
+        if len(ips) > _ROUTER_MAC_IPS:
+            return ip
+        if len(self._mac_ips) > 4 * self.max_devices:
+            self._mac_ips.clear()
+        return mac
+
+    def _get_or_create(self, ip, mac=""):
         """Get or create a device profile. Must be called under lock."""
-        if ip not in self.devices:
-            self.devices[ip] = DeviceProfile(ip)
-        return self.devices[ip]
+        key = self._device_key(ip, mac)
+        if key == ip and self._ip_index.get(ip, ip) in self.devices:
+            # No MAC to go on: the address belongs to whoever holds it now.
+            key = self._ip_index.get(ip, ip)
+        dev = self.devices.get(key)
+        if dev is None and key != ip and ip in self.devices:
+            # First sight of this address's MAC: move its profile under the MAC.
+            dev = self.devices.pop(ip)
+            self.devices[key] = dev
+        if dev is None:
+            if len(self.devices) >= self.max_devices:
+                self._evict_oldest()
+            dev = self.devices[key] = DeviceProfile(ip, mac if key != ip else "")
+        if dev.ip != ip:
+            # Same device, new address (DHCP). Drop the old address's lookup.
+            if self._ip_index.get(dev.ip) == key:
+                del self._ip_index[dev.ip]
+            dev.ip = ip
+        self._ip_index[ip] = key
+        return dev
+
+    def _evict_oldest(self):
+        """Make room: drop the least recently seen tenth of the table."""
+        victims = sorted(self.devices, key=lambda k: self.devices[k].last_seen)
+        for key in victims[:max(1, len(victims) // 10)]:
+            dev = self.devices.pop(key)
+            if self._ip_index.get(dev.ip) == key:
+                del self._ip_index[dev.ip]
+
+    def _lookup(self, ip):
+        """The profile for an address. Must be called under lock."""
+        key = self._ip_index.get(ip, ip)
+        dev = self.devices.get(key)
+        if dev is None and key != ip:
+            dev = self.devices.get(ip)
+        return dev
 
     def _classify_all(self):
         """Classify all devices and trim unbounded counters."""
@@ -323,23 +403,28 @@ class DeviceLearner:
     def get_device(self, ip=None, mac=None):
         """Look up a device by IP or MAC."""
         with self._lock:
-            if ip and ip in self.devices:
-                return self.devices[ip]
+            if ip:
+                dev = self._lookup(ip)
+                if dev is not None:
+                    return dev
             if mac:
+                dev = self.devices.get(mac.lower())
+                if dev is not None:
+                    return dev
                 ip = self._mac_to_ip.get(mac.lower())
-                if ip and ip in self.devices:
-                    return self.devices[ip]
+                if ip:
+                    return self._lookup(ip)
         return None
 
     def get_all_devices(self):
         """Return a snapshot of all known devices."""
         with self._lock:
-            return {ip: dev.to_dict() for ip, dev in self.devices.items()}
+            return {dev.ip: dev.to_dict() for dev in self.devices.values()}
 
     def get_device_expected_ports(self, ip):
         """Return the set of ports this device normally uses (learned behavior)."""
         with self._lock:
-            dev = self.devices.get(ip)
+            dev = self._lookup(ip)
             if not dev:
                 return set()
             # Top ports by frequency (the device's normal behavior)
@@ -353,13 +438,13 @@ class DeviceLearner:
     def is_known_device(self, ip):
         """Check if this IP is a device we've profiled."""
         with self._lock:
-            dev = self.devices.get(ip)
+            dev = self._lookup(ip)
             return dev is not None and dev.packet_count > 50
 
     def is_learned_gateway(self, ip):
         """Check if we've learned this IP is a gateway."""
         with self._lock:
-            dev = self.devices.get(ip)
+            dev = self._lookup(ip)
             return dev is not None and dev.is_gateway
 
     def get_summary(self):
@@ -391,7 +476,7 @@ class DeviceLearner:
     def save(self):
         """Persist learned devices to disk."""
         with self._lock:
-            data = {ip: dev.to_dict() for ip, dev in self.devices.items()}
+            data = {key: dev.to_dict() for key, dev in self.devices.items()}
         try:
             from src.config import atomic_write_json
             atomic_write_json(self._db_path, data, indent=1, default=str)
@@ -404,12 +489,15 @@ class DeviceLearner:
         if not os.path.exists(self._db_path):
             return
         try:
-            with open(self._db_path) as f:
+            with open(self._db_path, encoding='utf-8') as f:
                 data = json.load(f)
-            for ip, dev_data in data.items():
-                self.devices[ip] = DeviceProfile.from_dict(dev_data)
+            # Older files are keyed by IP; either way the profile says both.
+            for key, dev_data in list(data.items())[-self.max_devices:]:
+                dev = DeviceProfile.from_dict(dev_data)
+                self.devices[key] = dev
+                self._ip_index[dev.ip] = key
                 if dev_data.get('mac'):
-                    self._mac_to_ip[dev_data['mac'].lower()] = ip
+                    self._mac_to_ip[dev_data['mac'].lower()] = dev.ip
             logger.info("Loaded %d learned device profiles from disk", len(self.devices))
         except Exception as e:
             logger.error("Failed to load device learner data: %s", e)
@@ -418,9 +506,11 @@ class DeviceLearner:
         """Remove devices not seen in max_age_days."""
         cutoff = time.time() - (max_age_days * 86400)
         with self._lock:
-            stale = [ip for ip, d in self.devices.items()
+            stale = [key for key, d in self.devices.items()
                      if d.last_seen < cutoff and d.packet_count < 100]
-            for ip in stale:
-                del self.devices[ip]
+            for key in stale:
+                dev = self.devices.pop(key)
+                if self._ip_index.get(dev.ip) == key:
+                    del self._ip_index[dev.ip]
             if stale:
                 logger.info("Pruned %d stale device profiles", len(stale))
