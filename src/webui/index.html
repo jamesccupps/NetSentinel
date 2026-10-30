@@ -22,6 +22,7 @@
     <a href="#devices" data-page="devices">Devices</a>
     <a href="#incidents" data-page="incidents">Incidents</a>
     <a href="#scan" data-page="scan">Scan Files</a>
+    <a href="#audit" data-page="audit">Audit</a>
   </nav>
   <div class="status" id="status"><span class="dot"></span><span class="label">Connecting…</span></div>
   <button type="button" id="monitor-toggle" hidden>Start</button>
@@ -66,6 +67,30 @@
 
   <section class="page" id="page-incidents" hidden>
     <div id="incident-list" class="alert-list"></div>
+  </section>
+
+  <section class="page" id="page-audit" hidden>
+    <div class="panel">
+      <h2>Audit your network</h2>
+      <p class="hint">Checks your own networks when you ask: which devices answer, which risky
+        services they leave open (Telnet, SMB, RDP, VNC, exposed databases, admin pages without
+        TLS) and whether their certificates have expired. It only connects and reads what a
+        service says first; it never tries a password. Use gentle mode for building or
+        industrial controllers, which can fall over when scanned quickly.</p>
+      <p id="audit-off" class="hint" hidden>Audits are off. Turn them on in the desktop app:
+        Settings → Network audit.</p>
+      <div id="audit-choices" class="choices"></div>
+      <label class="check"><input type="checkbox" id="audit-gentle"> Gentle: fewer ports, five a second</label>
+      <div class="drop-actions">
+        <button type="button" id="audit-run">Run audit</button>
+        <button type="button" id="audit-cancel" class="secondary" hidden>Cancel</button>
+      </div>
+      <div id="audit-progress" class="progress" hidden>
+        <div class="progress-label" id="audit-progress-label"></div>
+        <div class="progress-track"><div class="progress-bar" id="audit-progress-bar"></div></div>
+      </div>
+    </div>
+    <div id="audit-report"></div>
   </section>
 
   <section class="page" id="page-scan" hidden>

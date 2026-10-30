@@ -654,6 +654,12 @@ class NetSentinelGUI:
         review_btn.config(menu=review_menu)
         review_btn.pack(side='left', padx=(0, 8))
 
+        tk.Button(ctrl_frame, text="🔍  Audit", font=('Segoe UI', 9),
+                  bg=COLORS['bg_input'], fg=COLORS['text'],
+                  relief='flat', cursor='hand2', padx=10,
+                  command=lambda: self._open_dashboard('#audit')
+        ).pack(side='left', padx=(0, 8))
+
         # About button
         tk.Button(ctrl_frame, text="ℹ  About", font=('Segoe UI', 8),
                   bg=COLORS['bg_input'], fg=COLORS['text_dim'],
@@ -1209,8 +1215,8 @@ class NetSentinelGUI:
         self._pcap_alert_widgets = []
         self._pcap_batch = None
 
-    def _open_dashboard(self):
-        """Open the browser dashboard served alongside this window."""
+    def _open_dashboard(self, page=''):
+        """Open the browser dashboard served alongside this window, at page (#audit)."""
         import webbrowser
         server = getattr(self.app, 'web_server', None)
         if server is None:
@@ -1219,7 +1225,7 @@ class NetSentinelGUI:
                 "The dashboard is not running. It starts with NetSentinel unless "
                 "--no-api was given; check the log for why it could not start.")
             return
-        webbrowser.open(server.url)
+        webbrowser.open(server.url + page)
 
     # ─── Review mode ─────────────────────────────────────────────────────
 
@@ -2557,6 +2563,12 @@ class NetSentinelGUI:
                               'Folder (blank: ~/.netsentinel/review)', '')
         self._add_setting_row(review_card, 'review.capture_budget_mb',
                               'Rolling capture budget (MB)', '2048')
+
+        audit_card = Card(scroll_frame, title="NETWORK AUDIT")
+        audit_card.pack(fill='x', padx=8, pady=(0, 8))
+        self._add_setting_toggle(
+            audit_card, 'audit.enabled',
+            'Allow audits of my own networks, run only when I ask (Audit button)', False)
 
         # Blacklist management
         bl_card = Card(scroll_frame, title="BLACKLISTED IPs (one per line)")

@@ -168,6 +168,11 @@ tr:hover td { background: rgba(88,166,255,.04); }
 .queue ul { list-style: none; margin: 10px 0 0; padding: 0; max-height: 180px; overflow: auto; font: 12px var(--mono); color: var(--dim); }
 .queue li { padding: 3px 0; display: flex; gap: 12px; }
 .queue li span:first-child { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.choices { display: flex; flex-direction: column; gap: 6px; margin: 0 0 12px; }
+.check { display: flex; gap: 8px; align-items: center; color: var(--text); }
+.check small { color: var(--dim); }
+.finding { border-top: 1px solid var(--border); padding: 10px 0; }
+.finding .why, .finding .fix { color: var(--dim); margin-top: 2px; }
 .progress { margin-top: 14px; display: grid; grid-template-columns: 1fr auto; gap: 8px 12px; align-items: center; }
 .progress-label { grid-column: 1 / -1; color: var(--dim); font-size: 13px; overflow-wrap: anywhere; }
 .progress-track { height: 8px; background: var(--input); border-radius: 4px; overflow: hidden; }

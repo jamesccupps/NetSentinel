@@ -27,6 +27,14 @@ from src.headless import HeadlessServer  # noqa: E402
 from src.ids_engine import Alert, Severity  # noqa: E402
 
 
+class _StubConfig:
+    def __init__(self):
+        self.values = {}
+
+    def get(self, *keys, default=None):
+        return self.values.get(keys, default)
+
+
 class _StubApp:
     """
     A minimal stand-in with the surface HeadlessServer actually uses.
@@ -76,6 +84,7 @@ class _StubApp:
         self.verdicts = []
         self.verdict_has_no_subject = False
         self.review_on = True
+        self.config = _StubConfig()
 
     def start_monitoring(self):
         if not self.can_start:
@@ -510,6 +519,19 @@ class TestControls(_ApiTestCase):
         status, reply = self.post('/api/review/bundle')
         self.assertEqual(status, 409)
         self.assertIn('No alerts', json.loads(reply)['error'])
+
+    def test_the_audit_page_reads_and_refuses_politely(self):
+        page = self.get_json('/api/audit')
+        self.assertFalse(page['enabled'])
+        self.assertIsInstance(page['choices'], list)
+        status, reply = self.post('/api/audit/start?network=192.168.1.0/24')
+        self.assertEqual(status, 403)
+        self.assertIn('Settings', json.loads(reply)['error'])
+
+        self.app.config.values[('audit', 'enabled')] = True
+        status, reply = self.post('/api/audit/start?network=203.0.113.0/24')
+        self.assertEqual(status, 400, 'a public range is never scanned')
+        self.assertIn('not a private network', json.loads(reply)['error'])
 
     def test_the_overview_says_whether_controls_work(self):
         self.assertTrue(self.get_json('/api/overview')['controls'])

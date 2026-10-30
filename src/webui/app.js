@@ -618,6 +618,78 @@ function setUpScan() {
   $('cancel-scan').addEventListener('click', cancelScan);
 }
 
+// ─── Network audit ───────────────────────────────────────────────────────
+
+const auditView = { data: null, picked: null };
+const SEV_ORDER = { CRITICAL: 0, HIGH: 1, MEDIUM: 2, LOW: 3 };
+
+async function refreshAudit() {
+  const d = auditView.data = await api('/api/audit');
+  if (auditView.picked === null) {
+    const first = d.choices.filter((c) => !c.virtual).slice(0, 1).map((c) => c.network);
+    auditView.picked = new Set(d.saved.length ? d.saved : first);
+  }
+  renderAudit();
+}
+
+function renderAudit() {
+  const d = auditView.data;
+  const running = Boolean(d.job && d.job.state === 'running');
+  $('audit-off').hidden = d.enabled;
+  $('audit-choices').replaceChildren(...(d.choices.length ? d.choices.map((c) => h('label', { class: 'check' },
+    h('input', {
+      type: 'checkbox', checked: auditView.picked.has(c.network), disabled: running,
+      onchange: (e) => { if (e.target.checked) auditView.picked.add(c.network); else auditView.picked.delete(c.network); },
+    }),
+    c.network, h('small', null, `${c.interface}${c.virtual ? ' · virtual adapter' : ''}`)))
+    : [h('div', { class: 'empty' }, 'This computer has no private network to audit.')]));
+  $('audit-run').hidden = !d.controls;
+  $('audit-run').disabled = running || !d.enabled;
+  $('audit-cancel').hidden = !(d.controls && running);
+  if (d.job) {
+    const label = { running: d.job.message, done: 'Done', cancelled: 'Cancelled',
+      error: `Did not finish: ${d.job.error}` }[d.job.state] || d.job.state;
+    $('audit-progress').hidden = false;
+    $('audit-progress-label').textContent = `${d.job.networks.join(', ')}${d.job.gentle ? ' (gentle)' : ''}: ${label}`;
+    $('audit-progress-bar').style.width = `${Math.round(100 * (d.job.fraction || 0))}%`;
+  }
+  renderAuditReport(d.report);
+}
+
+function renderAuditReport(report) {
+  const out = $('audit-report');
+  if (!report) { out.replaceChildren(); return; }
+  const panels = report.networks.map((n) => {
+    const d = n.diff;
+    const changes = d && d.new_hosts && !n.first_audit
+      ? `Since the last audit: ${d.new_hosts.length} new hosts, ${d.opened.length} ports opened, ${d.closed.length} closed.`
+      : 'First audit of this network.';
+    const findings = [...n.findings].sort((a, b) => SEV_ORDER[a.severity] - SEV_ORDER[b.severity]);
+    return h('div', { class: 'panel' },
+      h('h2', null, n.network, h('small', null, ` ${n.hosts.length} hosts · ${n.findings.length} findings · found by ${n.discovery.method}${n.complete ? '' : ' · incomplete'}`)),
+      h('p', { class: 'hint' }, changes),
+      findings.length ? findings.map((f) => h('div', { class: 'finding' },
+        h('div', { class: 'head' }, h('span', { class: `badge ${f.severity}` }, f.severity), ' ',
+          h('b', null, f.title), h('span', { class: 'time' }, `  ${f.host}${f.port ? ':' + f.port : ''}`)),
+        h('div', { class: 'why' }, f.why), h('div', { class: 'fix' }, `Fix: ${f.fix}`)))
+        : h('div', { class: 'empty' }, 'Nothing risky found.'),
+      h('div', { class: 'table-wrap' }, table(['Host', 'Vendor', 'Open ports', 'Looks like'],
+        n.hosts.map((x) => h('tr', null, h('td', null, x.ip + (x.self ? ' (this computer)' : '')),
+          h('td', null, x.vendor || x.mac || ''), h('td', null, (x.open_ports || []).join(', ')),
+          h('td', null, [x.role, ...(x.tags || [])].filter(Boolean).join(', ')))))),
+      (n.notes || []).map((note) => h('p', { class: 'hint' }, note)));
+  });
+  out.replaceChildren(...panels);
+}
+
+function runAudit() {
+  const nets = [...auditView.picked];
+  if (!nets.length) { toast('Choose a network to audit.'); return; }
+  const query = nets.map((n) => `network=${encodeURIComponent(n)}`).join('&') +
+    ($('audit-gentle').checked ? '&gentle=1' : '');
+  control(`/api/audit/start?${query}`, refreshAudit);
+}
+
 // ─── Controls (only while the server is bound to localhost) ─────────────
 
 let busy = false;
@@ -686,6 +758,7 @@ const PAGES = {
   devices: { refresh: refreshDevices, every: 5000 },
   incidents: { refresh: refreshIncidents, every: 10000 },
   scan: { refresh: () => Promise.resolve(), every: 0 },
+  audit: { refresh: refreshAudit, every: 2000 },
 };
 let current = null, timer = null;
 
@@ -718,6 +791,8 @@ document.addEventListener('DOMContentLoaded', () => {
   $('monitor-toggle').addEventListener('click', toggleMonitoring);
   $('ack-all').addEventListener('click', () => control('/api/alerts/ack-all', refreshCurrent));
   $('build-bundle').addEventListener('click', buildBundle);
+  $('audit-run').addEventListener('click', runAudit);
+  $('audit-cancel').addEventListener('click', () => control('/api/audit/cancel', refreshAudit));
   setUpScan();
   window.addEventListener('hashchange', show);
   show();
