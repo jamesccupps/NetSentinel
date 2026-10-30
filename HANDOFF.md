@@ -1,225 +1,77 @@
-# Handoff: v1.9.0 in progress
+# Handoff: v1.9.0 built, waiting to be pushed and tested
 
 Kept current during the work so it survives a context reset. Last updated
-2026-10-29 by the local Claude Code session on James's desktop. Read
-`CLAUDE.md` first. The approved plan, with findings by file:line, is outside the
-repo at `C:\Users\james\.claude\plans\parallel-inventing-lovelace.md`.
+2026-10-29 by the local Claude Code session on James's desktop. Read `CLAUDE.md`
+first. The approved plan, with its findings by file:line, is outside the repo at
+`C:\Users\james\.claude\plans\parallel-inventing-lovelace.md`.
 
-## What James asked for
+## Where it stands
 
-"Do it all": every open item from the previous handoff (v1.8.0), done in this
-session. Four workstreams run as agents in git worktrees; the main session does
-workstream C and the integration.
+Every open item from the v1.8.0 handoff is done on local `main`, as version 1.9.0.
+`CHANGELOG.md` has the full list. Status:
+- **Commits:** about 35 commits past `7d6fc3c`, the last pushed one. Nothing new is
+  pushed; that waits for James's OK.
+- **Tests:** 2,057 unit tests pass (63 skips), as do the 14 integration checks and
+  ruff.
+- **Live run:** a headless run with `--review` on real traffic was checked in the
+  browser. Start/stop, acknowledge, verdicts and bundle building all worked, and
+  the bundle had no secrets, cookies, tokens or query strings. That run found
+  four bugs, all fixed in `9d986db`.
+- **Not run against real hardware:** the network audit (loopback and fakes only),
+  the GUI's new widgets (its logic is unit-tested), and netmon (synthetic data
+  only).
+
+How the work was done:
+- **Workstream C, main session:** review mode, browser controls, resource
+  display, lifecycle fixes.
+- **Agents in git worktrees, reviewed and merged:**
+  - A: live detection;
+  - B: file scanning;
+  - D: netmon;
+  - E: network audit.
+
+  Their worktrees under `.claude/worktrees/` (gitignored) can be removed once
+  James is happy.
 
 ## Decisions (James, 2026-10-29)
 
-- **Browser controls:** start/stop monitoring and acknowledge alerts from the
-  dashboard, token-gated like uploads and only while bound to loopback. The
-  CLAUDE.md hard rule and the `src/headless.py` design notes are being updated to
-  say exactly that. The same gate covers verdicts, review bundles and audits.
-- **GeoIP:** DB-IP Lite (CC BY 4.0, DB-IP credited in the app), downloaded on
-  opt-in, read with `maxminddb`.
-- **Lookups:** downloaded lists only. Nothing about traffic or files is sent out.
-- **New dependencies:** `maxminddb`, `py7zr`, `python-evtx`. `.rar` is reported
-  as not opened, since opening it needs non-free UnRAR.
-- **netmon summariser button:** behind `--allow-summarise`, off by default. It
-  previews the redacted payload and estimated tokens, and a second click sends.
-- **Release:** v1.8.0 is tagged at `7d6fc3c` when James says so. All of this is
-  v1.9.0. Never push a tag without asking.
-- **Port:** the dashboard moved to 8737; 8787 is James's localcast.
+- **Browser controls:** loopback only, and token-gated. The CLAUDE.md rule now
+  says so.
+- **GeoIP:** DB-IP Lite, opt-in, credited.
+- **Lookups:** downloaded lists only.
+- **New dependencies:** `maxminddb`, `py7zr`, `python-evtx`. `.rar` is not
+  opened.
+- **netmon summariser:** behind `--allow-summarise`, preview first.
+- **Release:** this is v1.9.0. v1.8.0 can be tagged at `7d6fc3c`. No tag without
+  asking.
+- **Port:** the dashboard is on 8737, because 8787 is localcast.
 
-## Status
+## Open questions for James
 
-### Pushed
+- **QUIC and the "no TLS decryption" rule.** Live detection now reads QUIC
+  Initial packets for the server name. Those keys come from the public
+  connection ID (RFC 9001) and the packets hold only the ClientHello, which TCP
+  TLS sends in the clear anyway. Is that within the rule? If not, it should be
+  switched off.
+- **abuse.ch.** URLhaus and MalwareBazaar now need a free Auth-Key, and the
+  terms allow free use only for not-for-profit purposes. Without a key,
+  URLhaus is off and file hashes are checked only against lists he provides.
+- **Alert volume.** The monitoring PC's own traffic is now inspected, so alert
+  volume will rise. Run review mode for a day and import the verdicts.
 
-- `7d6fc3c`: the Windows fixes, port 8737 and the Windows CI job.
+## Next steps
 
-### On local `main`, not pushed
-
-- `9cd7361`: browser start/stop/acknowledge, plus the monitoring lifecycle fixes:
-  - idempotent start, per-run stop events, no double capture;
-  - the feature store restarts with monitoring;
-  - alerts autosave;
-  - cooldowns for IOC and ML alerts.
-- `2dfde84`: CPU, RAM, drops and sampling on the dashboard; the
-  `performance.low_priority` option; incidents bounded; the config file read as
-  UTF-8 with BOM; the Settings threshold row fixed.
-- `f39cf4b`: review mode (`src/review.py`), verdicts, `ConfirmedFalsePositives`,
-  and registrable-domain learning (`src/public_suffix.py`).
-- `9d986db`: fixes found by a live run:
-  - `--review` crashed at startup;
-  - VLAN-tagged frames got snippets of all traffic;
-  - verdicts were tied to multicast addresses;
-  - mDNS digest lines were wrong.
-- `204b503`: CI moved to `checkout@v5`, `setup-python@v6`, `upload-artifact@v6`
-  (Node 24).
-- `ae3a375`: merge of workstream E, the opt-in subnet audit (`src/audit.py`).
-- `3f5609b`: the audit wired into the dashboard (Audit page) and the desktop
-  app (Audit button, Settings toggle).
-- `0eb4bbc`: merge of workstream D, netmon. Netmon's suite is now 1,270 tests.
-  - web: a Host allowlist (421); `Origin: null` and cross-site POSTs refused;
-  - silence buttons, via `serve --allow-edit` and `web --state`;
-  - the summariser button behind `--allow-summarise`, with preview then send, a
-    budget under `--state`, an hourly cap and a timeout;
-  - canary and drift findings from restricted segments withheld from the model;
-  - the digest checklist, findings kept across restarts (`netmon/window.py`),
-    and an email digest over STARTTLS/SMTPS;
-  - GeoIP (`netmon/geoip.py`, `netmon geoip --update`) and the
-    `egress_unexpected_network` rule;
-  - inbound internet traffic kept by router dedup, plus `inbound_https_bypass`
-    and the shipped Cloudflare ranges;
-  - the packet-side VLAN leak check (`netmon/leakcheck.py`); `bpf --verify`
-    exits 3 on a leak; `--diagnose-untagged`;
-  - a fix for BPF filters with host and port exclusions together.
-
-  All netmon open items are done except validation on real data. The agent's
-  sensor steps are listed under "Left for James".
-- `50f865d`: merge of workstream A, live detection.
-  - H1: this PC's own traffic is inspected. Only multicast, broadcast,
-    link-local, noisy discovery ports and the user's known devices are skipped.
-  - H4: split ClientHellos are reassembled; QUIC SNI; ports 8443 and 5061.
-  - H5: the PCAP analyser uses the live parser on packet time.
-    `IDSEngine(offline=True)`.
-  - H6: exact URL matching.
-  - Feeds:
-    - expire delisted entries;
-    - a 410 or 404 is not retried for a week;
-    - cloud and CDN ranges (`rules/cloud_ranges.json`, `src/cloud_ranges.py`)
-      are exempt from attacker-IP lists;
-    - one alert per connection;
-    - DShield /24 blocks.
-  - Bounds: `BoundedLog` in forensics, devices keyed by MAC
-    (`analysis.max_devices`).
-  - New detections in `src/lan_threats.py` and `src/tls_certs.py`. New rule
-    IDs: THREAT-INTEL-URL, NEWLY-REGISTERED-DOMAIN, TLS-FINGERPRINT-FEED,
-    TLS-CERT-SELF-SIGNED, TLS-CERT-INVALID, MINING-POOL, MINING-STRATUM,
-    DNS-TUNNEL-VOLUME, DNS-TUNNEL-TXT, ARP-GATEWAY-CHANGED, ARP-MAC-MULTI-IP,
-    ARP-GRATUITOUS-BURST, ROGUE-DHCP, ROGUE-RA, ROGUE-DHCPV6, NAME-POISONING,
-    LATERAL-MOVEMENT, UPLOAD-SPIKE, NEW-DEVICE.
-  - `src/geoip.py`, with `ATTRIBUTION` for the UI.
-  - Capture: per-run stop events, `AsyncSniffer`, `packets_sampled_out`.
-  - Left out: JA4DB (no licence for the data). The SSLBL JA3 feed is off by
-    default (stale since 2021). URLhaus now needs a free abuse.ch Auth-Key
-    (`threat_intel.abuse_ch_auth_key`).
-
-The full suite passed at 1,512 tests with 53 skips before E merged; E added 78
-tests.
-
-### Running as agents (worktrees under `.claude/worktrees/`, gitignored)
-
-Each commits to its own branch, `worktree-agent-<id>`, on top of `7d6fc3c`.
-Review each diff, then merge with `git merge --no-ff refs/heads/<branch>`.
-
-- **A, live detection** (`src/ids_engine.py`, `capture.py`, `tls_inspect.py`,
-  `threat_intel.py`, `pcap_analyzer.py` and more):
-  - H1: analyse this PC's own traffic;
-  - H4: reassemble TLS ClientHellos, QUIC SNI;
-  - H5: the PCAP analyser reuses the live parser;
-  - H6: wire in `check_url`;
-  - the feed-noise fixes;
-  - capture threads stop per run;
-  - a `packets_sampled_out` counter;
-  - the new detections, and `src/geoip.py`.
-
-  It was told that the URLhaus domains feed now returns HTTP 410.
-- **B, file scanning** (`src/file_scan.py`, `batch_scan.py`, `web_scan.py`, new
-  modules):
-  - H2, secrets leaking through URLs, done first;
-  - H3;
-  - more secret types and Windows leaks;
-  - archives (`.7z`, `.tar`, nested), `.evtx`, script patterns;
-  - MalwareBazaar from a downloaded list;
-  - an ignore-list backend;
-  - throttled folder scans.
-A, D and E are finished and merged. B (file scanning) is still running. Its API is in the `src/audit.py` docstrings:
-`start_audit`, `current_job`, `local_networks`, `last_report`, `diff`.
-
-### Integration still to do
-
-From A, for the main session:
-- **Config:** add A's keys to `DEFAULT_CONFIG`, each read literally in the code:
-
-  | Key | Default |
-  |---|---|
-  | `ids.lan_baseline_hours` | 24 |
-  | `ids.arp_max_ips_per_mac` | 5 |
-  | `ids.lateral_fanout_hosts` | 10 |
-  | `ids.upload_spike_min_mb` | 50 |
-  | `ids.new_device_alerts` | True |
-  | `ids.dns_tunnel_unique_subdomains` | 100 |
-  | `ids.dns_tunnel_txt_per_min` | 20 |
-  | `analysis.max_devices` | 2000 |
-  | `threat_intel.newly_registered_domains` | True |
-  | `threat_intel.nrd_days` | 7 |
-  | `threat_intel.abuse_ch_auth_key` | "" (a secret, never logged) |
-  | `threat_intel.ja3_feed` | False |
-  | `geoip.enabled` | False |
-  | `geoip.auto_update` | True |
-
-- **`app.py`:**
-  - pass `net_env` to `IOCScanner`, or the DoH exemption for the configured
-    resolver never applies;
-  - the forensics lists are now `BoundedLog`: `len()` counts everything ever
-    added, so the cursors keep working, but slicing must iterate.
-- **Verifier:** the new rule IDs get its default verdict; consider branches for
-  them.
-
-Then, for everything:
-
-- **Merge:** review each branch's diff before merging. They never touch
-  `config.py`, so expect few conflicts; test files may need hand-merging.
-- **Config:** add A's and B's new keys to `DEFAULT_CONFIG` (`src/config.py`).
-  Each agent's report lists them. The test in `test_regressions.py` requires
-  every key to be read literally.
-- **Dependencies:** add `maxminddb`, `py7zr` and `python-evtx` to:
-  - `requirements.txt` and `pyproject.toml`;
-  - both CI jobs' installs and the release build;
-  - PyInstaller hidden imports, if needed.
-
-  Also check that scapy's manuf database (`conf.manufdb`) gets bundled.
-- **UI:**
-  - an "Ignore this" action in both scan UIs (B's API);
-  - a GeoIP toggle and the DB-IP attribution (A's `geoip.ATTRIBUTION`);
-  - show `packets_sampled_out` in the dashboard's Engine panel.
-- **Audit and IDS together:** once H1 lands, the audit's own connects will look
-  like a port scan from this PC. In `app._verified_alert_gateway`, lower and
-  annotate scan-type alerts from this host while `audit.is_running()`.
-- **Docs:**
-  - CLAUDE.md: the new rule wording and new modules;
-  - README;
-  - CHANGELOG v1.9.0: draft lines are in the agent reports and the commit
-    bodies above;
-  - this file, rewritten for the next session.
-- **Version:** 1.9.0 in `main.py`, `pyproject.toml`, `setup.bat` and
-  `src/__init__.py`. No tag.
-- **Verify:**
-  - the full suite, `tools/integration_check.py` and ruff;
-  - a live headless run with `--review`, checking the dashboard in the browser
-    and a bundle grep for secrets;
-  - then ask James before pushing;
-  - CI on Linux and Windows;
-  - a manual `release` workflow build of the exe for him to test.
-
-## Environment (this machine)
-
-- **Python:** bare `python` is Inkscape's MinGW build. Use
-  `.venv\Scripts\python.exe` (CPython 3.12), which has the test dependencies and
-  ruff.
-- **Tests in Claude's sandbox:** set `XDG_CACHE_HOME` to a scratch folder, or
-  scapy cannot read `~\.cache` and about 175 tests skip silently. Expect about 53
-  skips. Set `PYTHONIOENCODING=utf-8` too.
-- **Git:** this repo commits as `148652101+jamesccupps@users.noreply.github.com`
-  (repo-local config). GitHub rejects pushes that expose his Gmail.
-- **Live test:** a headless run against a throwaway home folder works without
-  admin (Npcap is installed). This network delivers 802.1Q-tagged frames to the
-  desktop.
-- **Leftover folder:** `C:\proc` was left by an old test run. The sandbox cannot
-  delete it; James can.
+1. Push `main` (with James's OK) and watch CI on Linux and Windows. The Windows
+   job and the Node 24 actions are new and have not run on GitHub yet.
+2. Run the `release` workflow by hand to build a test exe (Actions → release →
+   Run workflow). James tests it. Check that the exe bundles `py7zr`'s
+   compiled extensions, `maxminddb`, `Evtx` and scapy's manuf table.
+3. When James is happy: tag v1.9.0 (and v1.8.0 at `7d6fc3c` if wanted).
 
 ## Left for James
 
-- Test a fresh exe built from `main` once this lands.
-- Tag v1.8.0 at `7d6fc3c`, if he wants it released first.
+- Test the new exe. In Settings: GeoIP, Network audit, Review mode, and lower
+  priority if wanted.
 - **netmon on the sensor:**
   1. Regenerate the capture filter (`netmon capture ... --command`), update
      `netmon-capture.service`, and restart it.
@@ -238,5 +90,17 @@ Then, for everything:
   7. Check one port-forwarded flow in a UniFi export: does it record the WAN
      address or the internal one?
   8. Run `netmon sync` for the real profile, keeping it out of the repo.
-- Turn on GeoIP and audits (Settings), and set review mode to taste.
-- Expect more alerts once H1 lands. Review mode is how to sort them.
+- Delete `C:\proc`, left by an old test run.
+
+## Environment (this machine)
+
+- **Python:** bare `python` is Inkscape's MinGW build. Use
+  `.venv\Scripts\python.exe` (CPython 3.12), which has all the dependencies and
+  ruff.
+- **Tests in Claude's sandbox:** set `XDG_CACHE_HOME` to a scratch folder (else
+  about 175 tests skip silently; expect about 63 skips) and
+  `PYTHONIOENCODING=utf-8`.
+- **Git:** this repo commits as `148652101+jamesccupps@users.noreply.github.com`.
+  GitHub rejects his Gmail on pushes.
+- **Network:** delivers 802.1Q-tagged frames to the desktop. A headless run
+  against a throwaway home folder works without admin.

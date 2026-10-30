@@ -20,7 +20,9 @@ TLS stack stands out even when everything it sends is encrypted.
 
 **Beaconing Detection** — Scores how scheduled a destination's traffic is using quartile skew, median absolute deviation and payload-size consistency. Survives the jitter every C2 framework enables by default, which a coefficient-of-variation test does not.
 
-**Intrusion Detection** — Rule-based detectors: port scans, brute force, SYN/ICMP floods, ARP spoofing, suspicious DNS, data exfiltration, threat intelligence feeds, and more.
+**Intrusion Detection** — Rule-based detectors: port scans, brute force, SYN/ICMP floods, suspicious DNS and DNS tunnelling, data exfiltration, threat intelligence feeds, and more. Since v1.9.0 they also run on the monitoring PC's own traffic, which they used to skip.
+
+**LAN threats** — ARP spoofing (with the gateway's MAC pinned), rogue DHCP and IPv6 router advertisements, LLMNR/NBT-NS/mDNS poisoning, lateral movement over SMB, RDP, WinRM and RPC, uploads far above a host's baseline, new devices with their vendor, cryptocurrency mining, and self-signed or expired certificates.
 
 **DNS Response Analysis** — Reads the answer section, not just the query. Catches domain-generation-algorithm bursts from the pattern of failed lookups, and fast-flux hosting from address churn against a short TTL. Calibrated against the things that legitimately produce these signals: Chrome's startup hijack probe, Windows search-suffix expansion, and CDN TTLs.
 
@@ -34,9 +36,15 @@ TLS stack stands out even when everything it sends is encrypted.
 
 **PCAP Export** — Ring buffer of raw packets with on-demand "save last 5 minutes" export and continuous recording with auto-rotation. Serious alerts automatically save the traffic that triggered them, narrowed to the hosts involved, so every CRITICAL finding opens in Wireshark.
 
-**Browser dashboard** — NetSentinel serves a dashboard at `http://127.0.0.1:8737/` while it runs: live traffic and bandwidth charts, protocol and top-talker breakdowns, alerts with severity filters and evidence, devices, incidents, and file scanning. **Open in Browser** in the desktop app opens it; `--headless` runs the same dashboard with no window, as a server.
+**Browser dashboard** — NetSentinel serves a dashboard at `http://127.0.0.1:8737/` while it runs: live traffic and bandwidth charts, protocol and top-talker breakdowns, alerts with severity filters and evidence, devices, incidents, file scanning, the network audit, and what NetSentinel itself costs in CPU and memory. On this computer it can also start and stop monitoring, acknowledge alerts and record verdicts; those controls need the token the page carries and are refused unless the dashboard is bound to localhost. **Open in Browser** in the desktop app opens it; `--headless` runs the same dashboard with no window, as a server.
 
-**Scan files for leaks** — drop any files, folders or zips on the dashboard's **Scan Files** page, or use **Scan Files / Zips** and **Scan Folder** in the desktop app's File Analyzer tab. Logs, configs, documents (Word, Excel, PDF), exports and packet captures all work. You get every IP address, domain, URL, email and MAC address in them, which files held each one, any the threat feeds know as bad, and every password, key, token or card number that looks leaked, masked, with file and line. Packet captures also get the full traffic analysis. Command line: `python -m src.batch_scan PATH... [--skip GLOB] [--json]`.
+**Review mode** — `--review DIR` or Settings → Review mode saves the traffic behind every alert. **Build review bundle** turns it into a small, redacted text bundle (summary, alerts, a line-per-packet digest per group) to upload to Claude chat and ask which alerts are real; no payloads, query strings, cookies, credentials or tokens are written. Import the verdicts back, and confirmed false positives are not raised again.
+
+**Network audit** — on request only, and off until you turn it on: finds the devices on your own networks, checks 83 common ports at a limited rate, flags risky services with how to fix them, reads every TLS certificate, and shows what changed since the last audit. Gentle mode for building and industrial controllers. It never tries a password and only scans private networks this computer is on.
+
+**GeoIP** — optional country and network operator for destinations, looked up on this machine. IP Geolocation by [DB-IP](https://db-ip.com), CC BY 4.0.
+
+**Scan files for leaks** — drop any files, folders or zips on the dashboard's **Scan Files** page, or use **Scan Files / Zips** and **Scan Folder** in the desktop app's File Analyzer tab. Logs, configs, documents (Word, Excel, PDF), exports and packet captures all work. Archives (zip, 7z, tar, gzip and the like, nested), Windows event logs and Office macros are opened too. You get every IP address, domain, URL, email, MAC address, host name and UNC path in them, which files held each one, any the threat feeds know as bad, every password, key, token or card number that looks leaked, masked, with file and line, suspicious scripts such as encoded PowerShell, and files whose SHA-256 is on your known-bad lists. Anything can be put on an ignore list. Packet captures also get the full traffic analysis. Command line: `python -m src.batch_scan PATH... [--skip GLOB] [--json]`.
 
 ## Quick Start
 
@@ -227,6 +235,8 @@ Worth knowing before you rely on a detector:
 - **`capture.max_pps` caps processing at 2000 packets per second.** Raise it if you
   need full visibility on a busy link; the pipeline measures ~72 µs/packet, so 2000
   pps is roughly 15% of one core.
+- **A desktop sees mostly its own traffic.** Lateral movement, rogue DHCP and the
+  like between other machines are only visible with a mirror (SPAN) port.
 - **TLS payload stays opaque.** NetSentinel reads the handshake, not the content.
   It can tell you *who* a host talked to and *what software* did the talking, not
   what was said.
@@ -238,8 +248,11 @@ Worth knowing before you rely on a detector:
 ## Testing
 
 ```bash
-# Everything (384 tests)
+# Everything (about 2,060 tests, NetSentinel and netmon; no network access)
 python -m unittest discover -s . -p "test_*.py"
+
+# Review mode, live detection, LAN threats, file scans, the network audit
+python -m unittest test_review test_live_detection test_lan_threats test_scan_secrets test_audit -v
 
 # Regression tests for the v1.5.0 audit fixes
 python -m unittest test_regressions -v
