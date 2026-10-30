@@ -31,6 +31,7 @@ MAX_FILES = 100_000
 MAX_MEMBER_BYTES = 2 * 1024 ** 3   # per file taken out of a zip
 SKIP_DIRS = {'.git', '.svn', '.hg', 'node_modules', '__pycache__', '.venv', 'venv'}
 INDICATOR_KINDS = file_scan.INDICATOR_KINDS
+KNOWN_BAD_CONFIDENCE = ('HIGH', 'MEDIUM')
 
 
 class _Item:
@@ -233,7 +234,7 @@ def scan(paths, analyzer, skip=(), on_alert=None, on_progress=None, cancelled=No
             report['files'].append(entry)
 
     found = indicators.as_lists()
-    threats = _check_threats(found, threat_intel)
+    threats, suspicious = _check_threats(found, threat_intel)
     for hit in threats:
         emit(_alert('FILESCAN-THREAT-INTEL', 'HIGH',
                     f"Known-bad {hit['kind']} found: {hit['value']}",
@@ -241,11 +242,21 @@ def scan(paths, analyzer, skip=(), on_alert=None, on_progress=None, cancelled=No
                     'Threat Intelligence',
                     {'indicator': hit['value'], 'kind': hit['kind'],
                      'feed': hit.get('feed', ''), 'category': hit.get('category', ''),
+                     'confidence': hit.get('confidence', ''), 'files': hit['files']}))
+    for hit in suspicious:
+        emit(_alert('FILESCAN-SUSPICIOUS-INDICATOR', 'LOW',
+                    f"Suspicious {hit['kind']} found: {hit['value']}",
+                    f"{hit['value']} is not on a threat feed, but matches a weak pattern: "
+                    f"{hit.get('description') or hit.get('category') or 'suspicious'}.",
+                    'Threat Intelligence',
+                    {'indicator': hit['value'], 'kind': hit['kind'],
+                     'category': hit.get('category', ''), 'confidence': hit.get('confidence', ''),
                      'files': hit['files']}))
 
     report['credentials'] = list(creds.values())
     report['indicators'] = found
     report['threats'] = threats
+    report['suspicious'] = suspicious
     report['summary'] = dict({
         'items': len(items),
         'captures': sum(1 for i in items if i.is_capture),
@@ -257,6 +268,7 @@ def scan(paths, analyzer, skip=(), on_alert=None, on_progress=None, cancelled=No
         'credentials': len(report['credentials']),
         'secrets': len(report['secrets']),
         'threats': len(threats),
+        'suspicious': len(suspicious),
     }, **{k: len(v) for k, v in found.items()})
     analyzer.alerts = alert_objects
     analyzer.stats = dict(report['summary'], file='batch scan', indicators=found)
@@ -288,8 +300,13 @@ def _scan_capture(item, path, analyzer, entry, emit, creds, indicators):
         for ip, _bytes in stats.get(key) or []:
             indicators.add_ip(ip, item.name)
     for name, count in stats.get('top_dns_queries') or []:
-        if name:
-            indicators.add('domain', str(name).lower().rstrip('.'), item.name, count)
+        name = str(name or '').lower().rstrip('.')
+        if not name:
+            continue
+        if '.' in name:
+            indicators.add('domain', name, item.name, count, scope=file_scan.domain_scope(name))
+        else:
+            indicators.add('host', name, item.name, count, scope='internal')
     entry.update(packets=stats.get('packets_analyzed', 0), alerts=len(alerts),
                  credentials=found)
 
@@ -320,25 +337,41 @@ def _scan_file(item, path, entry, emit, report, indicators):
 
 
 def _check_threats(found, threat_intel):
-    """Look up public addresses and domains in the threat feeds."""
+    """
+    Look up public addresses and domains in the threat feeds.
+
+    Returns (known_bad, suspicious). Only a feed listing (HIGH) or a listed
+    parent domain (MEDIUM) makes something known-bad; the feeds' weak signals
+    (a dynamic-DNS service, a high-abuse TLD) are reported as suspicious.
+    Internal and reserved names are never looked up.
+    """
     if threat_intel is None:
-        return []
-    hits = []
+        return [], []
+    bad, suspicious = [], []
     for kind, check in (('ipv4', 'check_ip'), ('ipv6', 'check_ip'), ('domain', 'check_domain')):
         lookup = getattr(threat_intel, check, None)
         if lookup is None:
             continue
         for entry in found[kind]:
-            if entry.get('scope', 'public') != 'public':
+            scope = entry.get('scope')
+            if scope is None and kind == 'domain':
+                scope = file_scan.domain_scope(entry['value'])
+            if (scope or 'public') != 'public':
                 continue
             try:
                 info = lookup(entry['value'])
             except Exception:
                 continue
-            if info:
+            if not info:
+                continue
+            hit = dict(info, kind=kind, value=entry['value'], files=entry['files'])
+            if str(info.get('confidence', 'HIGH')).upper() in KNOWN_BAD_CONFIDENCE:
                 entry['threat'] = info
-                hits.append(dict(info, kind=kind, value=entry['value'], files=entry['files']))
-    return hits
+                bad.append(hit)
+            else:
+                entry['suspicious'] = info
+                suspicious.append(hit)
+    return bad, suspicious
 
 
 def main(argv=None):
