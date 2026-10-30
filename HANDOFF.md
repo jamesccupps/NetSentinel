@@ -74,6 +74,33 @@ workstream C and the integration.
 
   All netmon open items are done except validation on real data. The agent's
   sensor steps are listed under "Left for James".
+- `50f865d`: merge of workstream A, live detection.
+  - H1: this PC's own traffic is inspected. Only multicast, broadcast,
+    link-local, noisy discovery ports and the user's known devices are skipped.
+  - H4: split ClientHellos are reassembled; QUIC SNI; ports 8443 and 5061.
+  - H5: the PCAP analyser uses the live parser on packet time.
+    `IDSEngine(offline=True)`.
+  - H6: exact URL matching.
+  - Feeds:
+    - expire delisted entries;
+    - a 410 or 404 is not retried for a week;
+    - cloud and CDN ranges (`rules/cloud_ranges.json`, `src/cloud_ranges.py`)
+      are exempt from attacker-IP lists;
+    - one alert per connection;
+    - DShield /24 blocks.
+  - Bounds: `BoundedLog` in forensics, devices keyed by MAC
+    (`analysis.max_devices`).
+  - New detections in `src/lan_threats.py` and `src/tls_certs.py`. New rule
+    IDs: THREAT-INTEL-URL, NEWLY-REGISTERED-DOMAIN, TLS-FINGERPRINT-FEED,
+    TLS-CERT-SELF-SIGNED, TLS-CERT-INVALID, MINING-POOL, MINING-STRATUM,
+    DNS-TUNNEL-VOLUME, DNS-TUNNEL-TXT, ARP-GATEWAY-CHANGED, ARP-MAC-MULTI-IP,
+    ARP-GRATUITOUS-BURST, ROGUE-DHCP, ROGUE-RA, ROGUE-DHCPV6, NAME-POISONING,
+    LATERAL-MOVEMENT, UPLOAD-SPIKE, NEW-DEVICE.
+  - `src/geoip.py`, with `ATTRIBUTION` for the UI.
+  - Capture: per-run stop events, `AsyncSniffer`, `packets_sampled_out`.
+  - Left out: JA4DB (no licence for the data). The SSLBL JA3 feed is off by
+    default (stale since 2021). URLhaus now needs a free abuse.ch Auth-Key
+    (`threat_intel.abuse_ch_auth_key`).
 
 The full suite passed at 1,512 tests with 53 skips before E merged; E added 78
 tests.
@@ -104,10 +131,40 @@ Review each diff, then merge with `git merge --no-ff refs/heads/<branch>`.
   - MalwareBazaar from a downloaded list;
   - an ignore-list backend;
   - throttled folder scans.
-D and E are finished and merged. Its API is in the `src/audit.py` docstrings:
+A, D and E are finished and merged. B (file scanning) is still running. Its API is in the `src/audit.py` docstrings:
 `start_audit`, `current_job`, `local_networks`, `last_report`, `diff`.
 
-### Integration still to do, after A and B merge
+### Integration still to do
+
+From A, for the main session:
+- **Config:** add A's keys to `DEFAULT_CONFIG`, each read literally in the code:
+
+  | Key | Default |
+  |---|---|
+  | `ids.lan_baseline_hours` | 24 |
+  | `ids.arp_max_ips_per_mac` | 5 |
+  | `ids.lateral_fanout_hosts` | 10 |
+  | `ids.upload_spike_min_mb` | 50 |
+  | `ids.new_device_alerts` | True |
+  | `ids.dns_tunnel_unique_subdomains` | 100 |
+  | `ids.dns_tunnel_txt_per_min` | 20 |
+  | `analysis.max_devices` | 2000 |
+  | `threat_intel.newly_registered_domains` | True |
+  | `threat_intel.nrd_days` | 7 |
+  | `threat_intel.abuse_ch_auth_key` | "" (a secret, never logged) |
+  | `threat_intel.ja3_feed` | False |
+  | `geoip.enabled` | False |
+  | `geoip.auto_update` | True |
+
+- **`app.py`:**
+  - pass `net_env` to `IOCScanner`, or the DoH exemption for the configured
+    resolver never applies;
+  - the forensics lists are now `BoundedLog`: `len()` counts everything ever
+    added, so the cursors keep working, but slicing must iterate.
+- **Verifier:** the new rule IDs get its default verdict; consider branches for
+  them.
+
+Then, for everything:
 
 - **Merge:** review each branch's diff before merging. They never touch
   `config.py`, so expect few conflicts; test files may need hand-merging.

@@ -23,6 +23,16 @@ _SLOW_VERIFY_RULES = frozenset({
     'IOC-SUSPICIOUS-PROC', 'IOC-PROC-NAME', 'IOC-LISTEN-PORT', 'IOC-ACTIVE-THREAT',
 })
 
+# What NetSentinel's own network audit looks like to its own IDS: a port scan
+# from this computer, connects to many hosts, TLS handshakes that fetch
+# certificates. Raised during an audit, they are the audit.
+_AUDIT_LOOKALIKES = frozenset({
+    'PORT-SCAN', 'BRUTE-FORCE', 'SYN-FLOOD', 'LATERAL-MOVEMENT',
+    'TLS-CERT-SELF-SIGNED', 'TLS-CERT-INVALID',
+})
+# Alerts trail the traffic that caused them; this long after an audit still counts.
+_AUDIT_GRACE_SEC = 60
+
 
 def _note_severity_change(alert, before):
     """
@@ -141,6 +151,9 @@ class NetSentinelApp:
             self.config,
             threat_intel=self.threat_intel,
             alert_callback=self._alert_gateway,
+            # Without it, DNS-over-HTTPS to the resolver this PC is configured to
+            # use is reported as bypassing it.
+            net_env=self.net_env,
         )
 
         # Forensics database: encrypted credential storage
@@ -300,6 +313,12 @@ class NetSentinelApp:
             self.suppressed_alerts += 1
             return
 
+        if alert.rule_id in _AUDIT_LOOKALIKES and self._during_own_audit(alert):
+            alert.severity = Severity.LOW
+            alert.evidence['during_own_audit'] = (
+                "Raised while NetSentinel's network audit was running from this "
+                "computer; the audit's own probes look like this.")
+
         # Enrich with domain resolution from IDS engine's DNS tracker
         try:
             if self.ids_engine and alert.dst_ip:
@@ -347,6 +366,18 @@ class NetSentinelApp:
             logger.debug("Alert verification error: %s", e)
         _note_severity_change(alert, before)
         self._emit_alert(alert)
+
+    def _during_own_audit(self, alert):
+        """Whether an audit from this computer is running, or just finished, and
+        the alert involves this computer."""
+        from src import audit
+        now = time.time()
+        if audit.is_running():
+            self._audit_seen_at = now
+        if now - getattr(self, '_audit_seen_at', 0) > _AUDIT_GRACE_SEC:
+            return False
+        local = set(getattr(self.net_env, 'local_ips', None) or ())
+        return alert.src_ip in local or alert.dst_ip in local
 
     def _cooldown_ok(self, alert):
         """
