@@ -56,8 +56,10 @@ Endpoints
     GET /api/audit        the network audit: choices, progress, last report
     POST /api/monitoring/start, /api/monitoring/stop, /api/alerts/ack?id=,
          /api/alerts/ack-all, /api/alerts/verdict?id=&verdict=, /api/review/bundle,
-         /api/audit/start?network=&gentle=, /api/audit/cancel
+         /api/audit/start?network=&gentle=, /api/audit/cancel,
+         /api/scan/ignore (JSON body), /api/scan/unignore?id=
                           controls (token required, loopback binds only)
+    GET /api/scan/ignored the file-scan ignore list
 """
 
 import hmac
@@ -286,6 +288,7 @@ class HeadlessServer:
             '/api/devices': self._route_devices,
             '/api/metrics': self._route_metrics,
             '/api/audit': self._route_audit,
+            '/api/scan/ignored': self._route_scan_ignored,
         }
         self.post_routes = {
             '/api/scan/new': self._post_scan_new,
@@ -301,6 +304,8 @@ class HeadlessServer:
             '/api/review/bundle': self._post_review_bundle,
             '/api/audit/start': self._post_audit_start,
             '/api/audit/cancel': self._post_audit_cancel,
+            '/api/scan/ignore': self._post_scan_ignore,
+            '/api/scan/unignore': self._post_scan_unignore,
         }
 
     @property
@@ -392,6 +397,12 @@ class HeadlessServer:
         label, colour = presentation.threat_level(score)
         devices = data.get('device_learner', {})
         start = cap.get('start_time') or 0
+        talkers = presentation.top_talkers(cap.get('top_talkers'), limit=8)
+        geo = getattr(getattr(self.app, 'ids_engine', None), 'geoip', None)
+        if geo is not None:
+            talkers_out = geo.annotate_talkers(talkers)
+        else:
+            talkers_out = [{'ip': ip, 'bytes': b} for ip, b in talkers]
         return {
             'version': __version__,
             'monitoring': bool(data.get('is_monitoring')),
@@ -399,7 +410,7 @@ class HeadlessServer:
             'uptime_sec': int(time.time() - start) if start and data.get('is_monitoring') else 0,
             'capture': {k: cap.get(k, 0) for k in (
                 'packets_captured', 'bytes_captured', 'packets_per_sec', 'bytes_per_sec',
-                'flows_active', 'packets_dropped', 'sample_rate')},
+                'flows_active', 'packets_dropped', 'sample_rate', 'packets_sampled_out')},
             'resources': data.get('resources') or {'available': False},
             'review': data.get('review') or {'enabled': False},
             'suppressed_alerts': data.get('suppressed_alerts', 0),
@@ -412,8 +423,9 @@ class HeadlessServer:
             'threat': {'label': label, 'colour': colour, 'score': round(float(score), 4)},
             'protocols': [{'name': n, 'count': c, 'fraction': round(f, 4)}
                           for n, c, f in presentation.protocol_breakdown(cap.get('protocols'))],
-            'top_talkers': [{'ip': ip, 'bytes': b} for ip, b in
-                            presentation.top_talkers(cap.get('top_talkers'), limit=8)],
+            'top_talkers': talkers_out,
+            # CC BY 4.0: DB-IP must be credited wherever its data is shown.
+            'geoip_attribution': geo.get_stats()['attribution'] if geo is not None else None,
             'devices': {'total': devices.get('total_devices', 0),
                         'active_last_hour': devices.get('active_last_hour', 0)},
             'incidents_active': data.get('correlator', {}).get('active_incidents', 0),
@@ -459,6 +471,29 @@ class HeadlessServer:
 
     def _post_scan_cancel(self, params, body, length):
         return self._scan_sessions().cancel(_str_param(params, 'id')), 200
+
+    def _route_scan_ignored(self, params):
+        return {'ignored': self._scan_sessions().ignored()}, 'application/json'
+
+    def _post_scan_ignore(self, params, body, length):
+        """A JSON body, {"finding": {...from a report...}, "note": "..."}."""
+        if not self.controls_allowed:
+            self._control(0)                       # raises the loopback refusal
+        if not 0 < length <= 64 * 1024:
+            raise RequestRefused('Send the finding as a small JSON body.', 400)
+        try:
+            data = json.loads(body.read(length).decode('utf-8'))
+        except (ValueError, UnicodeDecodeError):
+            raise RequestRefused('That was not JSON.', 400) from None
+        if not isinstance(data, dict):
+            raise RequestRefused('Send a JSON object.', 400)
+        self._scan_sessions().ignore(data.get('finding'), str(data.get('note', ''))[:200])
+        return {'ignored': True}, 201
+
+    def _post_scan_unignore(self, params, body, length):
+        self._control(length)
+        self._scan_sessions().unignore(_str_param(params, 'id'))
+        return {'removed': True}, 200
 
     # ─── Controls ────────────────────────────────────────────────────────
 
