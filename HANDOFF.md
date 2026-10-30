@@ -1,4 +1,4 @@
-# Handoff: v1.9.0 in James's hands; first-review fixes pushed, CI green
+# Handoff: v1.9.0 released
 
 Kept current during the work so it survives a context reset. Last updated
 2026-10-30 by the local Claude Code session on James's desktop. Read `CLAUDE.md`
@@ -7,7 +7,13 @@ first. The approved plan, with its findings by file:line, is outside the repo at
 
 ## Where it stands
 
-Every open item from the v1.8.0 handoff is done on local `main`, as version 1.9.0.
+**v1.9.0 is released** (James asked, 2026-10-30). The tag `v1.9.0` is at
+`4344e3c`, after CI passed on all five jobs. Release run #5 built the exe and
+published https://github.com/jamesccupps/NetSentinel/releases/tag/v1.9.0 as
+Latest, with `NetSentinel.exe` (81.6 MB), `NetSentinel.exe.sha256` and the
+CHANGELOG section as notes. v1.8.0 was never tagged (`7d6fc3c` if wanted).
+
+Every open item from the v1.8.0 handoff is done, as version 1.9.0.
 `CHANGELOG.md` has the full list. Status:
 - **Commits:** pushed to `main` as `11366aa` on 2026-10-29, with James's OK. That
   is 36 commits past `7d6fc3c`, which v1.8.0 can be tagged at.
@@ -139,15 +145,14 @@ James closes the running one.
 
 ## Next steps
 
-1. CI is green on all jobs (Linux 3.10, 3.11 and 3.12; Windows 3.12; lint) as of
-   `b061c65`. The Windows job had failed since it was added. GitHub's runner
-   has no Npcap, and test frames built with a bare `Ether()` made Scapy look up
-   interfaces that are not there. Failing tests now show up as public
-   annotations (`tools/ci_failures.py`), because the logs need a GitHub sign-in.
-2. Run the `release` workflow by hand to build a test exe (Actions → release →
-   Run workflow). James tests it. Check that the exe bundles `py7zr`'s
-   compiled extensions, `maxminddb`, `Evtx` and scapy's manuf table.
-3. When James is happy: tag v1.9.0 (and v1.8.0 at `7d6fc3c` if wanted).
+1. Released. Next, whatever James's use of 1.9.0 turns up. Review mode stays on:
+   build a bundle when alerts come in, go through them, and fix detectors
+   rather than suppressing by IP where a whole class is wrong.
+2. The mouse-wheel fix (`4344e3c`) is in the release. James has not yet run a
+   build that has it.
+3. CI notes: failing tests show up as public annotations
+   (`tools/ci_failures.py`), because the logs need a GitHub sign-in. GitHub's
+   jobs endpoint sometimes answers 500; `commits/<sha>/check-runs` works.
 
 ## Left for James
 
