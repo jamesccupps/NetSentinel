@@ -1,4 +1,4 @@
-# Handoff: v1.9.0 in James's hands; fixes from the first exe test not yet pushed
+# Handoff: v1.9.0 in James's hands; first-review fixes pushed, CI green
 
 Kept current during the work so it survives a context reset. Last updated
 2026-10-30 by the local Claude Code session on James's desktop. Read `CLAUDE.md`
@@ -97,9 +97,10 @@ No verdicts were recorded. A false-positive verdict suppresses by IP, and here
 that would hide real Responder alerts from this PC.
 
 **NetSentinel bugs this review found.** All 7 are fixed, with tests in
-`test_first_review.py` that fail on the old code. They are committed locally
-but not pushed. The real review folder now builds a readable bundle from the
-command line.
+`test_first_review.py` that fail on the old code. They were pushed as `62c0740`
+on 2026-10-30, and CI is green on all five jobs. The real review folder now
+builds a readable bundle from the command line. A local exe with the fixes was
+built at 13:56 and is waiting for James to test it.
 1. **The PC's own address is listed as a gateway.**
    `net_detect.detect_default_gateway` takes every address on the
    `route print 0.0.0.0` line, including the Interface column. The log shows
