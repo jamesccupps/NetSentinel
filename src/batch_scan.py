@@ -30,7 +30,7 @@ CAPTURE_EXTS = ('.pcap', '.pcapng', '.cap')
 MAX_FILES = 100_000
 MAX_MEMBER_BYTES = 2 * 1024 ** 3   # per file taken out of a zip
 SKIP_DIRS = {'.git', '.svn', '.hg', 'node_modules', '__pycache__', '.venv', 'venv'}
-INDICATOR_KINDS = ('ipv4', 'ipv6', 'domain', 'url', 'email', 'mac')
+INDICATOR_KINDS = file_scan.INDICATOR_KINDS
 
 
 class _Item:
