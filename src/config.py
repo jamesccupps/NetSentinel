@@ -81,6 +81,7 @@ DEFAULT_CONFIG = {
         "flow_timeout_sec": 120,        # Inactive flow expiry
         "stats_interval_sec": 5,        # How often to compute stats
         "max_flows_tracked": 50000,
+        "max_devices": 2000,            # Device table cap (keyed by MAC)
     },
     "ml": {
         "enabled": True,
@@ -114,6 +115,16 @@ DEFAULT_CONFIG = {
         # Distinct addresses for one name inside 15 minutes, with a short TTL,
         # before fast-flux is reported.
         "dns_flux_address_threshold": 8,
+        # DNS tunnelling beyond one long name: distinct subdomains of one parent
+        # in a window, and TXT lookups a minute.
+        "dns_tunnel_unique_subdomains": 100,
+        "dns_tunnel_txt_per_min": 20,
+        # LAN detections (src/lan_threats.py). They learn for this long first.
+        "lan_baseline_hours": 24,
+        "arp_max_ips_per_mac": 5,       # More addresses on one MAC looks like spoofing
+        "lateral_fanout_hosts": 10,     # LAN hosts one host reaches over SMB/RDP/WinRM/RPC
+        "upload_spike_min_mb": 50,      # Smallest upload worth comparing to a baseline
+        "new_device_alerts": True,
         "known_bad_ports": [4444, 5555, 6666, 1337, 31337, 12345, 65535],
         # JA3/JA4 client fingerprints to alert on. Public threat intel publishes
         # these for C2 frameworks; they match on encrypted traffic.
@@ -123,6 +134,19 @@ DEFAULT_CONFIG = {
     "threat_intel": {
         "enabled": True,
         "auto_update": True,              # Auto-download fresh threat feeds
+        # WhoisDS's free daily list of newly registered domains, checked locally.
+        "newly_registered_domains": True,
+        "nrd_days": 7,                    # How long a domain counts as new
+        # abuse.ch now wants a free Auth-Key for URLhaus (and MalwareBazaar). Its
+        # terms allow free use for not-for-profit purposes. Never logged.
+        "abuse_ch_auth_key": "",
+        "ja3_feed": False,                # SSLBL's JA3 list, unchanged since 2021
+    },
+    "geoip": {
+        # Country and network operator of destinations, from DB-IP Lite (CC BY 4.0),
+        # downloaded monthly and looked up on this machine. Off until you turn it on.
+        "enabled": False,
+        "auto_update": True,
     },
     "verification": {
         "auto_verify": True,              # Auto-verify process alerts
@@ -163,6 +187,19 @@ DEFAULT_CONFIG = {
         "capture_budget_mb": 2048,      # Rolling full capture
         "capture_max_hours": 24,
         "pseudonymise_lan": False,      # Bundles replace LAN addresses with labels
+    },
+    "file_scan": {
+        "entropy_strings": True,        # Flag random-looking values in settings
+        "max_secrets_per_kind": 50,     # Listed per file; the true count is kept
+        "internal_domains": [],         # Extra suffixes that are internal (never sent to feeds)
+        "yara_rules_dir": "",           # Your own YARA rules, used if yara-python is installed
+        "evtx_max_records": 200000,     # Event log records read per file
+        "archive_max_depth": 3,         # How deep nested archives are opened
+        "archive_max_bytes": 8589934592,  # Decompressed bytes per archive (8 GiB)
+        "archive_max_ratio": 250,       # Expansion past this is treated as a zip bomb
+        "low_priority": True,           # Folder scans give way to everything else
+        "pause_fraction": 0.05,         # Pause after each file, as a share of its time
+        "hash_lists_dir": "",           # Known-bad SHA-256 lists; blank: ~/.netsentinel/data/hash_lists
     },
     "audit": {
         # An active check of your own networks, run only when you ask: hosts, risky

@@ -20,6 +20,7 @@ import time
 import unittest
 import zipfile
 from types import SimpleNamespace
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -444,6 +445,26 @@ class TestTheGateway(unittest.TestCase):
         app._verified_alert_gateway(an_alert())
         self.assertEqual(emitted, [])
         self.assertEqual(app.suppressed_alerts, 1)
+
+    def test_the_audits_own_probes_are_labelled_not_raised(self):
+        """With this PC's own traffic inspected, an audit from it looks like a scan."""
+        from src import audit
+        app = bare_app()
+        app.net_env = SimpleNamespace(local_ips=['192.168.1.20'])
+        app.alert_verifier = SimpleNamespace(verify_alert=lambda alert, ids_engine=None: None)
+        emitted = []
+        app._emit_alert = emitted.append
+        with mock.patch.object(audit, 'is_running', return_value=True):
+            app._verified_alert_gateway(an_alert('PORT-SCAN', severity='HIGH'))
+            app._verified_alert_gateway(an_alert('PORT-SCAN', severity='HIGH', src='192.168.1.99'))
+        self.assertEqual(emitted[0].severity, 'LOW')
+        self.assertIn('during_own_audit', emitted[0].evidence)
+        self.assertEqual(emitted[1].severity, 'HIGH', 'a scan by another host is still a scan')
+
+        app._audit_seen_at = time.time() - 120          # long after the audit
+        with mock.patch.object(audit, 'is_running', return_value=False):
+            app._verified_alert_gateway(an_alert('PORT-SCAN', severity='HIGH'))
+        self.assertEqual(emitted[2].severity, 'HIGH')
 
     def test_the_severity_before_verification_is_kept(self):
         app = bare_app()
