@@ -32,6 +32,10 @@ pyinstaller ^
     --hidden-import "psutil" ^
     --hidden-import "numpy" ^
     --hidden-import "cryptography" ^
+    --hidden-import "maxminddb" ^
+    --hidden-import "py7zr" ^
+    --hidden-import "Evtx.Evtx" ^
+    --hidden-import "scapy.libs.manuf" ^
     --hidden-import "plyer.platforms.win.notification" ^
     --icon "assets\netsentinel.ico" ^
     --uac-admin ^
