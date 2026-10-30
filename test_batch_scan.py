@@ -107,7 +107,9 @@ class TestCollecting(_Case):
         self.assertEqual([c.name for c in found], ['z.zip/keep.pcap'])
         self.assertEqual(len(skipped), 2)
 
-    def test_nested_and_password_protected_members_are_reported_not_opened(self):
+    def test_password_protected_members_are_reported_not_opened(self):
+        # a nested archive is listed like any member; the scan opens it
+        # (test_archives.py), so only the locked member is skipped here
         nested = self.zip('nested.zip', {'inner.zip': b'PK'})
         locked = self.zip('locked.zip', {'locked.pcap': b'x'})
         with open(locked, 'rb') as f:
@@ -118,9 +120,8 @@ class TestCollecting(_Case):
         with open(locked, 'wb') as f:
             f.write(data)
         found, skipped = batch_scan.collect([nested, locked])
-        self.assertEqual(found, [])
-        self.assertEqual(sorted(s['reason'] for s in skipped),
-                         ['nested archive', 'password-protected'])
+        self.assertEqual([c.name for c in found], ['nested.zip/inner.zip'])
+        self.assertEqual([s['reason'] for s in skipped], ['password-protected'])
 
     @unittest.skipUnless(hasattr(os, 'symlink'), 'no symlinks here')
     def test_symlinks_are_not_followed(self):
