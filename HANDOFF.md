@@ -56,6 +56,24 @@ workstream C and the integration.
 - `ae3a375`: merge of workstream E, the opt-in subnet audit (`src/audit.py`).
 - `3f5609b`: the audit wired into the dashboard (Audit page) and the desktop
   app (Audit button, Settings toggle).
+- `0eb4bbc`: merge of workstream D, netmon. Netmon's suite is now 1,270 tests.
+  - web: a Host allowlist (421); `Origin: null` and cross-site POSTs refused;
+  - silence buttons, via `serve --allow-edit` and `web --state`;
+  - the summariser button behind `--allow-summarise`, with preview then send, a
+    budget under `--state`, an hourly cap and a timeout;
+  - canary and drift findings from restricted segments withheld from the model;
+  - the digest checklist, findings kept across restarts (`netmon/window.py`),
+    and an email digest over STARTTLS/SMTPS;
+  - GeoIP (`netmon/geoip.py`, `netmon geoip --update`) and the
+    `egress_unexpected_network` rule;
+  - inbound internet traffic kept by router dedup, plus `inbound_https_bypass`
+    and the shipped Cloudflare ranges;
+  - the packet-side VLAN leak check (`netmon/leakcheck.py`); `bpf --verify`
+    exits 3 on a leak; `--diagnose-untagged`;
+  - a fix for BPF filters with host and port exclusions together.
+
+  All netmon open items are done except validation on real data. The agent's
+  sensor steps are listed under "Left for James".
 
 The full suite passed at 1,512 tests with 53 skips before E merged; E added 78
 tests.
@@ -86,18 +104,10 @@ Review each diff, then merge with `git merge --no-ff refs/heads/<branch>`.
   - MalwareBazaar from a downloaded list;
   - an ignore-list backend;
   - throttled folder scans.
-- **D, netmon** (`netmon/**`):
-  - Host allowlist; acknowledge/snooze buttons;
-  - the summariser button;
-  - the digest checklist and an email digest;
-  - GeoIP;
-  - inbound 443 from non-Cloudflare;
-  - the packet-side VLAN leak check.
-
-E is finished and merged. Its API is in the `src/audit.py` docstrings:
+D and E are finished and merged. Its API is in the `src/audit.py` docstrings:
 `start_audit`, `current_job`, `local_networks`, `last_report`, `diff`.
 
-### Integration still to do, after A, B and D merge
+### Integration still to do, after A and B merge
 
 - **Merge:** review each branch's diff before merging. They never touch
   `config.py`, so expect few conflicts; test files may need hand-merging.
@@ -153,8 +163,23 @@ E is finished and merged. Its API is in the `src/audit.py` docstrings:
 
 - Test a fresh exe built from `main` once this lands.
 - Tag v1.8.0 at `7d6fc3c`, if he wants it released first.
-- For netmon on the sensor: `netmon geoip --update`, SMTP settings in the secrets
-  file, `--allow-summarise`, `netmon bpf --verify` on an unfiltered sample (then
-  delete the sample), and `netmon sync`.
+- **netmon on the sensor:**
+  1. Regenerate the capture filter (`netmon capture ... --command`), update
+     `netmon-capture.service`, and restart it.
+  2. Take an unfiltered sample and run `netmon bpf --profile ... --verify sample`,
+     which must exit 0. Also run `--diagnose-untagged sample`. Delete the sample
+     afterwards.
+  3. `pip install maxminddb`, then `netmon geoip --update --dir
+     /var/lib/netmon/geoip`, and set `geoip: directory:` in the profile. Repeat
+     the update monthly.
+  4. Put the `smtp_*` keys in `secrets.json` (mode 600) for the email digest.
+  5. For the summariser: add `--allow-summarise` (and `--allow-edit`) to
+     ExecStart, put `anthropic_api_key` in the secrets file, and
+     `pip install anthropic`.
+  6. List Cloudflare-published hosts under `cloudflare: origins:`. Fill in
+     `router_macs` if it is empty.
+  7. Check one port-forwarded flow in a UniFi export: does it record the WAN
+     address or the internal one?
+  8. Run `netmon sync` for the real profile, keeping it out of the repo.
 - Turn on GeoIP and audits (Settings), and set review mode to taste.
 - Expect more alerts once H1 lands. Review mode is how to sort them.
