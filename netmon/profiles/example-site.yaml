@@ -406,6 +406,21 @@ sensor_macs:
   - 00:11:22:ff:ff:02
 
 
+# ─── Services published through Cloudflare ───────────────────────────────────
+# If something here is reachable from the internet only through Cloudflare,
+# list the internal hosts behind it. Inbound on 443 to one of them from any
+# address outside Cloudflare's ranges, well above that host's usual level, is
+# the inbound_https_bypass finding: someone using the origin directly. Inert
+# while `origins` is empty. Names, addresses, CIDRs or roles all work.
+#
+# Cloudflare's ranges ship in netmon/rules/cloudflare-ranges.txt, dated, and
+# are never fetched; `ranges:` here replaces that list for this site.
+
+# cloudflare:
+#   origins: [bas-server]
+#   ranges: [173.245.48.0/20, 2400:cb00::/32]
+
+
 # ─── GeoIP ───────────────────────────────────────────────────────────────────
 # Country and network for internet addresses, from DB-IP Lite (CC BY 4.0, "IP
 # Geolocation by DB-IP", https://db-ip.com), read offline with maxminddb.

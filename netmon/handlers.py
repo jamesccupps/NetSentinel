@@ -37,7 +37,7 @@ from src.beaconing import (MIN_OBSERVATIONS, is_expected_periodic,  # noqa: E402
                            score_beacon)
 
 __all__ = ['new_device', 'overlapping_ip', 'dhcp_loop', 'unanswered_name',
-           'beaconing', 'new_destination', 'upload_volume']
+           'beaconing', 'new_destination', 'upload_volume', 'inbound_volume']
 
 
 def _finding(rule, event, description, key='', device='', severity=None,
@@ -426,6 +426,93 @@ def upload_volume(event, rule, state):
                   'days_of_history': len(history)},
         next_check=f"Identify the destination: the beaconing and "
                    f"egress_new_destination findings for this device, same day.")
+
+
+def _size(count):
+    """Bytes as a person reads them."""
+    for unit, scale in (('GB', 1 << 30), ('MB', 1 << 20), ('KB', 1 << 10)):
+        if count >= scale:
+            return f'{count / scale:.1f} {unit}'
+    return f'{int(count)} bytes'
+
+
+@register_handler('inbound_volume')
+def inbound_volume(event, rule, state):
+    """
+    Inbound traffic to a published service from outside its front door, above
+    what that host usually gets.
+
+    For a site that publishes through Cloudflare, the origin should hear on
+    443 only from Cloudflare's ranges. It never hears only that: scanners try
+    every address on 443 all day, so some traffic from elsewhere is the usual
+    level, and the finding is a day well above it — someone using the origin
+    directly, around Cloudflare and whatever it filters.
+
+    Modelled on upload_volume: each origin's own history, a floor below which
+    nothing is reported, a multiple of its median day. The difference is that
+    the usual level may be nothing at all, so every day the origin was seen on
+    the port counts towards the history — a day of only Cloudflare traffic is
+    a zero, not a missing day — and a day with no history is still learning.
+
+    Inert until the profile lists origins under `cloudflare:`.
+    """
+    if not event.get('dst_cloudflare_origin') or not event.dst_ip:
+        return None
+    ports = {int(p) for p in (rule.params.get('ports') or [443])}
+    if event.dst_port not in ports:
+        return None
+
+    day = int(event.ts // 86400)
+    days = state.setdefault('days', {})        # dst_ip -> {day: [bytes, {src: bytes}]}
+    history = days.setdefault(event.dst_ip, {})
+    today = history.setdefault(day, [0, {}])
+    # A day of Cloudflare-only traffic is recorded as a zero, so a quiet origin
+    # has a baseline of nothing rather than no baseline.
+    if event.get('src_is_cloudflare'):
+        return None
+
+    size = event.total_bytes or event.bytes_to_dst or 0
+    today[0] += size
+    sources = today[1]
+    if event.src_ip in sources or len(sources) < 200:
+        sources[event.src_ip] = sources.get(event.src_ip, 0) + size
+
+    keep = int(rule.params.get('history_days', 30))
+    for old in [d for d in history if d < day - keep]:
+        del history[old]
+
+    min_bytes = float(rule.params.get('min_bytes', 1024 * 1024))
+    if today[0] < min_bytes:
+        return None
+    previous = sorted(total for d, (total, _) in history.items() if d != day)
+    if len(previous) < int(rule.params.get('min_days', 1)):
+        return None                        # still learning what usual is
+    median = previous[len(previous) // 2]
+    if today[0] < median * float(rule.params.get('multiple', 4)):
+        return None
+
+    reported = state.setdefault('reported', set())
+    if (event.dst_ip, day) in reported:
+        return None
+    reported.add((event.dst_ip, day))
+
+    top = sorted(sources.items(), key=lambda kv: -kv[1])[:5]
+    name = event.get('dst_name') or event.dst_ip
+    usual = f'a usual {_size(median)}' if median else 'nothing on a usual day'
+    return _finding(
+        rule, event, key=str(day), device=name,
+        description=f"{name} received {_size(today[0])} on port "
+                    f"{event.dst_port} today from {len(sources)} addresses "
+                    f"outside Cloudflare, against {usual}",
+        evidence={'dst_ip': event.dst_ip, 'dst_port': event.dst_port,
+                  'bytes': today[0], 'median_bytes': median,
+                  'source_count': len(sources),
+                  'sources': [ip for ip, _ in top],
+                  'days_of_history': len(previous)},
+        next_check=f"List who reached {event.dst_ip}:{event.dst_port} today "
+                   f"from outside Cloudflare's ranges; if the origin should "
+                   f"only ever be reached through Cloudflare, restrict the "
+                   f"port forward to those ranges.")
 
 
 @register_handler('p2_roster')

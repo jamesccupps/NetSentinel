@@ -32,7 +32,9 @@ Set `router_macs` in the profile and the relayed copy is dropped: a frame whose
 source MAC is the router, but whose source *address* is not the router, is the
 second appearance of a packet already counted. Traffic the router itself
 originates is kept, and so is same-VLAN traffic, which a simpler "only count
-frames sent to the router" rule would discard.
+frames sent to the router" rule would discard. So is a frame from an internet
+address: inbound traffic crosses the mirror once, on its way in, and has no
+first copy unless the WAN port is mirrored as well.
 """
 
 from __future__ import annotations
@@ -45,7 +47,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(
     os.path.abspath(__file__)))))
 
-from netmon.events import Event                                   # noqa: E402
+from netmon.events import Event, _is_public                       # noqa: E402
 from netmon.protocols import bacnet, site                         # noqa: E402
 
 logger = logging.getLogger("netmon.sources.pcap")
@@ -520,12 +522,21 @@ class _RouterDedup:
     router's source address; the original, already counted, had the sender's
     MAC. Frames the router itself originates keep their own address and are
     kept, as is all same-VLAN traffic.
+
+    Except when the sender is on the internet. Inbound traffic — replies to
+    every outbound connection, and anything arriving through a port forward —
+    reaches the mirror once, leaving the router towards the inside, with the
+    router's MAC and the remote address. There is no first copy to have been
+    counted unless the WAN port is mirrored too, so dropping it threw away
+    every inbound internet frame: no downloads in the byte counts, and no
+    sign at all of a connection arriving from outside.
     """
 
     def __init__(self, router_macs=(), router_ips=()):
         self.router_macs = {m.lower() for m in router_macs if m}
         self.router_ips = set(router_ips or ())
         self.dropped = 0
+        self.kept_from_internet = 0
 
     def should_drop(self, event):
         if not self.router_macs:
@@ -534,6 +545,9 @@ class _RouterDedup:
             return False
         if event.src_ip and event.src_ip in self.router_ips:
             return False                      # the router speaking for itself
+        if event.src_ip and _is_public(event.src_ip):
+            self.kept_from_internet += 1      # the only copy there is
+            return False
         self.dropped += 1
         return True
 
