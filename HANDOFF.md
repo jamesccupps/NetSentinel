@@ -46,6 +46,21 @@ How the work was done:
   asking.
 - **Port:** the dashboard is on 8737, because 8787 is localcast.
 
+## Since the push
+
+- **Tray icon and Restart**, which James asked for after the first v1.9.0 exe
+  (`src/tray.py`, `src/restart.py`, `--monitor`):
+  - closing the window hides to the tray, and monitoring keeps running;
+  - the tray menu has Open, Dashboard, Start/Stop, Restart and Quit;
+  - Restart relaunches with the same arguments and `--monitor` if it was
+    monitoring, and is offered after saving settings.
+- **New dependencies:** pystray (LGPL-3.0) and Pillow.
+- **Checked live on this PC:** the tray icon (it showed, updated and stopped)
+  and the relaunch (the detached copy ran, with the arguments and the
+  PyInstaller reset).
+- **Not yet checked:** the whole flow in the built exe. James tests that on the
+  next build.
+
 ## Open questions for James
 
 - **QUIC and the "no TLS decryption" rule.** Live detection now reads QUIC

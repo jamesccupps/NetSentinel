@@ -14,6 +14,10 @@ numpy>=1.24.0
 # Desktop notifications (optional)
 plyer>=2.1.0
 
+# Tray icon, so closing the window keeps NetSentinel running (pystray is LGPL-3.0)
+pystray>=0.19
+pillow>=10.0
+
 # Encryption for forensics credential storage; also QUIC SNI, certificates and
 # Group Policy passwords found in scanned files
 cryptography>=41.0.0

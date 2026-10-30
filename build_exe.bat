@@ -36,6 +36,8 @@ pyinstaller ^
     --hidden-import "py7zr" ^
     --hidden-import "Evtx.Evtx" ^
     --hidden-import "scapy.libs.manuf" ^
+    --hidden-import "pystray._win32" ^
+    --hidden-import "PIL.Image" ^
     --hidden-import "plyer.platforms.win.notification" ^
     --icon "assets\netsentinel.ico" ^
     --uac-admin ^

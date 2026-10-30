@@ -111,6 +111,17 @@ sit on one of this computer's interfaces. CLI: `python -m src.audit --network
   SSNs, per file and line. One alert per kind of secret per file. Folder scans run
   at background priority and give way between files.
 
+### Runs in the tray, and restarts itself
+
+Closing the window used to stop monitoring and exit. Now it hides NetSentinel
+to the system tray and monitoring carries on; the tray icon opens the window or
+the dashboard, starts or stops monitoring, restarts, and quits (Settings →
+Performance turns this off). **Restart** (in the window, the tray menu, and
+offered after saving settings) starts a fresh copy with the same arguments and
+resumes monitoring if it was running, so settings that apply at start take
+effect without hunting for the process. `--monitor` starts monitoring as soon as
+the window opens. The tray uses pystray (LGPL-3.0) and Pillow.
+
 ### The dashboard can do things, on this computer only
 
 Start and stop monitoring, acknowledge alerts, record verdicts, build review

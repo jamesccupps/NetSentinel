@@ -193,6 +193,9 @@ def parse_args(argv=None):
                         help=f'API port (default: {DEFAULT_PORT}; 0 asks the OS to choose)')
     parser.add_argument('--no-api', action='store_true',
                         help='no HTTP listener at all: no browser dashboard, no API')
+    parser.add_argument('--monitor', action='store_true',
+                        help='start monitoring as soon as the window opens (headless '
+                             'mode always monitors)')
     parser.add_argument('--review', metavar='DIR',
                         help='review mode for this run: save the traffic behind every '
                              'alert to DIR, for a review bundle')
@@ -328,6 +331,7 @@ def main(argv=None):
             logger.warning("Browser dashboard unavailable: %s", e)
             app.web_server = None
 
+    app.start_on_launch = args.monitor
     try:
         app.run(tk_root=tk_root)
     finally:

@@ -30,6 +30,8 @@ dependencies = [
     "maxminddb>=2.5",
     "py7zr>=1.0",
     "python-evtx>=0.8",
+    "pystray>=0.19",
+    "pillow>=10.0",
 ]
 
 [project.optional-dependencies]

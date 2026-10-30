@@ -7,6 +7,7 @@ Built with tkinter + ttk for zero extra dependencies.
 """
 
 import os
+import queue
 import threading
 import time
 import logging
@@ -593,6 +594,24 @@ class NetSentinelGUI:
         # Register alert listener
         self.app.alert_manager.register_listener(self._on_new_alert)
 
+        # The tray icon. With it, closing the window hides it and monitoring
+        # carries on; without one (no library, no tray on this desktop), closing
+        # quits as it always did.
+        self._tray_actions = queue.Queue()
+        self._tray = None
+        self._told_about_tray = False
+        if self.app.config.get('gui', 'close_to_tray', default=True):
+            from src import tray
+            if tray.available():
+                icon = tray.Tray(self._tray_actions.put, lambda: self._monitoring)
+                if icon.start():
+                    self._tray = icon
+                    self.root.after(150, self._poll_tray)
+
+        # --monitor, which a restart passes when it was monitoring.
+        if getattr(self.app, 'start_on_launch', False):
+            self.root.after(300, self._toggle_monitoring)
+
         # Start update loop
         self._schedule_update()
 
@@ -658,6 +677,12 @@ class NetSentinelGUI:
                   bg=COLORS['bg_input'], fg=COLORS['text'],
                   relief='flat', cursor='hand2', padx=10,
                   command=lambda: self._open_dashboard('#audit')
+        ).pack(side='left', padx=(0, 8))
+
+        tk.Button(ctrl_frame, text="⟳  Restart", font=('Segoe UI', 8),
+                  bg=COLORS['bg_input'], fg=COLORS['text_dim'],
+                  relief='flat', cursor='hand2', padx=8,
+                  command=self._restart
         ).pack(side='left', padx=(0, 8))
 
         # About button
@@ -2600,6 +2625,9 @@ class NetSentinelGUI:
         self._add_setting_toggle(
             perf_card, 'performance.low_priority',
             'Run at lower priority, so your work comes first', False)
+        self._add_setting_toggle(
+            perf_card, 'gui.close_to_tray',
+            'Closing the window keeps NetSentinel running in the tray', True)
 
         review_card = Card(scroll_frame, title="REVIEW MODE (applies at next start)")
         review_card.pack(fill='x', padx=8, pady=(0, 8))
@@ -2700,7 +2728,13 @@ class NetSentinelGUI:
         self.app.config.set('blacklists', 'ips', bl_ips)
 
         self.app.config.save()
-        messagebox.showinfo("Settings", "Settings saved successfully!")
+        # Several settings (priority, review mode, GeoIP, thresholds) are read when
+        # NetSentinel starts, so offer the restart that applies them.
+        if messagebox.askyesno(
+                "Settings",
+                "Settings saved. Some take effect when NetSentinel starts.\n\n"
+                "Restart now? Monitoring resumes if it is running."):
+            self._restart()
 
     # ──────────────────────────────────────────────────────────────────────────
     # Actions
@@ -2892,6 +2926,8 @@ class NetSentinelGUI:
         if running == self._monitoring and not finished:
             return
         self._monitoring = running
+        if getattr(self, '_tray', None) is not None:
+            self._tray.update(running)
         if running:
             self._start_btn.config(text="■  STOP MONITORING",
                                    bg=COLORS['red_dim'], state='normal')
@@ -3624,8 +3660,63 @@ class NetSentinelGUI:
         self.root.mainloop()
 
     def _on_close(self):
-        """Clean shutdown."""
+        """The window's close button: hide to the tray if there is one, else quit."""
+        if self._tray is not None:
+            self.root.withdraw()
+            if not self._told_about_tray:
+                self._told_about_tray = True
+                self._tray.notify("NetSentinel is still running. Its tray icon opens "
+                                  "it again, or quits.")
+            return
+        self._quit()
+
+    # ─── Tray, restart and quit ──────────────────────────────────────────
+
+    def _poll_tray(self):
+        """Run the tray's menu actions here, on the Tk thread."""
+        handlers = {'show': self._show_window, 'dashboard': self._open_dashboard,
+                    'toggle': self._toggle_monitoring, 'restart': self._restart,
+                    'quit': self._quit}
+        while True:
+            try:
+                action = self._tray_actions.get_nowait()
+            except queue.Empty:
+                break
+            handler = handlers.get(action)
+            if handler is not None:
+                handler()
+            if action in ('restart', 'quit') and self._tray is None:
+                return              # the window is gone
+        self.root.after(150, self._poll_tray)
+
+    def _show_window(self):
+        self.root.deiconify()
+        self.root.lift()
+        self.root.focus_force()
+
+    def _shutdown(self):
         # Unconditionally: monitoring may have been started from the browser, and
         # stopping saves alerts and learned data either way.
+        if self._tray is not None:
+            self._tray.stop()
+            self._tray = None
         self.app.stop_monitoring()
+        server = getattr(self.app, 'web_server', None)
+        if server is not None:
+            server.stop()           # free the port for the next copy
+
+    def _quit(self):
+        self._shutdown()
+        self.root.destroy()
+
+    def _restart(self):
+        """Start a new copy with the same arguments, monitoring if this one was, and exit."""
+        from src.restart import relaunch
+        try:
+            relaunch(monitor=self.app.is_monitoring)
+        except OSError as e:
+            messagebox.showerror("Restart", f"Could not start NetSentinel again: {e}")
+            return
+        self._statusbar_text.config(text="Restarting...")
+        self._shutdown()
         self.root.destroy()
