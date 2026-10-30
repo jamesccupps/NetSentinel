@@ -53,8 +53,10 @@ Endpoints
     POST /api/scan/new, /api/scan/upload?id=&name=, /api/scan/upload-batch?id=,
          /api/scan/start?id=, /api/scan/cancel?id=
                           upload files and scan them (token required)
+    GET /api/audit        the network audit: choices, progress, last report
     POST /api/monitoring/start, /api/monitoring/stop, /api/alerts/ack?id=,
-         /api/alerts/ack-all, /api/alerts/verdict?id=&verdict=, /api/review/bundle
+         /api/alerts/ack-all, /api/alerts/verdict?id=&verdict=, /api/review/bundle,
+         /api/audit/start?network=&gentle=, /api/audit/cancel
                           controls (token required, loopback binds only)
 """
 
@@ -283,6 +285,7 @@ class HeadlessServer:
             '/api/incidents': self._route_incidents,
             '/api/devices': self._route_devices,
             '/api/metrics': self._route_metrics,
+            '/api/audit': self._route_audit,
         }
         self.post_routes = {
             '/api/scan/new': self._post_scan_new,
@@ -296,6 +299,8 @@ class HeadlessServer:
             '/api/alerts/ack-all': self._post_alerts_ack_all,
             '/api/alerts/verdict': self._post_alert_verdict,
             '/api/review/bundle': self._post_review_bundle,
+            '/api/audit/start': self._post_audit_start,
+            '/api/audit/cancel': self._post_audit_cancel,
         }
 
     @property
@@ -512,6 +517,51 @@ class HeadlessServer:
         return {'id': alert_id, 'verdict': verdict,
                 'suppressing': entry and {'rule_id': entry['rule_id'], 'kind': entry['kind'],
                                           'value': entry['value']}}, 200
+
+    # ─── Network audit ───────────────────────────────────────────────────
+
+    def _route_audit(self, params):
+        """What the Audit page needs: whether audits are on, the choices, the job."""
+        from src import audit
+        config = self.app.config
+        job = audit.current_job()
+        status = job.status() if job is not None else None
+        report = job.report if job is not None and status['state'] in ('done', 'cancelled') else None
+        return {
+            'enabled': bool(config.get('audit', 'enabled', default=False)),
+            'controls': self.controls_allowed,
+            'choices': audit.local_networks(),
+            'saved': audit.saved_networks(config),
+            'job': status,
+            'report': report,
+        }, 'application/json'
+
+    def _post_audit_start(self, params, body, length):
+        """?network=CIDR (repeatable)&gentle=1. Audits are enabled in the desktop app."""
+        self._control(length)
+        from src import audit
+        networks = [n for n in params.get('network', []) if n.strip()]
+        gentle = (_str_param(params, 'gentle') or '') in ('1', 'true', 'yes')
+        try:
+            job = audit.start_audit(networks, gentle=gentle, config=self.app.config)
+        except audit.AuditDisabled:
+            raise RequestRefused(
+                'Network audits are off. Turn them on in the desktop app: '
+                'Settings → Network audit.', 403) from None
+        except audit.AuditBusy as e:
+            raise RequestRefused(str(e), 409) from None
+        except audit.ScopeError as e:
+            raise RequestRefused(str(e), 400) from None
+        return job.status(), 202
+
+    def _post_audit_cancel(self, params, body, length):
+        self._control(length)
+        from src import audit
+        job = audit.current_job()
+        if job is None:
+            raise RequestRefused('No audit is running.', 409)
+        job.cancel()
+        return job.status(), 200
 
     def _post_review_bundle(self, params, body, length):
         self._control(length)

@@ -164,6 +164,22 @@ DEFAULT_CONFIG = {
         "capture_max_hours": 24,
         "pseudonymise_lan": False,      # Bundles replace LAN addresses with labels
     },
+    "audit": {
+        # An active check of your own networks, run only when you ask: hosts, risky
+        # open ports, certificates. Never tries a password. See src/audit.py.
+        "enabled": False,
+        "networks": [],                 # Remembered choices; never scanned unasked
+        "gentle_networks": [],          # Always scanned gently (building/OT controllers)
+        "concurrency": 32,
+        "max_rate": 200,                # Connection attempts per second, all hosts
+        "host_delay_ms": 20,            # Minimum gap between attempts on one host
+        "gentle_concurrency": 2,
+        "gentle_max_rate": 5,
+        "gentle_host_delay_ms": 500,
+        "connect_timeout_sec": 1.0,
+        "cert_warn_days": 30,
+        "keep_reports": 20,             # Saved audits kept per network
+    },
     "whitelists": {
         "ips": [],
         "domains": [],
