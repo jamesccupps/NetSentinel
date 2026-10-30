@@ -137,6 +137,14 @@ class TestFormats(_Case):
         self.assertTrue(all(s.get('sha256') for s in report['skipped']))
         self.assertEqual(report['summary']['scanned'], 0)
 
+    def test_archive_entries_render_in_the_existing_file_tables(self):
+        # gui.py and the dashboard read indicators and secrets from every
+        # entry that is not a capture
+        report = self.scan(self.file('logs.tgz', tar_bytes({'a.log': b'x'}, 'w:gz')))
+        archive = next(f for f in report['files'] if f['type'] == 'archive')
+        self.assertEqual((archive['indicators'], archive['secrets'], archive['note']),
+                         (0, 0, 'gzip archive, 1 member'))
+
     def test_something_that_only_starts_like_an_archive_is_read_as_a_file(self):
         report = self.scan(self.file('notes.dat', b'PK\x03\x04 not really a zip ' + SECRET_LINE % 4))
         self.assertEqual(self.secret_files(report), ['notes.dat'])
