@@ -1,0 +1,22 @@
+{
+  "updated": "2026-10-29",
+  "note": "Public cryptocurrency mining pools, matched as domain suffixes, and the ports Stratum commonly runs on. Curated by hand: the free community lists (CoinBlockerLists) are no longer reliably downloadable. A copy in ~/.netsentinel/rules/ overrides this one.",
+  "domains": [
+    "2miners.com", "666pool.cn", "acc-pool.pw", "antpool.com", "baikalmine.com",
+    "beepool.org", "bitfufu.com", "braiins.com", "btc.com", "c3pool.com", "c3pool.org",
+    "ckpool.org", "comining.io", "coinfoundry.org", "cruxpool.com", "dxpool.com",
+    "e4pool.com", "emcd.io", "ethermine.org", "ezil.me", "f2pool.com", "flexpool.io",
+    "flypool.org", "foundryusapool.com", "hashcity.org", "hashvault.pro", "hellominer.com",
+    "herominers.com", "hiveon.com", "hiveon.net", "k1pool.com", "kano.is",
+    "kryptex.network", "litecoinpool.org", "luckpool.net", "minergate.com", "minexmr.com",
+    "mining-dutch.nl", "miningpoolhub.com", "monerohash.com", "moneroocean.stream",
+    "multipool.us", "nanopool.org", "nicehash.com", "p2pool.io", "pool.binance.com",
+    "poolin.com", "prohashing.com", "ravenminer.com", "rplant.xyz", "sigmapool.com",
+    "slushpool.com", "solopool.org", "sparkpool.com", "spiderpool.com", "suprnova.cc",
+    "supportxmr.com", "unmineable.com", "viabtc.com", "woolypooly.com", "xmrpool.eu",
+    "xmrpool.net", "zergpool.com", "zhizhu.top", "zpool.ca"
+  ],
+  "ports": [3032, 3333, 3334, 3335, 3336, 3357, 4444, 5555, 5730, 6666, 7777, 9999,
+            10128, 10343, 12222, 13333, 14433, 14444, 15555, 17777, 19999, 20535,
+            20580, 45560, 45700]
+}
