@@ -1306,6 +1306,35 @@ class NetSentinelGUI:
         else:
             subprocess.Popen(['xdg-open', path])
 
+    def _scan_ignore_link(self, text, finding):
+        """An "[ignore]" link after a finding; clicked, later scans leave it out."""
+        self._ignore_links = getattr(self, '_ignore_links', 0) + 1
+        tag = f'ignore{self._ignore_links}'
+        text.insert('end', '[ignore]', ('link', tag))
+        text.tag_configure('link', foreground=COLORS['accent'], underline=True)
+        text.tag_bind(tag, '<Enter>', lambda e: text.config(cursor='hand2'))
+        text.tag_bind(tag, '<Leave>', lambda e: text.config(cursor=''))
+        text.tag_bind(tag, '<Button-1>',
+                      lambda e, f=finding, t=tag: self._scan_ignore(text, f, t))
+
+    def _scan_ignore(self, text, finding, tag):
+        from src.scan_ignore import IgnoreList
+        try:
+            IgnoreList().add_finding(finding)
+        except (OSError, ValueError) as e:
+            messagebox.showerror("Ignore", f"Could not add it to the ignore list: {e}")
+            return
+        ranges = text.tag_ranges(tag)
+        if ranges:
+            state = text.cget('state')
+            text.config(state='normal')
+            text.delete(ranges[0], ranges[1])
+            text.insert(ranges[0], '(ignored from now on)', 'value')
+            text.config(state=state)
+        self._statusbar_text.config(
+            text="Ignored. Later scans leave it out; the browser's Scan Files page lists "
+                 "and removes ignored items.")
+
     def _pcap_set_busy(self, busy):
         state = 'disabled' if busy else 'normal'
         for btn in (self._pcap_btn, self._pcap_folder_btn, self._pcap_many_btn):
@@ -1395,11 +1424,23 @@ class NetSentinelGUI:
         if s['skipped']:
             st.insert('end', f"  Skipped:   {s['skipped']}\n")
 
+        if report.get('malware'):
+            st.insert('end', '\nKNOWN-BAD FILES (on your hash lists)\n', 'header')
+            for m in report['malware']:
+                st.insert('end', f"  {m['file']}\n      sha256 {m['sha256']}  "
+                                 f"({m.get('feed', '')})\n", 'alert_high')
+
         if report['threats']:
             st.insert('end', '\nON THREAT FEEDS\n', 'header')
             for t in report['threats']:
                 st.insert('end', f"  {t['value']}  ({t.get('feed', '')} {t.get('category', '')})\n"
                                  f"      in {', '.join(t['files'][:5])}\n", 'alert_high')
+
+        if report.get('suspicious'):
+            st.insert('end', '\nSUSPICIOUS (weak feed matches, not known-bad)\n', 'header')
+            for t in report['suspicious'][:100]:
+                st.insert('end', f"  {t['value']}  ({t.get('category') or t.get('description', '')})\n"
+                                 f"      in {', '.join(t['files'][:5])}\n", 'alert_med')
 
         st.insert('end', '\nEXPOSED PASSWORDS, KEYS AND TOKENS\n', 'header')
         if not exposed:
@@ -1409,14 +1450,23 @@ class NetSentinelGUI:
                              f"{cred['value']}\n", 'alert_high')
             st.insert('end', f"      {cred['source']}\n"
                              f"      in {', '.join(cred['captures'])}\n")
-        for sec in report['secrets']:
-            st.insert('end', f"  {sec['label']}: {sec['value']}\n", 'alert_high')
-            st.insert('end', f"      {sec['file']}, line {sec['line']}\n")
+        for sec in report['secrets'][:1000]:
+            st.insert('end', f"  {sec['label']}: {sec['value']}  ", 'alert_high')
+            self._scan_ignore_link(st, sec)
+            st.insert('end', f"\n      {sec['file']}, line {sec['line']}\n")
+
+        if report.get('findings'):
+            st.insert('end', '\nSUSPICIOUS SCRIPTS AND MACROS\n', 'header')
+            for f in report['findings'][:500]:
+                st.insert('end', f"  {f['label']}: {f['value']}  ", 'alert_med')
+                self._scan_ignore_link(st, f)
+                st.insert('end', f"\n      {f['file']}, line {f['line']}\n")
 
         titles = {'ipv4': 'IPv4 ADDRESSES', 'ipv6': 'IPv6 ADDRESSES', 'domain': 'DOMAINS',
-                  'url': 'URLS', 'email': 'EMAIL ADDRESSES', 'mac': 'MAC ADDRESSES'}
+                  'url': 'URLS', 'email': 'EMAIL ADDRESSES', 'mac': 'MAC ADDRESSES',
+                  'host': 'HOST NAMES', 'unc': 'UNC PATHS'}
         for kind, title in titles.items():
-            entries = report['indicators'][kind]
+            entries = report['indicators'].get(kind, [])
             if not entries:
                 continue
             st.insert('end', f"\n{title} ({len(entries)})\n", 'header')
@@ -2563,6 +2613,17 @@ class NetSentinelGUI:
                               'Folder (blank: ~/.netsentinel/review)', '')
         self._add_setting_row(review_card, 'review.capture_budget_mb',
                               'Rolling capture budget (MB)', '2048')
+
+        geo_card = Card(scroll_frame, title="GEOIP (applies at next start)")
+        geo_card.pack(fill='x', padx=8, pady=(0, 8))
+        self._add_setting_toggle(
+            geo_card, 'geoip.enabled',
+            'Show the country and network of destinations (downloads DB-IP Lite monthly)',
+            False)
+        from src.geoip import ATTRIBUTION
+        tk.Label(geo_card, text=ATTRIBUTION, font=('Segoe UI', 8),
+                 fg=COLORS['text_dim'], bg=COLORS['bg_card'], anchor='w'
+                 ).pack(fill='x')
 
         audit_card = Card(scroll_frame, title="NETWORK AUDIT")
         audit_card.pack(fill='x', padx=8, pady=(0, 8))

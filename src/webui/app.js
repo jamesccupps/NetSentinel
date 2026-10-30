@@ -222,7 +222,11 @@ async function refreshOverview() {
   }
   bars($('protocols'), o.protocols.map((p) => ({ name: p.name, value: p.count, fraction: p.fraction })),
     (r) => `${(r.fraction * 100).toFixed(1)}%`);
-  bars($('talkers'), o.top_talkers.map((t) => ({ name: t.ip, value: t.bytes })), (r) => fmtBytes(r.value));
+  bars($('talkers'), o.top_talkers.map((t) => ({
+    name: [t.ip, t.country, t.as_org].filter(Boolean).join(' · '), value: t.bytes,
+  })), (r) => fmtBytes(r.value));
+  $('geoip-credit').hidden = !o.geoip_attribution;
+  $('geoip-credit').textContent = o.geoip_attribution || '';
   const res = o.resources || {};
   const rate = Number(o.capture.sample_rate || 1);
   const facts = [
@@ -239,6 +243,7 @@ async function refreshOverview() {
     ['Threads', res.available ? fmtNum(res.threads) : '—'],
     ['Packets dropped', fmtNum(o.capture.packets_dropped)],
     ['Analysing', rate > 1 ? `1 in ${rate} packets (busy)` : 'Every packet'],
+    ['Skipped by sampling', fmtNum(o.capture.packets_sampled_out)],
   ];
   $('engine').replaceChildren(...facts.flatMap(([k, v]) => [h('dt', null, k), h('dd', null, v)]));
 }
@@ -484,7 +489,48 @@ async function cancelScan() {
   if (scan.id) await api(`/api/scan/cancel?id=${scan.id}`, { method: 'POST' }).catch(() => {});
 }
 
-const KINDS = { ipv4: 'IPv4', ipv6: 'IPv6', domain: 'Domains', url: 'URLs', email: 'Emails', mac: 'MAC addresses' };
+const KINDS = {
+  ipv4: 'IPv4', ipv6: 'IPv6', domain: 'Domains', url: 'URLs', email: 'Emails',
+  mac: 'MAC addresses', host: 'Host names', unc: 'UNC paths',
+};
+
+// ─── Scan ignore list ────────────────────────────────────────────────────
+
+function ignoreButton(finding) {
+  if (!overview || !overview.controls) return null;
+  return h('button', {
+    type: 'button', class: 'ack secondary',
+    onclick: async (e) => {
+      e.stopPropagation();
+      try {
+        await api('/api/scan/ignore', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ finding }),
+        });
+        e.target.replaceWith(h('span', { class: 'acked-tag' }, 'ignored from now on'));
+        refreshIgnored();
+      } catch (err) {
+        toast(err.message);
+      }
+    },
+  }, 'Ignore');
+}
+
+async function refreshIgnored() {
+  const { ignored } = await api('/api/scan/ignored');
+  const panel = $('scan-ignored');
+  panel.hidden = !ignored.length;
+  panel.replaceChildren(h('h2', null, 'Ignored in scans'),
+    h('p', { class: 'hint' }, 'Later scans leave these out. Card numbers and SSNs are ignored only at that file and line.'),
+    h('div', { class: 'table-wrap' }, table(['What', 'Where', 'Added', ''], ignored.map((e) => h('tr', null,
+      h('td', null, `${e.label || e.kind}: `, h('span', { class: 'mono' }, e.shown || '')),
+      h('td', { class: 'mono wrap' }, e.file ? `${e.file}${e.line ? ':' + e.line : ''}` : 'anywhere'),
+      h('td', null, e.added ? new Date(e.added * 1000).toLocaleDateString() : ''),
+      h('td', null, overview && overview.controls ? h('button', {
+        type: 'button', class: 'ack secondary',
+        onclick: () => control(`/api/scan/unignore?id=${encodeURIComponent(e.id)}`, refreshIgnored),
+      }, 'Remove') : null))))));
+}
 
 function csv(rows) {
   const cell = (v) => {
@@ -508,7 +554,32 @@ function renderReport() {
     Object.assign(card('On threat feeds', fmtNum(s.threats), 'known-bad addresses'), { className: `card ${s.threats ? 'bad' : 'good'}` }),
     card('IP addresses', fmtNum(s.ipv4 + s.ipv6), `${r.indicators.ipv4.filter((e) => e.scope === 'public').length} public IPv4`),
     card('Domains', fmtNum(s.domain), `${fmtNum(s.url)} URLs`),
-    card('Emails', fmtNum(s.email), `${fmtNum(s.mac)} MAC addresses`)));
+    card('Emails', fmtNum(s.email), `${fmtNum(s.mac)} MAC addresses`),
+    Object.assign(card('Known-bad files', fmtNum(s.malware || 0), 'on your hash lists'), { className: `card ${s.malware ? 'bad' : 'good'}` }),
+    card('Suspicious scripts', fmtNum(s.findings || 0), `${fmtNum(s.ignored || 0)} ignored`)));
+
+  if ((r.malware || []).length) {
+    out.append(h('div', { class: 'panel flush' }, h('div', { class: 'table-wrap' }, table(
+      ['Known-bad file', 'SHA-256', 'List'],
+      r.malware.map((m) => h('tr', null, h('td', { class: 'wrap mono' }, m.file),
+        h('td', { class: 'mono wrap' }, m.sha256), h('td', null, m.feed || '')))))));
+  }
+
+  if ((r.findings || []).length) {
+    out.append(h('div', { class: 'panel flush' }, h('div', { class: 'table-wrap' }, table(
+      ['Suspicious script or macro', 'What it does', 'Where', ''],
+      r.findings.slice(0, 500).map((f) => h('tr', null,
+        h('td', null, h('span', { class: `badge ${f.severity || 'MEDIUM'}` }, f.severity || 'MEDIUM'), ` ${f.label}`),
+        h('td', null, f.value), h('td', { class: 'wrap mono' }, `${f.file}:${f.line}`),
+        h('td', null, ignoreButton(f))))))));
+  }
+
+  if ((r.suspicious || []).length) {
+    out.append(h('div', { class: 'panel flush' }, h('div', { class: 'table-wrap' }, table(
+      ['Suspicious (weak feed match)', 'Kind', 'Why', 'Found in'],
+      r.suspicious.map((t) => h('tr', null, h('td', { class: 'mono' }, t.value), h('td', null, t.kind),
+        h('td', null, t.category || t.description || ''), h('td', { class: 'wrap' }, (t.files || []).join(', '))))))));
+  }
 
   if (r.threats.length) {
     out.append(h('div', { class: 'panel flush' }, h('div', { class: 'table-wrap' }, table(
@@ -523,7 +594,8 @@ function renderReport() {
       h('td', { class: 'mono' }, c.value), h('td', { class: 'wrap' }, `${c.source} in ${c.captures.join(', ')}`))),
     ...r.secrets.map((x) => h('tr', null,
       h('td', null, h('span', { class: `badge ${x.severity}` }, x.severity), ` ${x.label}`),
-      h('td', { class: 'mono' }, x.value), h('td', { class: 'wrap mono' }, `${x.file}:${x.line}`))),
+      h('td', { class: 'mono' }, x.value),
+      h('td', { class: 'wrap mono' }, `${x.file}:${x.line}`, ' ', ignoreButton(x)))),
   ];
   const secretCsv = () => download('netsentinel-secrets.csv', csv([['kind', 'value_masked', 'file', 'line'],
     ...r.credentials.map((c) => [`${c.protocol} ${c.credential_type}`, c.value, c.captures.join('; '), '']),
@@ -563,12 +635,13 @@ function renderReport() {
             ...entries.map((e) => [e.value, e.scope || '', e.count, e.files.join('; ')])]), 'text/csv'),
         }, 'Download CSV')),
       shown.length
-        ? h('div', { class: 'table-wrap' }, table(['Value', 'Scope', 'Seen', 'Found in'],
+        ? h('div', { class: 'table-wrap' }, table(['Value', 'Scope', 'Seen', 'Found in', ''],
           shown.slice(0, 500).map((e) => h('tr', null,
             h('td', { class: 'mono wrap' }, e.value),
             h('td', null, e.scope ? h('span', { class: `badge ${e.scope}` }, e.scope) : ''),
             h('td', null, fmtNum(e.count)),
-            h('td', { class: 'wrap' }, e.files.slice(0, 5).join(', ') + (e.files.length > 5 ? ` and ${e.files.length - 5} more` : ''))))))
+            h('td', { class: 'wrap' }, e.files.slice(0, 5).join(', ') + (e.files.length > 5 ? ` and ${e.files.length - 5} more` : '')),
+            h('td', null, ignoreButton({ kind: scan.kind, value: e.value }))))))
         : h('div', { class: 'empty' }, entries.length ? 'Nothing matches the filter.' : `No ${KINDS[scan.kind]} found.`),
       shown.length > 500 ? h('div', { class: 'empty' }, `Showing 500 of ${shown.length}. Download the CSV for all of them.`) : null,
     ].filter(Boolean));
@@ -757,7 +830,7 @@ const PAGES = {
   alerts: { refresh: refreshAlerts, every: 5000 },
   devices: { refresh: refreshDevices, every: 5000 },
   incidents: { refresh: refreshIncidents, every: 10000 },
-  scan: { refresh: () => Promise.resolve(), every: 0 },
+  scan: { refresh: refreshIgnored, every: 10000 },
   audit: { refresh: refreshAudit, every: 2000 },
 };
 let current = null, timer = null;

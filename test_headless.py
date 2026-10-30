@@ -533,6 +533,33 @@ class TestControls(_ApiTestCase):
         self.assertEqual(status, 400, 'a public range is never scanned')
         self.assertIn('not a private network', json.loads(reply)['error'])
 
+    def test_scan_findings_can_be_ignored_and_unignored(self):
+        finding = {'kind': 'ipv4', 'value': '203.0.113.77'}
+        status, _ = self.post('/api/scan/ignore', json.dumps({'finding': finding}).encode(),
+                              **{'Content-Type': 'application/json'})
+        self.assertEqual(status, 201)
+        entries = self.get_json('/api/scan/ignored')['ignored']
+        mine = [e for e in entries if e.get('shown') == '203.0.113.77']
+        self.assertEqual(len(mine), 1)
+        self.assertEqual(self.post(f"/api/scan/unignore?id={mine[0]['id']}")[0], 200)
+        self.assertFalse(any(e.get('shown') == '203.0.113.77'
+                             for e in self.get_json('/api/scan/ignored')['ignored']))
+        self.assertEqual(self.post('/api/scan/ignore', b'not json')[0], 400)
+        self.assertEqual(self.post('/api/scan/ignore', b'{}', token='wrong')[0], 403)
+
+    def test_the_overview_credits_db_ip_only_when_geoip_is_on(self):
+        self.assertIsNone(self.get_json('/api/overview')['geoip_attribution'])
+
+        class _Geo:
+            def annotate_talkers(self, talkers):
+                return [{'ip': ip, 'bytes': b, 'country': 'DE'} for ip, b in talkers]
+
+            def get_stats(self):
+                return {'attribution': 'IP Geolocation by DB-IP'}
+        self.app.ids_engine = type('Ids', (), {'geoip': _Geo()})()
+        o = self.get_json('/api/overview')
+        self.assertEqual(o['geoip_attribution'], 'IP Geolocation by DB-IP')
+
     def test_the_overview_says_whether_controls_work(self):
         self.assertTrue(self.get_json('/api/overview')['controls'])
 
