@@ -21,6 +21,12 @@ result, but not looking is a stronger guarantee than looking and discarding, and
 it is the one the site asked for. Those segments still produce flow events —
 who talked to whom, when, how much — which is the whole point of metadata-only.
 
+"On a segment" means by any measure, not only the outer tag: a frame carrying a
+restricted tag anywhere in a stacked (QinQ) header, or an address in a
+restricted subnet under any tag or none, is metadata-only too. The routed copy
+of a door controller's traffic arrives on the destination VLAN with the door
+controller's address, and its payload is the same payload.
+
 Trunk mirrors count each routed packet twice
 --------------------------------------------
 A routed packet crosses the mirror twice: once arriving from the sender on the
@@ -48,6 +54,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(
     os.path.abspath(__file__)))))
 
 from netmon.events import Event, _is_public                       # noqa: E402
+from netmon.leakcheck import frame_layout                         # noqa: E402
 from netmon.protocols import bacnet, site                         # noqa: E402
 
 logger = logging.getLogger("netmon.sources.pcap")
@@ -97,8 +104,30 @@ def _first(packet, layer):
 
 def _vlan_of(packet, scapy):
     """The outermost 802.1Q tag, or None for an untagged frame."""
-    tag = _first(packet, scapy.Dot1Q)
-    return int(tag.vlan) if tag is not None else None
+    tags = frame_layout(_raw(packet))['tags']
+    return tags[0] if tags else None
+
+
+def _raw(packet):
+    """The frame's bytes as read, without re-serialising it if avoidable."""
+    original = getattr(packet, 'original', None)
+    if original:
+        return original
+    try:
+        return bytes(packet)
+    except Exception:                                          # pragma: no cover
+        return b''
+
+
+def _metadata_only(profile, layout):
+    """Whether any tag or address in the frame belongs to a restricted segment."""
+    if any(not profile.may_store_payload(tag) for tag in layout['tags']):
+        return True
+    for ip in (layout['src_ip'], layout['dst_ip']):
+        vlan = profile.vlan_for_ip(ip) if ip else None
+        if vlan is not None and not profile.may_store_payload(vlan.id):
+            return True
+    return False
 
 
 def _transport_payload(packet, scapy):
@@ -126,7 +155,7 @@ def _transport_payload(packet, scapy):
 
 # ─── Packet to events ────────────────────────────────────────────────────────
 
-def packet_to_events(packet, profile=None, scapy=None):
+def packet_to_events(packet, profile=None, scapy=None, layout=None):
     """
     Turn one packet into zero or more Events.
 
@@ -138,7 +167,10 @@ def packet_to_events(packet, profile=None, scapy=None):
     ether = _first(packet, scapy.Ether)
     ip = _first(packet, scapy.IP) or _first(packet, scapy.IPv6)
     arp = _first(packet, scapy.ARP)
-    vlan = _vlan_of(packet, scapy)
+    # The tags from the frame's bytes: Scapy files an 802.1ad frame's inner
+    # tag as the first Dot1Q layer, so asking it gave the wrong VLAN for QinQ.
+    layout = layout or frame_layout(_raw(packet))
+    vlan = layout['tags'][0] if layout['tags'] else None
 
     if ip is None and arp is None:
         return []
@@ -164,9 +196,11 @@ def packet_to_events(packet, profile=None, scapy=None):
 
     # The prohibition, applied before anything is parsed rather than after.
     # Not looking is a stronger guarantee than looking and discarding.
-    if profile is not None and not profile.may_store_payload(vlan):
+    if profile is not None and _metadata_only(profile, layout):
         event = Event(kind='flow', **base)
         event.fields['metadata_only'] = True
+        if len(layout['tags']) > 1:
+            event.fields['vlan_stack'] = list(layout['tags'])
         return [event]
 
     payload = _transport_payload(packet, scapy)
@@ -552,7 +586,8 @@ class _RouterDedup:
         return True
 
 
-def read_pcap(path, profile=None, limit=None, bpf=None, dedup_router=True):
+def read_pcap(path, profile=None, limit=None, bpf=None, dedup_router=True,
+              leaks=None):
     """
     Read a capture file, yielding Events.
 
@@ -564,6 +599,8 @@ def read_pcap(path, profile=None, limit=None, bpf=None, dedup_router=True):
             rather than by hand; the module docstring there explains why.
         dedup_router: drop the relayed copy of routed packets. See the class
             above.
+        leaks: a netmon.leakcheck.LeakCounter, shown every frame, which
+            reports restricted traffic on disk or outside its VLAN.
 
     A generator: a day of mirrored traffic does not fit in memory, and a caller
     that wants a list can ask for one knowingly.
@@ -587,8 +624,11 @@ def read_pcap(path, profile=None, limit=None, bpf=None, dedup_router=True):
 
     try:
         for packet in reader:
+            layout = frame_layout(_raw(packet))
+            if leaks is not None:
+                leaks.observe(None, getattr(packet, 'time', 0), layout=layout)
             try:
-                events = packet_to_events(packet, profile, scapy)
+                events = packet_to_events(packet, profile, scapy, layout=layout)
             except Exception:
                 # One malformed packet must not end the capture. The parsers
                 # are bounds-checked, so this is for whatever Scapy does with a
