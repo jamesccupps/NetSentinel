@@ -29,7 +29,16 @@ jobs:
           pip install scapy psutil scikit-learn numpy cryptography pyyaml coverage maxminddb "py7zr>=1.0" python-evtx
 
       - name: Unit and regression tests
-        run: python -m coverage run --source=src -m unittest discover -s . -p "test_*.py" -v
+        shell: bash
+        run: |
+          set -o pipefail
+          python -m coverage run --source=src -m unittest discover -s . -p "test_*.py" -v 2>&1 | tee test-output.txt
+
+      # The log needs a GitHub sign-in; annotations are public.
+      - name: Annotate failing tests
+        if: failure()
+        shell: bash
+        run: python tools/ci_failures.py test-output.txt
 
       - name: Integration check
         run: python tools/integration_check.py
@@ -60,7 +69,15 @@ jobs:
           pip install scapy psutil scikit-learn numpy cryptography pyyaml maxminddb "py7zr>=1.0" python-evtx
 
       - name: Unit and regression tests
-        run: python -m unittest discover -s . -p "test_*.py" -v
+        shell: bash
+        run: |
+          set -o pipefail
+          python -m unittest discover -s . -p "test_*.py" -v 2>&1 | tee test-output.txt
+
+      - name: Annotate failing tests
+        if: failure()
+        shell: bash
+        run: python tools/ci_failures.py test-output.txt
 
       - name: Integration check
         run: python tools/integration_check.py
