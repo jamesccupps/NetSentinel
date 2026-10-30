@@ -27,6 +27,13 @@ from the profile, never from the repository, and never logged. `load_config`
 checks the file's mode and refuses one that is group- or world-readable, because
 a secrets file everyone can read is not a secrets file.
 
+Email
+-----
+The digest can also be emailed (`EmailConfig`, `send_email_digest`): STARTTLS
+or SMTPS with the certificate verified, settings and credentials from the same
+owner-only secrets file and nowhere else, and plain SMTP refused except to a
+relay on this machine with nothing to log in with.
+
 Quiet by design
 ---------------
 Push is reserved for the `push` tier. A notification for something low is how

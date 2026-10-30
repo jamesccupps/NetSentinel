@@ -500,7 +500,7 @@ def _parse_networks(lines, where):
         try:
             networks.append(ipaddress.ip_network(text, strict=False))
         except ValueError:
-            raise ProfileError(f"{where}: '{text}' is not a network")
+            raise ProfileError(f"{where}: '{text}' is not a network") from None
     return tuple(networks)
 
 
