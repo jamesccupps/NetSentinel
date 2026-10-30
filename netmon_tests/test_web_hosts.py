@@ -118,6 +118,13 @@ class TestCrossSiteWrites(_Case):
         status, _ = self.post({'Origin': f'HTTP://127.0.0.1:{self.port}'})
         self.assertEqual(status, 200)
 
+    def test_a_body_that_is_not_an_object_is_a_400_not_a_500(self):
+        status, body = self.request(
+            'POST', '/api/silence', f'127.0.0.1:{self.port}', body=['not', 'a', 'dict'],
+            headers={'X-Netmon-Token': self.server.token})
+        self.assertEqual(status, 400)
+        self.assertIn('JSON object', body)
+
     def test_same_origin_is_allowed(self):
         status, _ = self.post({'Origin': f'http://127.0.0.1:{self.port}',
                                'Sec-Fetch-Site': 'same-origin'})
