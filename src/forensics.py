@@ -135,6 +135,22 @@ def is_private_address(ip):
     return _is_private(ip)
 
 
+# Updaters that download over plain HTTP by design: what they fetch is signed and
+# checked before use, so the transport protects nothing. Windows Update and Edge's
+# updater were reported as insecure services. Matched on a dot boundary, so
+# eset.com.example.net is not ESET (a substring match used to say it was).
+SOFTWARE_UPDATE_HOSTS = (
+    'windowsupdate.com', 'update.microsoft.com', 'delivery.mp.microsoft.com',
+    'download.microsoft.com', 'officecdn.microsoft.com', 'eset.com',
+    'edgedl.me.gvt1.com', 'dl.google.com', 'steamcontent.com',
+)
+
+
+def is_software_update_host(host):
+    host = (host or '').lower().strip().rstrip('.').split(':')[0]
+    return any(host == s or host.endswith('.' + s) for s in SOFTWARE_UPDATE_HOSTS)
+
+
 FTP_USER_RE = re.compile(rb'USER\s+(\S+)', re.IGNORECASE)
 FTP_PASS_RE = re.compile(rb'PASS\s+(\S+)', re.IGNORECASE)
 
@@ -1755,6 +1771,16 @@ class NetworkForensics:
         - Attack patterns in URLs (SQLi, path traversal, command injection)
         - Exploit signatures (Log4Shell, Shellshock)
         """
+        host_match = HTTP_HOST_RE.search(payload)
+        request_host = (host_match.group(1).decode('utf-8', errors='replace').lower()
+                        if host_match else '')
+        svc = self.insecure_services.get((dst, port))
+        if svc is not None and request_host and HTTP_REQUEST_RE.search(payload):
+            # One address can serve other sites too, so the service counts as an
+            # updater only while every request to it has been for one.
+            svc['update_only'] = (is_software_update_host(request_host)
+                                  and svc.get('update_only', True))
+
         # Extract user agent
         ua_match = HTTP_USER_AGENT_RE.search(payload)
         if ua_match:
@@ -1847,17 +1873,7 @@ class NetworkForensics:
             # No User-Agent header at all (many attack tools omit it)
             # But skip known software update services that legitimately omit UA
             if HTTP_REQUEST_RE.search(payload):
-                host_for_ua = ''
-                hm = HTTP_HOST_RE.search(payload)
-                if hm:
-                    host_for_ua = hm.group(1).decode('utf-8', errors='replace').lower()
-                KNOWN_NO_UA_SERVICES = {
-                    'update.eset.com', 'eset.com', 'windowsupdate.com',
-                    'update.microsoft.com', 'ctldl.windowsupdate.com',
-                    'download.windowsupdate.com',
-                }
-                is_known_service = any(svc in host_for_ua for svc in KNOWN_NO_UA_SERVICES)
-                if not is_known_service:
+                if not is_software_update_host(request_host):
                     dedup_key = (src, 'no_ua')
                     if dedup_key not in self._http_ua_alerted:
                         self._http_ua_alerted.add(dedup_key)
@@ -2216,6 +2232,12 @@ class NetworkForensics:
         sport = pkt_info.src_port
         server_key = (src, sport)
 
+        # What software someone else's server runs is theirs to hide. Reporting
+        # it made every plain-HTTP fetch from ESET, Windows Update or Steam a
+        # "Sensitive Data in Transit" alert; on this network it is worth knowing.
+        if not is_private_address(src):
+            return
+
         if server_key in self._http_servers:
             return  # Already reported this server
 
@@ -2397,6 +2419,8 @@ class NetworkForensics:
         # Generate insecure service findings
         for key, svc in self.insecure_services.items():
             svc['src_ips'] = list(svc['src_ips'])[:20]
+            if svc.get('update_only'):
+                continue        # signed software updates (SOFTWARE_UPDATE_HOSTS)
             self.security_findings.append({
                 'type': 'insecure_protocol',
                 'risk': svc['risk'],

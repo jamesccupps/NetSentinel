@@ -2,7 +2,7 @@
 
 ## v1.9.0 — Watching this PC's own traffic, review mode, and an audit of your network
 
-**2076 unit tests** (up from 1456) plus 14 integration checks. The suite no
+**2088 unit tests** (up from 1456) plus 14 integration checks. The suite no
 longer downloads threat feeds, so it runs in about a minute.
 
 ### This PC's own traffic is inspected
@@ -123,6 +123,30 @@ effect without hunting for the process. `--monitor` starts monitoring as soon as
 the window opens. A dashboard tab left open across a restart picks up the new
 copy's token by itself, rather than answering every button with "missing or
 wrong token" until it is reloaded. The tray uses pystray (LGPL-3.0) and Pillow.
+
+### What the first review of real alerts found
+
+The first exe with review mode raised eight alerts in ten minutes, every one a
+false positive. Fixed:
+- **This computer was taken for a gateway.** The default-route parser read every
+  address on the line, the interface's included.
+- **A web server's version banner was "Sensitive Data in Transit".** Plain-HTTP
+  fetches from ESET, Windows Update, Let's Encrypt and Steam each raised a
+  "[LIKELY THREAT]". Banners are now reported only for servers on your network.
+- **Signed software updates were insecure services.** Windows Update, Edge's
+  updater and others download over plain HTTP by design. A server stops counting
+  as an updater the moment anything else is fetched from it.
+- **A WebRTC call was name poisoning.** Browsers answer mDNS for random UUID
+  names standing for their own addresses; those no longer count.
+- **The verifier called every sensitive-data finding "LIKELY THREAT 70%".** It
+  now goes by the kind of finding: card data, keys and control writes are
+  confirmed; cookies and attack patterns are likely threats; banners, devices
+  and uncommon HTTP clients (a headless browser run by a test, here) are left
+  for you to judge.
+- **Review bundles built from the command line could not read the traffic.**
+  Every packet was "Raw". And when an alert involved this computer, the saved
+  traffic was all of its traffic, and the alert's own connection fell past the
+  digest's 400-line cut. Each digest now opens with the alert's own connection.
 
 ### The dashboard can do things, on this computer only
 

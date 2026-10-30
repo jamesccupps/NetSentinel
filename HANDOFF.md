@@ -1,4 +1,4 @@
-# Handoff: v1.9.0 pushed, CI green on Linux and Windows; a test exe next
+# Handoff: v1.9.0 in James's hands; fixes from the first exe test not yet pushed
 
 Kept current during the work so it survives a context reset. Last updated
 2026-10-30 by the local Claude Code session on James's desktop. Read `CLAUDE.md`
@@ -11,7 +11,7 @@ Every open item from the v1.8.0 handoff is done on local `main`, as version 1.9.
 `CHANGELOG.md` has the full list. Status:
 - **Commits:** pushed to `main` as `11366aa` on 2026-10-29, with James's OK. That
   is 36 commits past `7d6fc3c`, which v1.8.0 can be tagged at.
-- **Tests:** 2,076 unit tests pass (63 skips), as do the 14 integration checks and
+- **Tests:** 2,088 unit tests pass (63 skips), as do the 14 integration checks and
   ruff.
 - **Live run:** a headless run with `--review` on real traffic was checked in the
   browser. Start/stop, acknowledge, verdicts and bundle building all worked, and
@@ -90,10 +90,16 @@ This PC is 192.168.8.32 (Gigabyte NIC d8:5e:d3:07:16:a7).
   msedge.b.tlu.dl.delivery.mp.microsoft.com, which is plain HTTP by design (the
   content is signed).
 
+Two more arrived after the review, both of the first kind: Let's Encrypt
+(yr1.c.lencr.org) and ESET again.
+
 No verdicts were recorded. A false-positive verdict suppresses by IP, and here
 that would hide real Responder alerts from this PC.
 
-**NetSentinel bugs this review found** (not yet fixed):
+**NetSentinel bugs this review found.** All 7 are fixed, with tests in
+`test_first_review.py` that fail on the old code. They are committed locally
+but not pushed. The real review folder now builds a readable bundle from the
+command line.
 1. **The PC's own address is listed as a gateway.**
    `net_detect.detect_default_gateway` takes every address on the
    `route print 0.0.0.0` line, including the Interface column. The log shows

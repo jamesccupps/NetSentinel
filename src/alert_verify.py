@@ -1028,22 +1028,52 @@ class AlertVerifier:
     # ═══════════════════════════════════════════════════════════════
     # FORENSICS: SENSITIVE DATA
     # ═══════════════════════════════════════════════════════════════
+    # Forensics' findings, by what they say about an attack. Every kind used to be
+    # "LIKELY THREAT 70%", a server's version banner as much as a stolen cookie,
+    # so the label said nothing.
+    _SENSITIVE_CRITICAL = {'Private Key', 'Credit Card', 'SSN', 'Modbus WRITE',
+                           'BACnet WRITE', 'BACnet RESET', 'SMBv1', 'VNC Session',
+                           'Parking Card Data (PCI-DSS Violation)'}
+    # Readable by anyone on the path, or an attack in the request itself.
+    _SENSITIVE_EXPOSED = {'Session Cookie', 'Redis No Auth', 'HTTP Attack Pattern'}
+    # What a device or protocol is, not something done to it: worth knowing, and
+    # no sign of an attack on its own.
+    _SENSITIVE_OBSERVED = {'HTTP Server Info', 'BACnet Discovery', 'BACnet',
+                           'Modbus/SCADA', 'MQTT/IoT', 'rsync', 'Elasticsearch',
+                           'Network Printer', 'Parking System Heartbeat',
+                           'Scripted HTTP Client', 'Missing User Agent'}
+
     def _verify_sensitive_data(self, alert, evidence):
-        reasoning = []
         data_type = evidence.get('data_type', '')
+        severity = str(getattr(alert.severity, 'name', alert.severity)).upper()
 
-        critical_types = {'Private Key', 'Credit Card', 'SSN', 'Modbus WRITE',
-                         'BACnet WRITE', 'BACnet RESET', 'SMBv1', 'VNC Session'}
-        if data_type in critical_types:
-            reasoning.append(f"Critical sensitive data: {data_type}")
+        if data_type in self._SENSITIVE_CRITICAL:
             return {'verdict': AlertVerdict.VERIFIED_THREAT, 'confidence': 0.9,
-                    'reasoning': reasoning,
+                    'reasoning': [f"Critical sensitive data: {data_type}"],
                     'summary': f"Confirmed: {data_type} detected in unencrypted traffic"}
-
-        reasoning.append(f"Sensitive data detected: {data_type}")
-        return {'verdict': AlertVerdict.LIKELY_THREAT, 'confidence': 0.7,
-                'reasoning': reasoning,
-                'summary': f"{data_type} found in network traffic"}
+        if data_type in self._SENSITIVE_EXPOSED:
+            return {'verdict': AlertVerdict.LIKELY_THREAT, 'confidence': 0.7,
+                    'reasoning': [f"Exposed in transit: {data_type}"],
+                    'summary': f"{data_type} found in network traffic"}
+        if data_type == 'Suspicious User Agent':
+            # Forensics rates a known attack tool's or malware's agent CRITICAL; the
+            # rest are uncommon clients, a headless browser driven by a test as often
+            # as anything worse.
+            if severity == 'CRITICAL':
+                return {'verdict': AlertVerdict.LIKELY_THREAT, 'confidence': 0.8,
+                        'reasoning': ["User agent of a known attack tool or malware"],
+                        'summary': 'Attack tool or malware user agent'}
+            return {'verdict': AlertVerdict.INCONCLUSIVE, 'confidence': 0.4,
+                    'reasoning': ["Uncommon HTTP client, often automation or a headless "
+                                  "browser"],
+                    'summary': 'Uncommon HTTP client: check which program sent it'}
+        if data_type in self._SENSITIVE_OBSERVED:
+            return {'verdict': AlertVerdict.INCONCLUSIVE, 'confidence': 0.3,
+                    'reasoning': [f"Observed, not an attack in itself: {data_type}"],
+                    'summary': f"{data_type} seen in network traffic"}
+        return {'verdict': AlertVerdict.INCONCLUSIVE, 'confidence': 0.5,
+                'reasoning': [f"No specific check for {data_type or 'this finding'}"],
+                'summary': f"{data_type or 'Sensitive data'} found in network traffic"}
 
     # ═══════════════════════════════════════════════════════════════
     # IOC NETWORK (TOR, DGA, DoH)

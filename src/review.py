@@ -452,22 +452,45 @@ def _packet_line(pkt, redact, include_payloads):
     return redact.text(line, 600)
 
 
-def digest_pcap(path, redact, include_payloads=False, max_lines=DIGEST_MAX_LINES):
-    """A line per packet of a capture, as text. Packets past max_lines are counted."""
-    from scapy.utils import PcapReader
-    lines, total, first, last = [], 0, None, None
+def _between(pkt, pair):
+    """Whether a packet goes between the two addresses of pair, either way."""
+    from scapy.all import IP, IPv6
+    layer = pkt[IP] if IP in pkt else (pkt[IPv6] if IPv6 in pkt else None)
+    return layer is not None and {str(layer.src), str(layer.dst)} == pair
+
+
+def digest_pcap(path, redact, include_payloads=False, max_lines=DIGEST_MAX_LINES,
+                focus=None):
+    """
+    A line per packet of a capture, as text. Packets past max_lines are counted.
+
+    focus is the alert's two addresses. An alert on this computer saves all of
+    its traffic, and the alert's own connection was lost past the line limit, so
+    its packets come first.
+    """
+    # scapy.all, not scapy.utils: only importing the layers registers Ethernet,
+    # and without it a bundle built from the command line read every packet as Raw.
+    from scapy.all import PcapReader
+    pair = {str(a) for a in focus or () if a}
+    pair = pair if len(pair) == 2 else None
+    own, other, total, first, last = [], [], 0, None, None
     talkers = Counter()
+
+    def describe(pkt, n):
+        try:
+            return _packet_line(pkt, redact, include_payloads)
+        except Exception as e:      # one odd frame must not lose the rest
+            return f"(could not read packet {n}: {type(e).__name__})"
+
     try:
         with PcapReader(path) as reader:
             for pkt in reader:
                 total += 1
                 first = first if first is not None else float(pkt.time)
                 last = float(pkt.time)
+                lines = own if pair and _between(pkt, pair) else other
                 if len(lines) < max_lines:
-                    try:
-                        lines.append(_packet_line(pkt, redact, include_payloads))
-                    except Exception as e:      # one odd frame must not lose the rest
-                        lines.append(f"(could not read packet {total}: {type(e).__name__})")
+                    lines.append((describe(pkt, total), pkt.summary()[:80]))
                 else:
                     talkers[redact.text(pkt.summary()[:80], 120)] += 1
     except (OSError, EOFError, ValueError) as e:
@@ -476,9 +499,21 @@ def digest_pcap(path, redact, include_payloads=False, max_lines=DIGEST_MAX_LINES
         return "(the capture was empty)\n"
     span = (f"{datetime.fromtimestamp(first):%Y-%m-%d %H:%M:%S} to "
             f"{datetime.fromtimestamp(last):%H:%M:%S}")
-    out = [f"{total} packets, {span}", ""] + lines
-    if total > max_lines:
-        out += ["", f"... {total - max_lines} more packets, most common:"]
+    out = [f"{total} packets, {span}", ""]
+    room = max_lines
+    if pair:
+        a, b = sorted(pair)
+        out += [f"Between {redact.ip(a)} and {redact.ip(b)}, the alert's own traffic: "
+                f"{len(own)}{'+' if len(own) >= max_lines else ''} packets", ""]
+        out += [line for line, _ in own[:room]]
+        out += ["", "Everything else in the capture:", ""]
+        room -= min(len(own), room)
+    out += [line for line, _ in other[:room]]
+    for _, summary in other[room:]:
+        talkers[redact.text(summary, 120)] += 1
+    shown = min(len(own), max_lines) + min(len(other), room)
+    if total > shown:
+        out += ["", f"... {total - shown} more packets, most common:"]
         out += [f"  {n:>5}  {what}" for what, n in talkers.most_common(15)]
     return "\n".join(out) + "\n"
 
@@ -549,13 +584,14 @@ def build_bundle(directory, out_dir=None, *, pseudonymise=False, include_pcaps=F
             omitted += 1
             continue
         name = f"traffic/{len(digests) + 1:02d}_{re.sub(r'[^A-Za-z0-9_.-]', '_', rule)}.txt"
-        scope = next(((r.get('evidence') or {}).get('packet_capture_scope')
-                      for r in members if r.get('snippet') == snippet), None)
+        owner = next(r for r in members if r.get('snippet') == snippet)
+        scope = (owner.get('evidence') or {}).get('packet_capture_scope')
         head = (f"Group {index}: {rule} for {redact.ip(host) or '(no host)'}, "
                 f"{len(members)} alert(s). Representative: {members[0].get('review_id')}\n"
-                f"Traffic around {snippet_alert_time(members, snippet)}"
-                f"{f' ({scope})' if scope else ''}:\n\n")
-        body = digest_pcap(os.path.join(snippet_dir, snippet), redact, include_payloads)
+                f"Traffic around {snippet_alert_time(members, snippet)}, saved for "
+                f"alert {owner.get('review_id')}{f' ({scope})' if scope else ''}:\n\n")
+        body = digest_pcap(os.path.join(snippet_dir, snippet), redact, include_payloads,
+                           focus=(owner.get('src_ip'), owner.get('dst_ip')))
         if writer.write(name, head + body):
             digests.append((index, name))
             if include_pcaps:
