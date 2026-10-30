@@ -469,10 +469,10 @@ class TestPcapOnAlert(unittest.TestCase):
             src, dst = (('203.0.113.9', '192.168.1.50') if i % 2
                         else ('192.168.1.50', '203.0.113.9'))
             self.writer.buffer_packet(bytes(
-                Ether() / IP(src=src, dst=dst) / TCP(sport=4444, dport=80) / Raw(b'x' * 40)))
+                Ether(src='02:00:00:00:00:01', dst='02:00:00:00:00:02') / IP(src=src, dst=dst) / TCP(sport=4444, dport=80) / Raw(b'x' * 40)))
         for _ in range(80):      # unrelated hosts
             self.writer.buffer_packet(bytes(
-                Ether() / IP(src='10.9.9.9', dst='10.8.8.8') / TCP() / Raw(b'y' * 40)))
+                Ether(src='02:00:00:00:00:01', dst='02:00:00:00:00:02') / IP(src='10.9.9.9', dst='10.8.8.8') / TCP() / Raw(b'y' * 40)))
 
     def test_export_produces_a_readable_pcap(self):
         from scapy.all import rdpcap
@@ -537,7 +537,7 @@ class TestFrameEndpointMatching(unittest.TestCase):
             self.skipTest('real scapy unavailable')
         from scapy.all import Ether, IP, TCP
         from src.pcap_writer import _frame_involves
-        frame = bytes(Ether() / IP(src='10.0.0.1', dst='10.0.0.2') / TCP())
+        frame = bytes(Ether(src='02:00:00:00:00:01', dst='02:00:00:00:00:02') / IP(src='10.0.0.1', dst='10.0.0.2') / TCP())
         self.assertTrue(_frame_involves(frame, {'10.0.0.1'}))
         self.assertTrue(_frame_involves(frame, {'10.0.0.2'}))
         self.assertFalse(_frame_involves(frame, {'10.0.0.3'}))
@@ -547,7 +547,7 @@ class TestFrameEndpointMatching(unittest.TestCase):
             self.skipTest('real scapy unavailable')
         from scapy.all import Ether, IPv6, TCP
         from src.pcap_writer import _frame_involves
-        frame = bytes(Ether() / IPv6(src='2001:db8::1', dst='2001:db8::2') / TCP())
+        frame = bytes(Ether(src='02:00:00:00:00:01', dst='02:00:00:00:00:02') / IPv6(src='2001:db8::1', dst='2001:db8::2') / TCP())
         self.assertTrue(_frame_involves(frame, {'2001:db8::1'}))
         self.assertFalse(_frame_involves(frame, {'2001:db8::9'}))
 

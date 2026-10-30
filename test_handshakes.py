@@ -46,7 +46,7 @@ def big_hello(host=b'pq.example.com', pad=1500):
 
 def tcp_frame(payload, sport=50000, dport=443, seq=1000, src='192.168.1.5',
               dst='93.184.216.34'):
-    return (Ether() / IP(src=src, dst=dst) /
+    return (Ether(src='02:00:00:00:00:01', dst='02:00:00:00:00:02') / IP(src=src, dst=dst) /
             TCP(sport=sport, dport=dport, seq=seq, flags='PA') / Raw(load=payload))
 
 
@@ -84,7 +84,7 @@ def quic_initial(dcid, frames, pn=0):
 
 
 def udp_frame(payload, dport=443):
-    return (Ether() / IP(src='192.168.1.5', dst='142.250.1.1') /
+    return (Ether(src='02:00:00:00:00:01', dst='02:00:00:00:00:02') / IP(src='192.168.1.5', dst='142.250.1.1') /
             UDP(sport=51000, dport=dport) / Raw(load=payload))
 
 
@@ -209,7 +209,7 @@ class TestPayloadFields(unittest.TestCase):
         self.assertEqual(info.src_mac, 'aa:aa:aa:aa:aa:aa')
 
     def test_icmpv6_router_advertisement_is_typed(self):
-        info = self.info(Ether() / IPv6(src='fe80::1', dst='ff02::1') / ICMPv6ND_RA())
+        info = self.info(Ether(src='02:00:00:00:00:01', dst='02:00:00:00:00:02') / IPv6(src='fe80::1', dst='ff02::1') / ICMPv6ND_RA())
         self.assertEqual((info.protocol, info.icmp_type), ('ICMPv6', 134))
 
     def test_offline_mode_uses_packet_time_and_no_process(self):
@@ -221,7 +221,7 @@ class TestPayloadFields(unittest.TestCase):
 
     def test_dns_query_type_is_recorded(self):
         from scapy.all import DNS, DNSQR
-        frame = (Ether() / IP(src='192.168.1.5', dst='192.168.1.1') /
+        frame = (Ether(src='02:00:00:00:00:01', dst='02:00:00:00:00:02') / IP(src='192.168.1.5', dst='192.168.1.1') /
                  UDP(sport=5353, dport=53) / DNS(rd=1, qd=DNSQR(qname='x.example', qtype='TXT')))
         info = self.capture._extract_packet_info(Ether(bytes(frame)))
         self.assertEqual(info.dns_qtype, 16)

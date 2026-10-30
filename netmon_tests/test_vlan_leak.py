@@ -96,14 +96,14 @@ class TestFrameLayout(unittest.TestCase):
         self.assertEqual(layout['src_ip'], '10.10.20.21')
 
     def test_0x9100_which_scapy_does_not_dissect(self):
-        raw = bytes(Ether(type=0x9100) / Dot1Q(vlan=40) / Dot1Q(vlan=20)
+        raw = bytes(Ether(src='02:00:00:00:00:01', dst='02:00:00:00:00:02', type=0x9100) / Dot1Q(vlan=40) / Dot1Q(vlan=20)
                     / IP(src='10.10.40.10', dst='10.10.20.10') / TCP())
         layout = frame_layout(raw)
         self.assertEqual(layout['tags'], [40, 20])
         self.assertEqual(layout['src_ip'], '10.10.40.10')
 
     def test_ipv6(self):
-        raw = bytes(Ether() / Dot1Q(vlan=20) / IPv6(src='2001:db8::1',
+        raw = bytes(Ether(src='02:00:00:00:00:01', dst='02:00:00:00:00:02') / Dot1Q(vlan=20) / IPv6(src='2001:db8::1',
                                                      dst='2001:db8::2') / TCP())
         self.assertEqual(frame_layout(raw)['dst_ip'], '2001:db8::2')
 

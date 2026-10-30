@@ -122,14 +122,14 @@ class TestFlowExtraction(_PcapCase):
     def test_arp_is_read_from_its_own_fields(self):
         """An ARP frame has no IP header to read addresses from."""
         event = self.one(frame(dst_mac='ff:ff:ff:ff:ff:ff')
-                         / ARP(op=1, psrc='10.10.60.50', pdst='10.10.60.99'))
+                         / ARP(op=1, hwsrc='02:00:00:00:00:01', psrc='10.10.60.50', pdst='10.10.60.99'))
         self.assertEqual(event.kind, 'arp')
         self.assertEqual(event.src_ip, '10.10.60.50')
         self.assertEqual(event.dst_ip, '10.10.60.99')
         self.assertEqual(event.fields['arp_operation'], 'request')
 
     def test_an_arp_reply_is_marked_as_an_answer(self):
-        event = self.one(frame() / ARP(op=2, psrc='10.10.60.50',
+        event = self.one(frame() / ARP(op=2, hwsrc='02:00:00:00:00:01', psrc='10.10.60.50',
                                        pdst='10.10.60.99'))
         self.assertTrue(event.fields['is_answer'])
 

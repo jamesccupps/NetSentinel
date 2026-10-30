@@ -36,7 +36,9 @@ python -m src.audit --network 192.168.1.0/24       # network audit
 ```
 
 Tests never touch the network: inject fakes, and keep `threat_intel.auto_update`
-off. In Claude's sandbox on the owner's Windows PC, set `XDG_CACHE_HOME` to a
+off. Build test frames fully specified: `Ether(src=..., dst=...)`, and ARP with
+`hwsrc`. GitHub's Windows runner has no Npcap, so Scapy's default lookups of this
+machine's interfaces raise there. In Claude's sandbox on the owner's Windows PC, set `XDG_CACHE_HOME` to a
 scratch folder (scapy cannot read `~\.cache` there, and ~175 tests skip silently)
 and `PYTHONIOENCODING=utf-8`.
 

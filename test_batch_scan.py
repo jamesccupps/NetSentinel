@@ -324,7 +324,7 @@ class TestWithTheRealAnalyzer(_Case):
         from scapy.all import Ether, IP, TCP, Raw, wrpcap
         from src.pcap_analyzer import PcapAnalyzer
         password = 'hunter2secret'
-        frames = [Ether() / IP(src='10.0.0.5', dst='10.0.0.9') /
+        frames = [Ether(src='02:00:00:00:00:01', dst='02:00:00:00:00:02') / IP(src='10.0.0.5', dst='10.0.0.9') /
                   TCP(sport=40000, dport=21, flags='PA', seq=1 + i * 40) / Raw(load=line)
                   for i, line in enumerate([b'USER alice\r\n',
                                             f'PASS {password}\r\n'.encode()])]

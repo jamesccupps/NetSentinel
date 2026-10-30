@@ -66,7 +66,7 @@ class _RingCase(unittest.TestCase):
         """A capture file named as tcpdump's rotation would name it."""
         path = os.path.join(self.scratch, name)
         if packets is None:
-            packets = [Ether() / IP(src='10.10.20.1', dst='10.10.20.2') / TCP()]
+            packets = [Ether(src='02:00:00:00:00:01', dst='02:00:00:00:00:02') / IP(src='10.10.20.1', dst='10.10.20.2') / TCP()]
         wrpcap(path, packets)
         if when is not None:
             os.utime(path, (when, when))
@@ -257,7 +257,7 @@ class TestRetention(_RingCase):
 
     def test_the_size_budget_removes_oldest_first(self):
         now = time.time()
-        packets = [Ether() / IP() / TCP()] * 200
+        packets = [Ether(src='02:00:00:00:00:01', dst='02:00:00:00:00:02') / IP() / TCP()] * 200
         for hours in (3, 2, 1):
             self.write_capture(self.name_for(now - hours * 3600), packets)
         total = sum(f['size'] for f in self.ring.files())
@@ -404,7 +404,7 @@ class TestExtractingForAFinding(_RingCase):
         for second in range(120):
             for src, dst in (('10.10.60.50', '10.10.20.21'),
                              ('10.10.20.10', '10.10.20.22')):
-                packet = (Ether() / Dot1Q(vlan=20) / IP(src=src, dst=dst)
+                packet = (Ether(src='02:00:00:00:00:01', dst='02:00:00:00:00:02') / Dot1Q(vlan=20) / IP(src=src, dst=dst)
                           / TCP(dport=47808))
                 packet.time = self.base + second
                 packets.append(packet)

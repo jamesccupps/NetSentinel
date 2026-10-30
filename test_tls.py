@@ -203,7 +203,7 @@ class TestSniReachesDetection(unittest.TestCase):
             TLS_Ext_ServerName(servernames=[ServerName(servername=host.encode())]),
             TLS_Ext_SupportedVersion_CH(versions=['TLS 1.3']),
         ])
-        return (Ether() / IP(src='192.168.1.50', dst=dst) /
+        return (Ether(src='02:00:00:00:00:01', dst='02:00:00:00:00:02') / IP(src='192.168.1.50', dst=dst) /
                 TCP(sport=51000, dport=443, flags='PA') /
                 Raw(load=bytes(TLS(msg=[ch]))))
 
@@ -261,7 +261,7 @@ class TestSniReachesDetection(unittest.TestCase):
         self.cfg.set('blacklists', 'domains', [])
 
     def test_quic_is_marked_encrypted(self):
-        frame = (Ether() / IP(src='192.168.1.50', dst='142.250.1.1') /
+        frame = (Ether(src='02:00:00:00:00:01', dst='02:00:00:00:00:02') / IP(src='192.168.1.50', dst='142.250.1.1') /
                  UDP(sport=51000, dport=443) /
                  Raw(load=b'\xc0\x00\x00\x00\x01' + b'\x00' * 40))
         info = self.capture._extract_packet_info(frame)
@@ -269,7 +269,7 @@ class TestSniReachesDetection(unittest.TestCase):
         self.assertEqual(info.tls_version, 'QUIC')
 
     def test_non_tls_traffic_leaves_the_fields_empty(self):
-        frame = (Ether() / IP(src='192.168.1.50', dst='93.184.216.34') /
+        frame = (Ether(src='02:00:00:00:00:01', dst='02:00:00:00:00:02') / IP(src='192.168.1.50', dst='93.184.216.34') /
                  TCP(sport=51000, dport=443, flags='PA') /
                  Raw(load=b'\x17\x03\x03\x00\x20' + b'X' * 32))
         info = self.capture._extract_packet_info(frame)
