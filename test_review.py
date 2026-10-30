@@ -65,19 +65,19 @@ def write_snippet(path):
     from scapy.all import ARP, DNS, DNSQR, DNSRR, IP, TCP, UDP, Ether, Raw, wrpcap
     from test_tls import build_client_hello
     lan, gw, web, shop = '192.168.1.20', '192.168.1.1', '203.0.113.7', '203.0.113.8'
-    mac = 'aa:bb:cc:dd:ee:01'
+    mac, gw_mac = 'aa:bb:cc:dd:ee:01', 'aa:bb:cc:dd:ee:fe'
     http = (b'GET /login?user=bob&pass=Hunter2Secret HTTP/1.1\r\n'
             b'Host: shop.example.com\r\nCookie: sessionid=SECRETCOOKIE123\r\n'
             b'Authorization: Basic Zm9vOmJhcg==\r\n\r\n')
     packets = [
-        Ether(src=mac) / IP(src=lan, dst=gw) / UDP(sport=50000, dport=53)
+        Ether(src=mac, dst=gw_mac) / IP(src=lan, dst=gw) / UDP(sport=50000, dport=53)
         / DNS(rd=1, qd=DNSQR(qname='bad.example.org')),
-        Ether(dst=mac) / IP(src=gw, dst=lan) / UDP(sport=53, dport=50000)
+        Ether(src=gw_mac, dst=mac) / IP(src=gw, dst=lan) / UDP(sport=53, dport=50000)
         / DNS(qr=1, qd=DNSQR(qname='bad.example.org'),
               an=DNSRR(rrname='bad.example.org', rdata=web)),
-        Ether(src=mac) / IP(src=lan, dst=web) / TCP(sport=50001, dport=443, flags='PA')
+        Ether(src=mac, dst=gw_mac) / IP(src=lan, dst=web) / TCP(sport=50001, dport=443, flags='PA')
         / Raw(load=build_client_hello(sni=b'bad.example.org')),
-        Ether(src=mac) / IP(src=lan, dst=shop) / TCP(sport=50002, dport=80, flags='PA')
+        Ether(src=mac, dst=gw_mac) / IP(src=lan, dst=shop) / TCP(sport=50002, dport=80, flags='PA')
         / Raw(load=http),
         Ether(src=mac, dst='ff:ff:ff:ff:ff:ff') / ARP(op=1, psrc=lan, hwsrc=mac, pdst=gw),
     ]
@@ -238,9 +238,9 @@ class TestSnippetNarrowing(unittest.TestCase):
     def test_vlan_tagged_frames_are_matched(self):
         from scapy.all import IP, UDP, Dot1AD, Dot1Q, Ether, IPv6
         from src.pcap_writer import _frame_involves
-        tagged = bytes(Ether() / Dot1Q(vlan=12) / IPv6(src='fe80::1', dst='ff02::fb') / UDP())
-        qinq = bytes(Ether() / Dot1AD(vlan=5) / Dot1Q(vlan=12) / IP(src='10.0.0.9', dst='10.0.0.1'))
-        plain = bytes(Ether() / IP(src='10.0.0.9', dst='10.0.0.1'))
+        tagged = bytes(Ether(src='02:00:00:00:00:01', dst='02:00:00:00:00:02') / Dot1Q(vlan=12) / IPv6(src='fe80::1', dst='ff02::fb') / UDP())
+        qinq = bytes(Ether(src='02:00:00:00:00:01', dst='02:00:00:00:00:02') / Dot1AD(vlan=5) / Dot1Q(vlan=12) / IP(src='10.0.0.9', dst='10.0.0.1'))
+        plain = bytes(Ether(src='02:00:00:00:00:01', dst='02:00:00:00:00:02') / IP(src='10.0.0.9', dst='10.0.0.1'))
         self.assertTrue(_frame_involves(tagged, {'fe80::1'}))
         self.assertTrue(_frame_involves(qinq, {'10.0.0.1'}))
         self.assertTrue(_frame_involves(plain, {'10.0.0.9'}))
@@ -253,7 +253,7 @@ class TestSnippetNarrowing(unittest.TestCase):
         out = tempfile.mkdtemp(prefix='ns_scope_')
         self.addCleanup(shutil.rmtree, out, True)
         writer = PcapWriter(Config().load(), output_dir=out)
-        writer.buffer_packet(bytes(Ether() / IP(src='10.9.9.9', dst='10.9.9.8')))
+        writer.buffer_packet(bytes(Ether(src='02:00:00:00:00:01', dst='02:00:00:00:00:02') / IP(src='10.9.9.9', dst='10.9.9.8')))
         alert = an_alert()
         self.assertTrue(writer.export_for_alert(alert, directory=out))
         self.assertIn('no packet named', alert.evidence['packet_capture_scope'])

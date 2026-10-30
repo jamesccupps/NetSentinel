@@ -864,7 +864,7 @@ class TestNoPacketRebuild(unittest.TestCase):
 
     def _dissected(self):
         from scapy.all import Ether, IP, TCP, Raw
-        wire = bytes(Ether() / IP(src='1.2.3.4', dst='5.6.7.8') /
+        wire = bytes(Ether(src='02:00:00:00:00:01', dst='02:00:00:00:00:02') / IP(src='1.2.3.4', dst='5.6.7.8') /
                      TCP(sport=1, dport=8000, flags='PA') / Raw(load=b'hello' * 50))
         return Ether(wire), wire
 
@@ -876,7 +876,7 @@ class TestNoPacketRebuild(unittest.TestCase):
     def test_raw_bytes_falls_back_for_constructed_packets(self):
         """A packet built in memory has no .original, so it must still work."""
         from scapy.all import Ether, IP, TCP
-        built = Ether() / IP(src='1.2.3.4', dst='5.6.7.8') / TCP()
+        built = Ether(src='02:00:00:00:00:01', dst='02:00:00:00:00:02') / IP(src='1.2.3.4', dst='5.6.7.8') / TCP()
         self.assertEqual(self.engine._raw_bytes(built), bytes(built))
 
     def test_length_still_matches_scapy(self):
@@ -941,7 +941,7 @@ class TestPayloadExtraction(unittest.TestCase):
 
     def test_tls_payload_size_is_not_zero_when_dissected(self):
         from scapy.all import Ether, IP, TCP, Raw
-        built = Ether() / IP() / TCP(sport=5, dport=443, flags='PA') / Raw(
+        built = Ether(src='02:00:00:00:00:01', dst='02:00:00:00:00:02') / IP() / TCP(sport=5, dport=443, flags='PA') / Raw(
             load=self._client_hello())
         dissected = self._dissect(built)
         self.assertFalse(dissected.haslayer(Raw),
@@ -951,14 +951,14 @@ class TestPayloadExtraction(unittest.TestCase):
 
     def test_dns_payload_size_is_not_zero_when_dissected(self):
         from scapy.all import Ether, IP, UDP, DNS, DNSQR
-        built = Ether() / IP() / UDP(sport=5, dport=53) / DNS(rd=1, qd=DNSQR(qname='a.com'))
+        built = Ether(src='02:00:00:00:00:01', dst='02:00:00:00:00:02') / IP() / UDP(sport=5, dport=53) / DNS(rd=1, qd=DNSQR(qname='a.com'))
         info = self.engine._extract_packet_info(self._dissect(built))
         self.assertGreater(info.payload_size, 0)
 
     def test_sni_is_extracted_from_a_dissected_packet(self):
         """The end-to-end case: this is how capture actually delivers packets."""
         from scapy.all import Ether, IP, TCP, Raw
-        built = Ether() / IP() / TCP(sport=5, dport=443, flags='PA') / Raw(
+        built = Ether(src='02:00:00:00:00:01', dst='02:00:00:00:00:02') / IP() / TCP(sport=5, dport=443, flags='PA') / Raw(
             load=self._client_hello())
         info = self.engine._extract_packet_info(self._dissect(built))
         self.assertEqual(info.tls_sni, 'secure.example.com')
@@ -966,7 +966,7 @@ class TestPayloadExtraction(unittest.TestCase):
 
     def test_both_dissection_modes_agree(self):
         from scapy.all import Ether, IP, TCP, Raw
-        built = Ether() / IP() / TCP(sport=5, dport=443, flags='PA') / Raw(
+        built = Ether(src='02:00:00:00:00:01', dst='02:00:00:00:00:02') / IP() / TCP(sport=5, dport=443, flags='PA') / Raw(
             load=self._client_hello())
         a = self.engine._extract_packet_info(built)
         b = self.engine._extract_packet_info(self._dissect(built))
@@ -976,21 +976,21 @@ class TestPayloadExtraction(unittest.TestCase):
 
     def test_credential_payload_still_reaches_forensics(self):
         from scapy.all import Ether, IP, TCP, Raw
-        built = Ether() / IP() / TCP(sport=5, dport=21, flags='PA') / Raw(
+        built = Ether(src='02:00:00:00:00:01', dst='02:00:00:00:00:02') / IP() / TCP(sport=5, dport=21, flags='PA') / Raw(
             load=b'PASS hunter2\r\n')
         info = self.engine._extract_packet_info(self._dissect(built))
         self.assertEqual(info._raw_payload, b'PASS hunter2\r\n')
 
     def test_packet_with_no_payload_reports_zero(self):
         from scapy.all import Ether, IP, TCP
-        built = Ether() / IP() / TCP(sport=5, dport=443, flags='A')
+        built = Ether(src='02:00:00:00:00:01', dst='02:00:00:00:00:02') / IP() / TCP(sport=5, dport=443, flags='A')
         info = self.engine._extract_packet_info(self._dissect(built))
         self.assertEqual(info.payload_size, 0)
         self.assertIsNone(info._raw_payload)
 
     def test_non_transport_packets_are_safe(self):
         from scapy.all import Ether, IP, ICMP, ARP
-        for built in (Ether() / IP() / ICMP(), Ether() / ARP()):
+        for built in (Ether(src='02:00:00:00:00:01', dst='02:00:00:00:00:02') / IP() / ICMP(), Ether(src='02:00:00:00:00:01', dst='02:00:00:00:00:02') / ARP(hwsrc='02:00:00:00:00:01', psrc='10.0.0.1', pdst='10.0.0.2')):
             info = self.engine._extract_packet_info(self._dissect(built))
             self.assertEqual(info.payload_size, 0)
 

@@ -335,7 +335,7 @@ class TestResponseExtraction(unittest.TestCase):
         answers = (DNSRR(rrname='example.com', type='A', ttl=300, rdata='93.184.216.34') /
                    DNSRR(rrname='example.com', type='A', ttl=60, rdata='93.184.216.35') /
                    DNSRR(rrname='example.com', type='A', ttl=120, rdata='93.184.216.36'))
-        pkt = (Ether() / IP() / UDP(sport=53, dport=51000) /
+        pkt = (Ether(src='02:00:00:00:00:01', dst='02:00:00:00:00:02') / IP() / UDP(sport=53, dport=51000) /
                DNS(qr=1, qd=DNSQR(qname='example.com'), an=answers, ancount=3))
         info = self.engine._extract_packet_info(self._dissect(pkt))
         self.assertEqual(len(info.dns_answers), 3)
@@ -345,7 +345,7 @@ class TestResponseExtraction(unittest.TestCase):
     def test_nxdomain_carries_its_question(self):
         """Responses had no question name, so an answer could not be correlated."""
         from scapy.all import Ether, IP, UDP, DNS, DNSQR
-        pkt = (Ether() / IP() / UDP(sport=53, dport=51000) /
+        pkt = (Ether(src='02:00:00:00:00:01', dst='02:00:00:00:00:02') / IP() / UDP(sport=53, dport=51000) /
                DNS(qr=1, rcode=3, qd=DNSQR(qname='nope.example.com')))
         info = self.engine._extract_packet_info(self._dissect(pkt))
         self.assertEqual(info.dns_query, 'nope.example.com')
@@ -354,7 +354,7 @@ class TestResponseExtraction(unittest.TestCase):
 
     def test_a_query_is_not_mistaken_for_a_response(self):
         from scapy.all import Ether, IP, UDP, DNS, DNSQR
-        pkt = (Ether() / IP() / UDP(sport=51000, dport=53) /
+        pkt = (Ether(src='02:00:00:00:00:01', dst='02:00:00:00:00:02') / IP() / UDP(sport=51000, dport=53) /
                DNS(rd=1, qd=DNSQR(qname='ask.example.com')))
         info = self.engine._extract_packet_info(self._dissect(pkt))
         self.assertEqual(info.dns_query, 'ask.example.com')
@@ -362,7 +362,7 @@ class TestResponseExtraction(unittest.TestCase):
 
     def test_cname_targets_are_decoded(self):
         from scapy.all import Ether, IP, UDP, DNS, DNSQR, DNSRR
-        pkt = (Ether() / IP() / UDP(sport=53, dport=51000) /
+        pkt = (Ether(src='02:00:00:00:00:01', dst='02:00:00:00:00:02') / IP() / UDP(sport=53, dport=51000) /
                DNS(qr=1, qd=DNSQR(qname='www.example.com'),
                    an=DNSRR(rrname='www.example.com', type='CNAME', ttl=3600,
                             rdata='example.com'), ancount=1))

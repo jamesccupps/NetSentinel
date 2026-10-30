@@ -143,7 +143,7 @@ class TestSamplingAndBuffers(unittest.TestCase):
         from src.capture import CaptureEngine
         got = []
         engine = CaptureEngine(reset_config(), raw_packet_callback=got.append)
-        wire = bytes(Ether() / IP(src='1.2.3.4', dst='5.6.7.8') /
+        wire = bytes(Ether(src='02:00:00:00:00:01', dst='02:00:00:00:00:02') / IP(src='1.2.3.4', dst='5.6.7.8') /
                      TCP(sport=1, dport=8000, flags='PA') / Raw(load=b'x' * 200))
         packet = Ether(wire)
         calls = []
