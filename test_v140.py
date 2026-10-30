@@ -203,21 +203,30 @@ class TestDNSLookupO1(unittest.TestCase):
         domain, ts = ids._latest_dns_by_ip["192.168.1.5"]
         self.assertEqual(domain, "example.com")
 
-    def test_dns_inference_works(self):
+    def test_dns_inference_comes_from_the_answer(self):
+        """
+        An address is tied to a name by the DNS answer, not by timing. The old
+        guess tied whatever the host connected to next to its last lookup.
+        """
         config = make_config()
         ids = IDSEngine(config)
-        # DNS query
+        # DNS query, then a connection to an unrelated address
         dns_pkt = make_packet(src_ip="192.168.1.5", dst_ip="8.8.8.8",
                              dst_port=53, protocol="UDP",
                              dns_query="google.com")
         ids.inspect_packet(dns_pkt)
-        # Connection from same source to an IP
-        conn_pkt = make_packet(src_ip="192.168.1.5", dst_ip="142.250.80.46",
+        conn_pkt = make_packet(src_ip="192.168.1.5", dst_ip="203.0.113.77",
                               dst_port=443, protocol="TCP")
         ids.inspect_packet(conn_pkt)
-        # The IP should now be associated with google.com
-        domains = ids._get_domains_for_ip("142.250.80.46")
-        self.assertIn("google.com", domains)
+        self.assertNotIn("google.com", ids._get_domains_for_ip("203.0.113.77"))
+        # The response names the address it resolved to
+        answer = make_packet(src_ip="8.8.8.8", dst_ip="192.168.1.5", src_port=53,
+                             dst_port=40000, protocol="UDP", dns_query="google.com")
+        answer.dns_rcode = 0
+        answer.dns_answers = ("142.250.80.46", "142.250.80.47")
+        ids.inspect_packet(answer)
+        self.assertIn("google.com", ids._get_domains_for_ip("142.250.80.46"))
+        self.assertIn("google.com", ids._get_domains_for_ip("142.250.80.47"))
 
 
 class TestDataExfilEscalation(unittest.TestCase):

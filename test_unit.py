@@ -627,15 +627,28 @@ class TestNetworkEnvironment(unittest.TestCase):
         self.assertTrue(env.should_skip_ids("255.255.255.255", "192.168.1.1"))
         self.assertTrue(env.should_skip_ids("192.168.1.1", "224.0.0.1"))
 
-    def test_malware_ports_not_skipped_even_for_gateway(self):
-        """Known malware ports should not be skipped even for whitelisted IPs."""
+    def test_gateway_traffic_is_inspected(self):
+        """
+        H1: the gateway, DNS servers and this PC's own addresses used to skip
+        every heuristic rule. Infrastructure is inspected now; only the rules
+        that misfire on it exempt it themselves.
+        """
         env = NetworkEnvironment()
         env.detect()
         env.auto_whitelist_ips.add("192.168.1.1")
-        # Normal port → skip
-        self.assertTrue(env.should_skip_ids("192.168.1.1", "10.0.0.1", dst_port=80))
-        # Malware port → don't skip
+        env.gateways = ["192.168.1.1"]
+        self.assertFalse(env.should_skip_ids("192.168.1.1", "10.0.0.1", dst_port=80))
         self.assertFalse(env.should_skip_ids("192.168.1.1", "10.0.0.1", dst_port=4444))
+
+    def test_malware_ports_not_skipped_even_for_known_devices(self):
+        """Known malware ports should not be skipped even for user-listed devices."""
+        env = NetworkEnvironment()
+        env.detect()
+        env.load_known_devices([{"name": "NAS", "ip": "192.168.1.9"}])
+        # Normal port → skip
+        self.assertTrue(env.should_skip_ids("192.168.1.9", "10.0.0.1", dst_port=80))
+        # Malware port → don't skip
+        self.assertFalse(env.should_skip_ids("192.168.1.9", "10.0.0.1", dst_port=4444))
 
 
 # ═══════════════════════════════════════════════════════════════════

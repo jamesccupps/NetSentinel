@@ -33,12 +33,12 @@ ever combined with address churn on the same name.
 import logging
 import math
 import time
-from collections import Counter, defaultdict, deque
+from collections import Counter, OrderedDict, defaultdict, deque
 
 logger = logging.getLogger("NetSentinel.DNS")
 
-__all__ = ['DnsResponseMonitor', 'domain_entropy', 'looks_algorithmic',
-           'RCODE_NAMES', 'RCODE_NXDOMAIN']
+__all__ = ['DnsResponseMonitor', 'DnsTunnelMonitor', 'domain_entropy',
+           'looks_algorithmic', 'RCODE_NAMES', 'RCODE_NXDOMAIN']
 
 RCODE_NOERROR = 0
 RCODE_SERVFAIL = 2
@@ -122,7 +122,7 @@ class DnsResponseMonitor:
     directly, and because this is per-response state rather than per-packet.
     """
 
-    def __init__(self, config=None):
+    def __init__(self, config=None, cdn_check=None):
         self.config = config
         # Read directly rather than through a helper: a lambda wrapper hides the
         # key from the check that every DEFAULT_CONFIG entry is actually consulted.
@@ -134,6 +134,11 @@ class DnsResponseMonitor:
         else:
             self.nxdomain_threshold = NXDOMAIN_BURST_COUNT
             self.flux_threshold = FLUX_MIN_ADDRESSES
+        # (name, addresses) -> True when the churn is a CDN's. Large CDNs rotate
+        # many short-TTL addresses for one name, which is exactly the fast-flux
+        # shape; without this, every busy CDN hostname was reported.
+        self.cdn_check = cdn_check if cdn_check is not None else _default_cdn_check
+        self.flux_cdn_exempted = 0
 
         # {src_ip: deque[(timestamp, queried_name)]}
         self._failures = defaultdict(lambda: deque(maxlen=512))
@@ -254,6 +259,13 @@ class DnsResponseMonitor:
             return None
         if now - self._reported_flux.get(name, 0) < self._report_cooldown:
             return None
+        try:
+            if self.cdn_check(name, list(live)):
+                self.flux_cdn_exempted += 1
+                self._reported_flux[name] = now     # do not re-check every answer
+                return None
+        except Exception as e:
+            logger.debug("CDN check failed for %s: %s", name, e)
 
         self._reported_flux[name] = now
         return {
@@ -295,6 +307,7 @@ class DnsResponseMonitor:
             'domains_tracked': len(self._resolutions),
             'addresses_tracked': len(self._addr_to_domains),
             'hosts_with_failures': len(self._failures),
+            'flux_cdn_exempted': self.flux_cdn_exempted,
         }
 
     # ─── Housekeeping ────────────────────────────────────────────────────
@@ -339,3 +352,209 @@ def _looks_like_address(value):
         return True
     parts = value.split('.')
     return len(parts) == 4 and all(p.isdigit() and len(p) <= 3 for p in parts)
+
+
+def _default_cdn_check(name, addresses):
+    """
+    Whether a name's address churn belongs to a CDN or cloud: the name is a
+    known first-party service, or most of its addresses sit in ranges a cloud
+    or CDN publishes. Fast-flux rotates through compromised home machines,
+    which are in neither.
+    """
+    from src.net_detect import KNOWN_CLOUD_DOMAINS, NetworkEnvironment
+    if NetworkEnvironment._domain_in_suffix_set(name, KNOWN_CLOUD_DOMAINS):
+        return True
+    if not addresses:
+        return False
+    from src.cloud_ranges import get_cloud_ranges
+    ranges = get_cloud_ranges()
+    inside = sum(1 for a in addresses if ranges.provider(a))
+    return inside * 2 >= len(addresses)
+
+
+# ─── DNS tunnelling ──────────────────────────────────────────────────────────
+#
+# A tunnel carries data in the names it asks for and, coming back, in the record
+# types that hold the most: TXT, NULL, CNAME, MX. What separates one from
+# ordinary lookups, once the known services are set aside:
+#
+# - one name with a long, encoded-looking part left of the registered domain;
+# - many distinct such names under one registered domain from one host, which a
+#   single long name can stay under the length limit to avoid;
+# - a steady rate of TXT/NULL/ANY queries to one domain, which normal clients
+#   barely make (mail servers checking SPF and DKIM are the exception).
+#
+# Length alone is a poor test (the old rule fired on any query over 60
+# characters), so the encoded part also has to carry enough entropy: base32 and
+# hex tunnels run 3.8-5 bits per character, repetitive generated labels far less.
+
+TUNNEL_RECORD_TYPES = {16: 'TXT', 10: 'NULL', 255: 'ANY', 5: 'CNAME', 15: 'MX'}
+# TXT/NULL/ANY count towards the rate; CNAME and MX are too common to.
+_RATE_TYPES = {16, 10, 255}
+TUNNEL_MIN_ENTROPY = 3.3
+TUNNEL_WINDOW_SEC = 300
+TUNNEL_RATE_WINDOW_SEC = 60
+TUNNEL_MAX_TRACKED = 2048
+
+# Services that legitimately put hashes or addresses in query names: antivirus
+# and reputation lookups, and DNS blocklists queried by mail servers.
+DNS_LOOKUP_SERVICES = frozenset({
+    'sophosxl.net', 'mcafee.com', 'e5.sk', 'eset.com', 'eset.net',
+    'trendmicro.com', 'spamhaus.org', 'spamhaus.net', 'spamcop.net', 'surbl.org',
+    'uribl.com', 'barracudacentral.org', 'senderbase.org', 'cymru.com',
+    'dnswl.org', 'mailspike.net', 'sorbs.net', 'abuseat.org', 'junkemailfilter.com',
+    'kaspersky-labs.com', 'avast.com', 'avcdn.net', 'bitdefender.net',
+})
+
+
+def _encoded_part(name):
+    """(registered domain, the part left of it) for a query name."""
+    from src.public_suffix import registrable_domain
+    base = registrable_domain(name)
+    if not base or base == name:
+        return base, ''
+    return base, name[:-len(base) - 1]
+
+
+class DnsTunnelMonitor:
+    """
+    Per-host, per-domain DNS query tracking for tunnels. Returns finding dicts;
+    the IDS engine turns them into alerts. Bounded: the oldest (host, domain)
+    pair is dropped past TUNNEL_MAX_TRACKED.
+    """
+
+    def __init__(self, config=None, exempt=None):
+        if config is not None:
+            self.max_subdomain_len = int(config.get(
+                'ids', 'dns_tunnel_max_subdomain_len', default=50))
+            self.unique_threshold = int(config.get(
+                'ids', 'dns_tunnel_unique_subdomains', default=100))
+            self.rate_threshold = int(config.get(
+                'ids', 'dns_tunnel_txt_per_min', default=20))
+        else:
+            self.max_subdomain_len, self.unique_threshold, self.rate_threshold = 50, 100, 20
+        # exempt(name) -> True for names the engine already trusts (known
+        # cloud services, domains learned during the baseline).
+        self.exempt = exempt
+        self._pairs = OrderedDict()
+        self.queries_seen = 0
+
+    def observe_query(self, src_ip, name, qtype=0, now=None):
+        if not name:
+            return []
+        now = now or time.time()
+        name = name.lower().rstrip('.')
+        if '.' not in name or name.endswith(('.local', '.arpa', '.lan', '.home.arpa')):
+            return []
+        base, encoded = _encoded_part(name)
+        if not base or base in DNS_LOOKUP_SERVICES:
+            return []
+        labels = name.split('.')
+        if any(label.startswith('_') for label in labels):
+            return []           # _dmarc, _domainkey, SRV service names
+        if self.exempt is not None:
+            try:
+                if self.exempt(name):
+                    return []
+            except Exception:
+                pass
+        self.queries_seen += 1
+
+        findings = []
+        flat = encoded.replace('.', '')
+        entropy = domain_entropy(flat)
+
+        # 1. One long, encoded-looking name.
+        if len(flat) > self.max_subdomain_len and entropy >= TUNNEL_MIN_ENTROPY:
+            finding = self._report('long_name', src_ip, base, now, {
+                'type': 'long_name',
+                'severity': 'HIGH',
+                'src_ip': src_ip,
+                'domain': base,
+                'query': name[:253],
+                'encoded_length': len(flat),
+                'entropy': round(entropy, 2),
+                'record_type': TUNNEL_RECORD_TYPES.get(qtype, str(qtype or 'A')),
+                'description': (
+                    f"{src_ip} looked up a name with {len(flat)} characters of "
+                    f"encoded-looking data ({entropy:.1f} bits per character) "
+                    f"under {base}."),
+            })
+            if finding:
+                findings.append(finding)
+
+        # 2 and 3: per (host, registered domain) over a window.
+        key = (src_ip, base)
+        state = self._pairs.get(key)
+        if state is None or now - state['start'] > TUNNEL_WINDOW_SEC:
+            state = {'start': now, 'subs': set(), 'chars': 0, 'entropy': 0.0,
+                     'count': 0, 'rate': deque(maxlen=max(self.rate_threshold * 4, 64))}
+            self._pairs[key] = state
+            while len(self._pairs) > TUNNEL_MAX_TRACKED:
+                self._pairs.popitem(last=False)
+        else:
+            self._pairs.move_to_end(key)
+
+        if encoded and len(state['subs']) <= self.unique_threshold:
+            state['subs'].add(hash(encoded) & 0xffffffff)
+        state['chars'] += len(flat)
+        state['entropy'] += entropy
+        state['count'] += 1
+        if qtype in _RATE_TYPES:
+            state['rate'].append(now)
+
+        unique = len(state['subs'])
+        if unique >= self.unique_threshold:
+            mean_len = state['chars'] / max(state['count'], 1)
+            mean_entropy = state['entropy'] / max(state['count'], 1)
+            # Sharded CDNs make many names too, but short ones.
+            if mean_len >= 12 and mean_entropy >= 3.0:
+                finding = self._report('volume', src_ip, base, now, {
+                    'type': 'volume',
+                    'severity': 'HIGH',
+                    'src_ip': src_ip,
+                    'domain': base,
+                    'distinct_names': unique,
+                    'window_sec': TUNNEL_WINDOW_SEC,
+                    'mean_encoded_length': round(mean_len, 1),
+                    'mean_entropy': round(mean_entropy, 2),
+                    'sample_query': name[:253],
+                    'description': (
+                        f"{src_ip} looked up {unique}+ different names under {base} "
+                        f"in {TUNNEL_WINDOW_SEC // 60} minutes, averaging "
+                        f"{mean_len:.0f} encoded characters each."),
+                })
+                if finding:
+                    findings.append(finding)
+
+        cutoff = now - TUNNEL_RATE_WINDOW_SEC
+        rate = sum(1 for t in state['rate'] if t >= cutoff)
+        if qtype in _RATE_TYPES and rate >= self.rate_threshold:
+            finding = self._report('rate', src_ip, base, now, {
+                'type': 'rate',
+                'severity': 'HIGH' if rate >= self.rate_threshold * 3 else 'MEDIUM',
+                'src_ip': src_ip,
+                'domain': base,
+                'queries_per_minute': rate,
+                'record_type': TUNNEL_RECORD_TYPES.get(qtype, str(qtype)),
+                'sample_query': name[:253],
+                'description': (
+                    f"{src_ip} sent {rate} {TUNNEL_RECORD_TYPES.get(qtype, 'TXT')}-type "
+                    f"queries for {base} in the last minute."),
+            })
+            if finding:
+                findings.append(finding)
+        return findings
+
+    @staticmethod
+    def _report(kind, src_ip, base, now, finding):
+        # Repeats are suppressed where alerts are made (IDSEngine._create_alert),
+        # so a cleared cooldown there is a cleared cooldown everywhere.
+        finding.setdefault('recommendation', (
+            'DNS tunnelling hides traffic in name lookups, which most networks let '
+            'through. Identify the process making these queries; if it is not an '
+            'antivirus or security product you run, treat the domain as hostile.'))
+        return finding
+
+    def get_stats(self):
+        return {'queries_seen': self.queries_seen, 'pairs_tracked': len(self._pairs)}

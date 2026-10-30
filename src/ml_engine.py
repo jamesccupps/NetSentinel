@@ -663,7 +663,7 @@ class AnomalyDetector:
 
         # Unusual volume of DNS queries — modern browsing + IoT easily does 30-50/sec
         # Only flag truly extreme rates (likely DNS tunneling or DGA)
-        dns_rate = len(real_dns) / 60  # per second (real DNS only, excludes mDNS)
+        dns_rate = len(real_dns) / max(max(p.timestamp for p in packets_window) - min(p.timestamp for p in packets_window), 1.0)  # per second over the window actually given (was /60 for a 5 s window)
         if dns_rate > 50:  # Raised from 30 — modern networks are chatty
             score = max(score, min(dns_rate / 150, 1.0))
 

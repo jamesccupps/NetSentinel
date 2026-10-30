@@ -103,8 +103,24 @@ def detect_default_gateway():
     return unique
 
 
+# Public resolvers, recorded so their addresses are recognised as DNS servers.
+# Not the same as configured ones: a host that is set to use the router but sends
+# queries to 8.8.8.8 is bypassing local DNS, which is worth seeing.
+WELL_KNOWN_DNS = (
+    '8.8.8.8', '8.8.4.4',           # Google
+    '1.1.1.1', '1.0.0.1',           # Cloudflare
+    '9.9.9.9', '149.112.112.112',   # Quad9
+    '208.67.222.222', '208.67.220.220',  # OpenDNS
+)
+
+
 def detect_dns_servers():
-    """Detect configured DNS servers."""
+    """Detect configured DNS servers, plus the well-known public resolvers."""
+    return list(set(detect_configured_dns_servers()) | set(WELL_KNOWN_DNS))
+
+
+def detect_configured_dns_servers():
+    """The DNS servers this machine is actually configured to use."""
     dns_servers = []
 
     # Method 1: Parse ipconfig /all
@@ -130,15 +146,7 @@ def detect_dns_servers():
     except Exception as e:
         logger.debug("DNS detection failed: %s", e)
 
-    # Always include common public DNS that shouldn't be flagged
-    well_known_dns = [
-        '8.8.8.8', '8.8.4.4',           # Google
-        '1.1.1.1', '1.0.0.1',           # Cloudflare
-        '9.9.9.9', '149.112.112.112',   # Quad9
-        '208.67.222.222', '208.67.220.220',  # OpenDNS
-    ]
-
-    return list(set(dns_servers + well_known_dns))
+    return list(dict.fromkeys(dns_servers))
 
 
 def detect_local_ips():
@@ -327,15 +335,19 @@ KNOWN_CLOUD_DOMAINS = {
     'dailymotion.com',
 
     # ─── Dev / Tech ──────────────────────────────────────────
-    'github.com', 'githubusercontent.com', 'githubassets.com', 'github.io',
+    # github.io, vercel.app, now.sh and netlify.app used to be listed here too.
+    # They are hosting where anyone picks the subdomain, so being on this list
+    # silently exempted every site on them from the threat feeds. They are in
+    # CLOUD_HOSTING_DOMAINS, which flags with context instead.
+    'github.com', 'githubusercontent.com', 'githubassets.com',
     'gitlab.com', 'bitbucket.org', 'atlassian.com', 'atlassian.net',
     'jira.com', 'confluence.com', 'trello.com',
     'stackoverflow.com', 'stackexchange.com', 'sstatic.net',
     'npmjs.com', 'npmjs.org', 'yarnpkg.com',
     'pypi.org', 'pythonhosted.org',
     'docker.com', 'docker.io',
-    'vercel.com', 'vercel.app', 'now.sh',
-    'netlify.com', 'netlify.app',
+    'vercel.com',
+    'netlify.com',
     'heroku.com',
     'digitalocean.com',
 
@@ -414,6 +426,7 @@ CLOUD_HOSTING_DOMAINS = {
     'herokuapp.com',         # Heroku
     'netlify.app',           # Netlify
     'vercel.app',            # Vercel
+    'now.sh',                # Vercel (legacy)
     'pages.dev',             # Cloudflare Pages
     'workers.dev',           # Cloudflare Workers
     'r2.dev',                # Cloudflare R2
@@ -448,6 +461,7 @@ class NetworkEnvironment:
     def __init__(self):
         self.gateways = []
         self.dns_servers = []
+        self.configured_dns_servers = []
         self.local_ips = []
         self.dhcp_servers = []
         self.local_subnet = None
@@ -467,7 +481,8 @@ class NetworkEnvironment:
         logger.info("Detecting network environment...")
 
         self.gateways = detect_default_gateway()
-        self.dns_servers = detect_dns_servers()
+        self.configured_dns_servers = detect_configured_dns_servers()
+        self.dns_servers = list(set(self.configured_dns_servers) | set(WELL_KNOWN_DNS))
         self.local_ips = detect_local_ips()
         self.dhcp_servers = detect_dhcp_server()
         self.local_subnet = get_local_subnet()
@@ -504,6 +519,15 @@ class NetworkEnvironment:
         Check if a packet should be excluded from IDS heuristic rules
         (port scan, brute force, etc.) based on network environment.
 
+        This used to skip everything to or from auto_whitelist_ips: this PC's own
+        addresses, its gateway, its DHCP servers and every DNS server including
+        8.8.8.8 and 1.1.1.1. On a PC that sees mostly its own traffic, that was
+        nearly all of it, so port scans, DNS tunnels, exfiltration and the rest
+        never ran on the machine NetSentinel was protecting. Now only traffic that
+        is noise by its nature is skipped, plus devices the user listed as known;
+        the few rules that misfire on infrastructure exempt it themselves (see
+        is_configured_resolver and is_gateway).
+
         Note: This does NOT skip threat intel checks — if your gateway IP
         shows up in a botnet feed, you still want to know about that.
         """
@@ -515,10 +539,11 @@ class NetworkEnvironment:
         if is_link_local(src_ip) or is_link_local(dst_ip):
             return True
 
-        # Skip traffic from/to gateway and DNS servers for heuristic rules
-        if src_ip in self.auto_whitelist_ips or dst_ip in self.auto_whitelist_ips:
-            # Exception: still check for truly suspicious stuff even from gateway
-            # like known malware ports
+        # Devices the user named in known_devices: their expected behaviour is a
+        # choice the user made, not something detection inferred.
+        if src_ip in self.known_device_ips or dst_ip in self.known_device_ips:
+            # Exception: still check for truly suspicious stuff, like known
+            # malware ports
             if dst_port in {4444, 5555, 6666, 1337, 31337, 12345}:
                 return False
             return True
@@ -528,6 +553,20 @@ class NetworkEnvironment:
             return True
 
         return False
+
+    def is_gateway(self, ip):
+        return bool(ip) and ip in self.gateways
+
+    def is_configured_resolver(self, ip):
+        """A DNS server this machine is set to use (not merely a public one)."""
+        return bool(ip) and (ip in self.configured_dns_servers
+                             or (not self.configured_dns_servers and ip in self.gateways))
+
+    def is_dhcp_server(self, ip):
+        return bool(ip) and ip in self.dhcp_servers
+
+    def is_own_address(self, ip):
+        return bool(ip) and ip in self.local_ips
 
     @staticmethod
     def _domain_in_suffix_set(domain, suffix_set):
