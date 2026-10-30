@@ -11,7 +11,7 @@ Every open item from the v1.8.0 handoff is done on local `main`, as version 1.9.
 `CHANGELOG.md` has the full list. Status:
 - **Commits:** pushed to `main` as `11366aa` on 2026-10-29, with James's OK. That
   is 36 commits past `7d6fc3c`, which v1.8.0 can be tagged at.
-- **Tests:** 2,088 unit tests pass (63 skips), as do the 14 integration checks and
+- **Tests:** 2,100 unit tests pass (63 skips), as do the 14 integration checks and
   ruff.
 - **Live run:** a headless run with `--review` on real traffic was checked in the
   browser. Start/stop, acknowledge, verdicts and bundle building all worked, and
@@ -101,6 +101,11 @@ that would hide real Responder alerts from this PC.
 on 2026-10-30, and CI is green on all five jobs. The real review folder now
 builds a readable bundle from the command line. A local exe with the fixes was
 built at 13:56 and is waiting for James to test it.
+
+**Mouse wheel (James, 2026-10-30):** the wheel did not always scroll. Fixed in
+`src/gui.py` (`on_mousewheel`, `wheel_scrollable`; tests in
+`test_mouse_wheel.py`), committed locally. The exe needs rebuilding for it once
+James closes the running one.
 1. **The PC's own address is listed as a gateway.**
    `net_detect.detect_default_gateway` takes every address on the
    `route print 0.0.0.0` line, including the Interface column. The log shows

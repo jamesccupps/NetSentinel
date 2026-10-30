@@ -49,6 +49,70 @@ SEVERITY_COLORS = {
 }
 
 
+# ─── Mouse wheel ───────────────────────────────────────────────────────────────
+# A canvas has no wheel binding of its own, so the scrolling pages built on one
+# each bound the wheel for the whole application. One turn scrolled all three of
+# them at once, on whichever tabs they were, and the other six pages did not
+# scroll at all; every alert window opened added another binding, never removed.
+# Now one handler scrolls the innermost area under the pointer that has further
+# to go. Text, lists, tables and scrollbars scroll themselves.
+
+_SCROLLS_ITSELF = {'Text', 'Listbox', 'Treeview'}
+_ACTS_ON_WHEEL = {'TScrollbar', 'Scrollbar', 'TCombobox'}
+
+
+def wheel_steps(event):
+    """Lines to scroll: positive is down. Windows gives 120 a notch, X11 buttons 4/5."""
+    if getattr(event, 'num', None) == 4:
+        return -1
+    if getattr(event, 'num', None) == 5:
+        return 1
+    delta = getattr(event, 'delta', 0) or 0
+    return -round(delta / 120) or (-1 if delta > 0 else 1 if delta < 0 else 0)
+
+
+def _has_further_to_go(widget):
+    try:
+        first, last = (float(v) for v in widget.yview())
+    except (tk.TclError, TypeError, ValueError):
+        return False
+    return first > 0 or last < 1
+
+
+def on_mousewheel(event):
+    origin = event.widget
+    if isinstance(origin, str):              # Tk's own, e.g. a drop-down's list
+        return
+    try:
+        widget = origin.winfo_containing(event.x_root, event.y_root) or origin
+    except (KeyError, tk.TclError):
+        widget = origin
+    steps = wheel_steps(event)
+    while widget is not None and steps:
+        kind = widget.winfo_class()
+        if kind in _ACTS_ON_WHEEL and widget is origin:
+            return
+        if (kind in _SCROLLS_ITSELF or getattr(widget, 'wheel_scrolls', False)) \
+                and _has_further_to_go(widget):
+            if not (widget is origin and kind in _SCROLLS_ITSELF):
+                widget.yview_scroll(steps, 'units')
+            return
+        widget = widget.master
+
+
+def wheel_scrollable(canvas):
+    """Let the wheel scroll this canvas when the pointer is over it."""
+    canvas.wheel_scrolls = True
+    root = canvas._root()
+    if not getattr(root, '_wheel_router', False):
+        root.bind_all('<MouseWheel>', on_mousewheel)
+        if root.tk.call('tk', 'windowingsystem') == 'x11':
+            root.bind_all('<Button-4>', on_mousewheel)
+            root.bind_all('<Button-5>', on_mousewheel)
+        root._wheel_router = True
+    return canvas
+
+
 class StyledFrame(tk.Frame):
     """A dark-themed frame."""
     def __init__(self, parent, **kwargs):
@@ -214,10 +278,7 @@ class AlertDetailWindow:
         canvas.configure(yscrollcommand=scrollbar.set)
         canvas.pack(side='left', fill='both', expand=True)
         scrollbar.pack(side='right', fill='y')
-
-        def _mousewheel(event):
-            canvas.yview_scroll(int(-1*(event.delta/120)), "units")
-        canvas.bind_all("<MouseWheel>", _mousewheel, add='+')
+        wheel_scrollable(canvas)
 
         # ─── CONNECTION section (with domain resolution) ──────
         conn_card = Card(scroll_inner, title="CONNECTION")
@@ -923,11 +984,7 @@ class NetSentinelGUI:
 
         self._alerts_canvas.pack(side='left', fill='both', expand=True)
         scrollbar.pack(side='right', fill='y')
-
-        # Mouse wheel scrolling
-        def _on_mousewheel(event):
-            self._alerts_canvas.yview_scroll(int(-1*(event.delta/120)), "units")
-        self._alerts_canvas.bind_all("<MouseWheel>", _on_mousewheel, add='+')
+        wheel_scrollable(self._alerts_canvas)
 
         # ─── Load historical alerts from disk into the GUI ────────
         # These were loaded by AlertManager before the GUI existed,
@@ -1019,6 +1076,7 @@ class NetSentinelGUI:
         ml_canvas.configure(yscrollcommand=ml_scrollbar.set)
         ml_canvas.pack(side='left', fill='both', expand=True)
         ml_scrollbar.pack(side='right', fill='y')
+        wheel_scrollable(ml_canvas)
 
         # Status section
         status_card = Card(ml_scroll_frame, title="ML ENGINE STATUS")
@@ -1232,10 +1290,7 @@ class NetSentinelGUI:
         pcap_alert_canvas.configure(yscrollcommand=pcap_scrollbar.set)
         pcap_alert_canvas.pack(side='left', fill='both', expand=True)
         pcap_scrollbar.pack(side='right', fill='y')
-
-        def _pcap_mousewheel(event):
-            pcap_alert_canvas.yview_scroll(int(-1*(event.delta/120)), "units")
-        pcap_alert_canvas.bind_all("<MouseWheel>", _pcap_mousewheel, add='+')
+        wheel_scrollable(pcap_alert_canvas)
 
         self._pcap_alert_widgets = []
         self._pcap_batch = None
@@ -1848,6 +1903,7 @@ class NetSentinelGUI:
         cred_canvas.configure(yscrollcommand=cred_sb.set)
         cred_canvas.pack(side='left', fill='both', expand=True)
         cred_sb.pack(side='right', fill='y')
+        wheel_scrollable(cred_canvas)
 
         self._fv_cred_widgets = []
 
@@ -1892,6 +1948,7 @@ class NetSentinelGUI:
         svc_canvas.configure(yscrollcommand=svc_sb.set)
         svc_canvas.pack(side='left', fill='both', expand=True)
         svc_sb.pack(side='right', fill='y')
+        wheel_scrollable(svc_canvas)
 
         self._fv_svc_widgets = []
 
@@ -2281,6 +2338,7 @@ class NetSentinelGUI:
         cred_canvas.configure(yscrollcommand=cred_sb.set)
         cred_canvas.pack(side='left', fill='both', expand=True)
         cred_sb.pack(side='right', fill='y')
+        wheel_scrollable(cred_canvas)
 
         # Right: Services + Sensitive Data
         right_frame = tk.Frame(content, bg=COLORS['bg_dark'])
@@ -2578,6 +2636,7 @@ class NetSentinelGUI:
         canvas.configure(yscrollcommand=scrollbar.set)
         canvas.pack(side='left', fill='both', expand=True)
         scrollbar.pack(side='right', fill='y')
+        wheel_scrollable(canvas)
 
         # IDS Settings
         ids_card = Card(scroll_frame, title="INTRUSION DETECTION")
@@ -3479,6 +3538,7 @@ class NetSentinelGUI:
 
         self._incidents_canvas.pack(side='left', fill='both', expand=True)
         scrollbar.pack(side='right', fill='y')
+        wheel_scrollable(self._incidents_canvas)
 
         self.root.after(3000, self._incidents_refresh)
 
