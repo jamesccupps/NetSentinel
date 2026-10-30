@@ -1,4 +1,4 @@
-# Handoff: v1.9.0 built, waiting to be pushed and tested
+# Handoff: v1.9.0 pushed (11366aa), CI and a test exe next
 
 Kept current during the work so it survives a context reset. Last updated
 2026-10-29 by the local Claude Code session on James's desktop. Read `CLAUDE.md`
@@ -9,8 +9,8 @@ first. The approved plan, with its findings by file:line, is outside the repo at
 
 Every open item from the v1.8.0 handoff is done on local `main`, as version 1.9.0.
 `CHANGELOG.md` has the full list. Status:
-- **Commits:** about 35 commits past `7d6fc3c`, the last pushed one. Nothing new is
-  pushed; that waits for James's OK.
+- **Commits:** pushed to `main` as `11366aa` on 2026-10-29, with James's OK. That
+  is 36 commits past `7d6fc3c`, which v1.8.0 can be tagged at.
 - **Tests:** 2,057 unit tests pass (63 skips), as do the 14 integration checks and
   ruff.
 - **Live run:** a headless run with `--review` on real traffic was checked in the
@@ -61,8 +61,8 @@ How the work was done:
 
 ## Next steps
 
-1. Push `main` (with James's OK) and watch CI on Linux and Windows. The Windows
-   job and the Node 24 actions are new and have not run on GitHub yet.
+1. CI on Linux and Windows for `11366aa`. The Windows job and the Node 24 actions
+   are running on GitHub for the first time.
 2. Run the `release` workflow by hand to build a test exe (Actions → release →
    Run workflow). James tests it. Check that the exe bundles `py7zr`'s
    compiled extensions, `maxminddb`, `Evtx` and scapy's manuf table.
