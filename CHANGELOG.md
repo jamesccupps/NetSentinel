@@ -2,7 +2,7 @@
 
 ## v1.9.0 — Watching this PC's own traffic, review mode, and an audit of your network
 
-**2057 unit tests** (up from 1456) plus 14 integration checks. The suite no
+**2076 unit tests** (up from 1456) plus 14 integration checks. The suite no
 longer downloads threat feeds, so it runs in about a minute.
 
 ### This PC's own traffic is inspected
@@ -120,7 +120,9 @@ Performance turns this off). **Restart** (in the window, the tray menu, and
 offered after saving settings) starts a fresh copy with the same arguments and
 resumes monitoring if it was running, so settings that apply at start take
 effect without hunting for the process. `--monitor` starts monitoring as soon as
-the window opens. The tray uses pystray (LGPL-3.0) and Pillow.
+the window opens. A dashboard tab left open across a restart picks up the new
+copy's token by itself, rather than answering every button with "missing or
+wrong token" until it is reloaded. The tray uses pystray (LGPL-3.0) and Pillow.
 
 ### The dashboard can do things, on this computer only
 

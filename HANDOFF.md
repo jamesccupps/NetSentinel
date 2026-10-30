@@ -1,7 +1,7 @@
 # Handoff: v1.9.0 pushed, CI green on Linux and Windows; a test exe next
 
 Kept current during the work so it survives a context reset. Last updated
-2026-10-29 by the local Claude Code session on James's desktop. Read `CLAUDE.md`
+2026-10-30 by the local Claude Code session on James's desktop. Read `CLAUDE.md`
 first. The approved plan, with its findings by file:line, is outside the repo at
 `C:\Users\james\.claude\plans\parallel-inventing-lovelace.md`.
 
@@ -11,7 +11,7 @@ Every open item from the v1.8.0 handoff is done on local `main`, as version 1.9.
 `CHANGELOG.md` has the full list. Status:
 - **Commits:** pushed to `main` as `11366aa` on 2026-10-29, with James's OK. That
   is 36 commits past `7d6fc3c`, which v1.8.0 can be tagged at.
-- **Tests:** 2,057 unit tests pass (63 skips), as do the 14 integration checks and
+- **Tests:** 2,076 unit tests pass (63 skips), as do the 14 integration checks and
   ruff.
 - **Live run:** a headless run with `--review` on real traffic was checked in the
   browser. Start/stop, acknowledge, verdicts and bundle building all worked, and
@@ -58,8 +58,22 @@ How the work was done:
 - **Checked live on this PC:** the tray icon (it showed, updated and stopped)
   and the relaunch (the detached copy ran, with the arguments and the
   PyInstaller reset).
-- **Not yet checked:** the whole flow in the built exe. James tests that on the
-  next build.
+- **In a locally built exe (2026-10-30, `build_exe.bat` from `cbe6808`):**
+  - Restart works. The log shows the old copy saving and exiting, then the new
+    one resuming monitoring 8 seconds later.
+  - Found by James: a dashboard tab opened before the restart refused every
+    button with "missing or wrong token", because each process makes its own
+    token. Fixed: on that refusal the page reads the new token from `/` and
+    retries once (`src/webui/app.js: renewToken`). Checked in the browser
+    against a server swapped underneath it.
+  - Hiding to the tray, the tray menu and Quit leave nothing in the log; James
+    reports on those.
+  - The ML warning "isolation_forest.pkl failed integrity check" is expected.
+    The model is from April, before model files were signed, and is retrained
+    at 200 samples.
+- **Review mode** is on in James's config (`~\.netsentinel\review`). Once alerts
+  come in: build the bundle, give each alert a verdict, and record the false
+  positives.
 
 ## Open questions for James
 

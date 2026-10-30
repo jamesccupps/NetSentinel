@@ -86,6 +86,9 @@ LOOPBACK_NAMES = {'127.0.0.1', 'localhost', '::1'}
 DASHBOARD_CSP = ("default-src 'self'; script-src 'self'; style-src 'self'; "
                  "img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; "
                  "base-uri 'none'; form-action 'none'")
+# The dashboard knows these words: on them it fetches the page again for the new
+# token, since a page open across a restart holds the old process's one.
+TOKEN_REFUSED = 'missing or wrong token'
 
 logger = logging.getLogger("NetSentinel.Headless")
 
@@ -220,7 +223,7 @@ class _Handler(BaseHTTPRequestHandler):
             return
         token = self.headers.get('X-NetSentinel-Token') or ''
         if not hmac.compare_digest(token, self.server.netsentinel_token):
-            self._send_json({'error': 'missing or wrong token'}, status=403)
+            self._send_json({'error': TOKEN_REFUSED}, status=403)
             return
         origin = self.headers.get('Origin')
         if origin and urlparse(origin).netloc.lower() != (self.headers.get('Host') or '').lower():

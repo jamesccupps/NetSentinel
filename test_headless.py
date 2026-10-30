@@ -381,6 +381,22 @@ class TestDashboard(_ApiTestCase):
         self.assertEqual(self.post('/api/scan/new', token='wrong')[0], 403)
         self.assertEqual(self.post('/api/scan/new')[0], 201)
 
+    def test_a_page_open_across_a_restart_can_find_the_new_token(self):
+        """A tab opened before a restart held the old process's token, and every
+        button said "missing or wrong token" until the page was reloaded. On those
+        words the page now reads the new token from / and tries once more."""
+        from src import headless
+        status, reply = self.post('/api/alerts/ack-all', token='from-the-last-run')
+        self.assertEqual(status, 403)
+        self.assertEqual(json.loads(reply)['error'], headless.TOKEN_REFUSED)
+        with open(os.path.join(headless.WEBUI_DIR, 'app.js'), encoding='utf-8') as f:
+            source = f.read()
+        self.assertIn(f"const TOKEN_REFUSED = '{headless.TOKEN_REFUSED}'", source)
+        self.assertIn("fetch('/'", source)
+        self.assertIn(f'<meta name="netsentinel-token" content="{self.server.token}">',
+                      self.get('/')[2])
+        self.assertNotEqual(HeadlessServer(self.app).token, self.server.token)
+
     def test_a_cross_origin_post_is_refused_even_with_the_token(self):
         status, _ = self.post('/api/scan/new', Origin='https://evil.example')
         self.assertEqual(status, 403)
