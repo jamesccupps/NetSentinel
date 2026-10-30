@@ -1,173 +1,160 @@
-# Handoff: from the cloud session to local Claude Code
+# Handoff: v1.9.0 in progress
 
-Written at the end of a Claude Code cloud session that ran out of budget. The
-owner is testing the Windows build and will continue the work locally.
-`CLAUDE.md` has the commands, conventions and hard rules.
+Kept current during the work so it survives a context reset. Last updated
+2026-10-29 by the local Claude Code session on James's desktop. Read
+`CLAUDE.md` first. The approved plan, with findings by file:line, is outside the
+repo at `C:\Users\james\.claude\plans\parallel-inventing-lovelace.md`.
 
-## Where things stand
+## What James asked for
 
-- `main` has **v1.8.0** (see `CHANGELOG.md`). It is **not tagged or released** yet:
-  the owner is testing the exe first and will say when to publish. Release =
-  push tag `v1.8.0`, which runs `.github/workflows/release.yml`.
-- Test builds: run the `release` workflow by hand on `main` (Actions tab →
-  release → Run workflow); the exe is the `NetSentinel-exe` artifact. The last
-  test build predates commit `70139cd` (big folder uploads, github.com false
-  alarm, scrollbar), so build a fresh one before the owner retests those.
-- All ~1450 tests and the 14 integration checks pass; CI is green on 3.10–3.12.
-- Nothing has been run against real traffic on Windows by Claude. The owner is
-  the first real-world tester, so treat their reports as the ground truth.
+"Do it all": every open item from the previous handoff (v1.8.0), done in this
+session. Four workstreams run as agents in git worktrees; the main session does
+workstream C and the integration.
 
-## The owner's questions, with answers so far
+## Decisions (James, 2026-10-29)
 
-**1. "The exe still says v1.0, there's nowhere to upload files, and I don't see
-the browser integration."** Fixed in v1.8.0. The header label was hard-coded
-(`src/gui.py`, now reads `src.__version__`). File scanning now takes any files,
-not just captures (`src/file_scan.py`, `src/batch_scan.py`), from the desktop
-**File Analyzer** tab and the browser **Scan Files** page. The browser dashboard
-did not exist before; it does now (`src/webui/`, served by `src/headless.py`,
-opened by **Open in Browser** in the GUI's top bar, or `--headless` for no window).
+- **Browser controls:** start/stop monitoring and acknowledge alerts from the
+  dashboard, token-gated like uploads and only while bound to loopback. The
+  CLAUDE.md hard rule and the `src/headless.py` design notes are being updated to
+  say exactly that. The same gate covers verdicts, review bundles and audits.
+- **GeoIP:** DB-IP Lite (CC BY 4.0, DB-IP credited in the app), downloaded on
+  opt-in, read with `maxminddb`.
+- **Lookups:** downloaded lists only. Nothing about traffic or files is sent out.
+- **New dependencies:** `maxminddb`, `py7zr`, `python-evtx`. `.rar` is reported
+  as not opened, since opening it needs non-free UnRAR.
+- **netmon summariser button:** behind `--allow-summarise`, off by default. It
+  previews the redacted payload and estimated tokens, and a second click sends.
+- **Release:** v1.8.0 is tagged at `7d6fc3c` when James says so. All of this is
+  v1.9.0. Never push a tag without asking.
+- **Port:** the dashboard moved to 8737; 8787 is James's localcast.
 
-**2. "I uploaded a folder of ~40,000 files (~100 MB) in the browser; the upload bar
-disappeared and nothing was scanned."** Fixed in `70139cd`. The server capped a
-scan at 5,000 files and the error was a 4-second toast. Now: small files are
-batched (about 4 requests per 6,000 files), `.git`/`node_modules`/media are left
-out before uploading, the limit is 100,000 files, errors stay on screen, and big
-reports are capped on screen. Verified in Chromium with 6,500 files (7 seconds).
-**Still to do:** have the owner retry their real folder with a fresh build.
+## Status
 
-**3. "Why is github.com an alert?"** A false alarm, fixed in `70139cd`. The
-URLhaus feed lists malware *URLs*; `src/threat_intel.py` turned each URL's host
-into a malicious domain, so a payload stored on GitHub made github.com
-"known-bad", in scans and in live monitoring alike. Shared hosting platforms
-(`SHARED_HOSTING`) are no longer listed by host; exact URLs still match.
-**Worth a follow-up:** look for the same pattern elsewhere. Any feed or rule that
-condemns a whole domain or IP for one bad object on shared infrastructure (CDNs,
-cloud IP ranges) will cause the same kind of noise.
+### Pushed
 
-**4. "There's no scrollbar on the Analysis Summary."** Fixed (desktop). The
-browser page scrolls normally.
+- `7d6fc3c`: the Windows fixes, port 8737 and the Windows CI job.
 
-**5. "Are these the only things we should scan for, in files, in the IDS, and
-automated network scanning?"** No. Before adding any of these, check `rules/`,
-`src/ids_engine.py`, `src/dns_analysis.py`, `src/tls_inspect.py` and
-`src/beaconing.py`, because some may already exist. Candidates, roughly by value:
+### On local `main`, not pushed
 
-- *Files* (today: IPs, domains, URLs, emails, MACs, private keys, cloud/API
-  tokens, JWTs, passwords in settings and URLs, Luhn-valid cards, US SSNs, and
-  threat-feed lookups):
-  - SHA-256 of every file checked against a malware hash feed (MalwareBazaar).
-  - More secret types: Azure storage keys and SAS tokens, GCP service-account
-    JSON, Twilio, SendGrid, Mailgun, npm and PyPI tokens, Discord and Slack
-    webhooks, Telegram bot tokens, Docker `config.json` auths, `.env` files.
-  - Windows-specific leaks: passwords in `unattend.xml` and Group Policy
-    `cpassword`, exported Wi-Fi profiles with `keyMaterial`, browser password
-    export CSVs, KeePass files.
-  - High-entropy strings that no pattern names.
-  - UNC paths and internal hostnames (a map of the network).
-  - `.7z`, `.tar.gz` and `.rar` archives and nested zips (only `.zip` today).
-  - Windows event logs (`.evtx`).
-  - YARA rules for scripts and binaries (encoded PowerShell and the like).
-  - A per-value "ignore this" list for known false positives.
-- *IDS / live monitoring:*
-  - DNS tunnelling (long, high-entropy labels; TXT volume).
-  - ARP spoofing and gateway MAC changes.
-  - Rogue DHCP.
-  - LLMNR/NBT-NS poisoning (Responder).
-  - Lateral movement between LAN hosts over SMB, RDP or WinRM.
-  - Per-host upload anomalies (exfiltration).
-  - JA3/JA4 TLS fingerprints against known-bad lists.
-  - Self-signed or expired certificates on outbound TLS.
-  - Newly registered domains.
-  - Cryptomining (stratum) connections.
-  - New devices with MAC vendor (OUI) names.
-  - Country and ASN of destinations (needs a GeoIP database: owner's decision).
-- *Automated network scanning* (NetSentinel is passive today): an **opt-in**
-  audit of the owner's own subnet only.
-  - Discover hosts with an ARP sweep.
-  - Port-scan the top ports of known devices, rate-limited.
-  - Flag risky open services: Telnet, SMB on workstations, RDP, VNC, UPnP,
-    admin web UIs.
-  - Check TLS certificate expiry on internal services.
-  - Diff against the last audit, so newly opened ports stand out.
-  - Never try credentials, and never scan anything but the local networks the
-    owner chooses.
+- `9cd7361`: browser start/stop/acknowledge, plus the monitoring lifecycle fixes:
+  - idempotent start, per-run stop events, no double capture;
+  - the feature store restarts with monitoring;
+  - alerts autosave;
+  - cooldowns for IOC and ML alerts.
+- `2dfde84`: CPU, RAM, drops and sampling on the dashboard; the
+  `performance.low_priority` option; incidents bounded; the config file read as
+  UTF-8 with BOM; the Settings threshold row fixed.
+- `f39cf4b`: review mode (`src/review.py`), verdicts, `ConfirmedFalsePositives`,
+  and registrable-domain learning (`src/public_suffix.py`).
+- `9d986db`: fixes found by a live run:
+  - `--review` crashed at startup;
+  - VLAN-tagged frames got snippets of all traffic;
+  - verdicts were tied to multicast addresses;
+  - mDNS digest lines were wrong.
+- `204b503`: CI moved to `checkout@v5`, `setup-python@v6`, `upload-artifact@v6`
+  (Node 24).
+- `ae3a375`: merge of workstream E, the opt-in subnet audit (`src/audit.py`).
+- `3f5609b`: the audit wired into the dashboard (Audit page) and the desktop
+  app (Audit button, Settings toggle).
 
-**6. "Is it optimized so it doesn't take all the computer's resources?"** Partly,
-and it has not been measured on real traffic.
+The full suite passed at 1,512 tests with 53 skips before E merged; E added 78
+tests.
 
-What exists:
-- The capture queue is bounded at 2,000 packets (`src/capture.py`).
-- Under load it samples (1 in 2, then 1 in 4 packets) rather than falling
-  behind. This shows as `sample_rate` in the stats, and detection is thinner
-  while it is above 1.
-- The alert-verification queue is bounded at 500.
-- File scans read one file at a time, read at most 64 MB of any file, and
-  extract zip members to disk one at a time.
-- The dashboard polls every 2–5 seconds.
+### Running as agents (worktrees under `.claude/worktrees/`, gitignored)
 
-The biggest known cost is the PCAP ring buffer: `capture.pcap_buffer_packets`
-defaults to 150,000 packets, up to ~225 MB of RAM. Lower it if memory matters.
+Each commits to its own branch, `worktree-agent-<id>`, on top of `7d6fc3c`.
+Review each diff, then merge with `git merge --no-ff refs/heads/<branch>`.
 
-To do:
-- Measure CPU and RSS over an hour of real traffic with psutil.
-- Show process CPU, RAM, drops and `sample_rate` on the dashboard.
-- Add an option to run at below-normal process priority.
-- Throttle big folder scans.
-- Check that in-memory alert history and device tables are bounded.
+- **A, live detection** (`src/ids_engine.py`, `capture.py`, `tls_inspect.py`,
+  `threat_intel.py`, `pcap_analyzer.py` and more):
+  - H1: analyse this PC's own traffic;
+  - H4: reassemble TLS ClientHellos, QUIC SNI;
+  - H5: the PCAP analyser reuses the live parser;
+  - H6: wire in `check_url`;
+  - the feed-noise fixes;
+  - capture threads stop per run;
+  - a `packets_sampled_out` counter;
+  - the new detections, and `src/geoip.py`.
 
-**7. "I want a test mode that captures my real traffic, so I can give the
-report, the alerts and the actual traffic to Claude chat and it can judge which
-alerts are real."** Not built yet; this is the most useful next feature. Pieces
-that exist: continuous recording with rotation (Capture tab), `pcap_on_alert`
-(saves the traffic behind alerts, narrowed to the hosts involved, at or above
-`pcap_on_alert_severity`, default CRITICAL), alert export (JSON/CSV), headless mode.
+  It was told that the URLhaus domains feed now returns HTTP 410.
+- **B, file scanning** (`src/file_scan.py`, `batch_scan.py`, `web_scan.py`, new
+  modules):
+  - H2, secrets leaking through URLs, done first;
+  - H3;
+  - more secret types and Windows leaks;
+  - archives (`.7z`, `.tar`, nested), `.evtx`, script patterns;
+  - MalwareBazaar from a downloaded list;
+  - an ignore-list backend;
+  - throttled folder scans.
+- **D, netmon** (`netmon/**`):
+  - Host allowlist; acknowledge/snooze buttons;
+  - the summariser button;
+  - the digest checklist and an email digest;
+  - GeoIP;
+  - inbound 443 from non-Cloudflare;
+  - the packet-side VLAN leak check.
 
-Proposed **review mode** (a `--review DIR` flag and a Settings toggle):
-- While it runs:
-  - Save traffic for alerts of every severity, not just CRITICAL.
-  - Keep a rolling full capture within a disk budget.
-  - Write `alerts.jsonl` with each alert's evidence and the name of its pcap
-    snippet.
-- **Build review bundle**, a folder or zip small enough for a chat upload
-  (under ~20 MB, ~30 files):
-  - `summary.md`: counts by rule, top hosts, and rules firing repeatedly on
-    the same host (the likely false positives).
-  - `alerts.json`.
-  - For each alert, a **text** traffic digest of its snippet: one line per
-    packet with time, addresses, ports, protocol, DNS names, TLS SNI and HTTP
-    host/path. Claude chat cannot read pcap files; it can read text.
-- **Privacy, by default** (the bundle leaves the owner's machine):
-  - No payloads and no raw pcaps unless the owner opts in.
-  - Credentials and cookies masked; HTTP query strings dropped.
-  - An option to pseudonymise LAN addresses.
-  - The hard rules in `CLAUDE.md` apply.
-- Optional: record a verdict (real / false positive) per alert, then feed
-  confirmed false positives into `src/baseline_whitelist.py` or rule tuning.
+E is finished and merged. Its API is in the `src/audit.py` docstrings:
+`start_audit`, `current_job`, `local_networks`, `last_report`, `diff`.
 
-Until it exists, a manual version works:
-1. Set `pcap_on_alert_severity` to `LOW` in the config.
-2. Run for a day.
-3. Export alerts as JSON.
-4. Share the alerts plus a text summary of the relevant pcaps, made with tshark.
+### Integration still to do, after A, B and D merge
 
-## Other open work
+- **Merge:** review each branch's diff before merging. They never touch
+  `config.py`, so expect few conflicts; test files may need hand-merging.
+- **Config:** add A's and B's new keys to `DEFAULT_CONFIG` (`src/config.py`).
+  Each agent's report lists them. The test in `test_regressions.py` requires
+  every key to be read literally.
+- **Dependencies:** add `maxminddb`, `py7zr` and `python-evtx` to:
+  - `requirements.txt` and `pyproject.toml`;
+  - both CI jobs' installs and the release build;
+  - PyInstaller hidden imports, if needed.
 
-- **Desktop/dashboard:**
-  - Start/stop monitoring from the browser. The GUI keeps its own `_monitoring`
-    state, so it needs syncing from `capture_engine.is_running`.
-  - An acknowledge button for alerts in the browser.
-  - The dashboard is not yet checked in the real exe on Windows; the owner is
-    doing that.
-- **CI:** GitHub warns that `actions/checkout@v4`, `actions/setup-python@v5` and
-  `actions/upload-artifact@v4` run on deprecated Node 20. Move to the majors
-  that run on Node 24.
-- **netmon** (`netmon/README.md`):
-  - A summariser button in its web UI. The owner has to decide how it is gated.
-  - Web UI buttons for acknowledge/snooze/maintenance (API routes exist).
-  - An open-items checklist in the digest, and an email digest.
-  - Country/ASN for new egress destinations (GeoIP decision).
-  - "Inbound 443 from non-Cloudflare above baseline".
-  - The packet-side VLAN leak check.
-  - Validation on real data: the owner's captures, `netmon sync` for the real
-    profile, and `netmon bpf --verify` on the sensor. Keep all of it out of
-    the repo.
+  Also check that scapy's manuf database (`conf.manufdb`) gets bundled.
+- **UI:**
+  - an "Ignore this" action in both scan UIs (B's API);
+  - a GeoIP toggle and the DB-IP attribution (A's `geoip.ATTRIBUTION`);
+  - show `packets_sampled_out` in the dashboard's Engine panel.
+- **Audit and IDS together:** once H1 lands, the audit's own connects will look
+  like a port scan from this PC. In `app._verified_alert_gateway`, lower and
+  annotate scan-type alerts from this host while `audit.is_running()`.
+- **Docs:**
+  - CLAUDE.md: the new rule wording and new modules;
+  - README;
+  - CHANGELOG v1.9.0: draft lines are in the agent reports and the commit
+    bodies above;
+  - this file, rewritten for the next session.
+- **Version:** 1.9.0 in `main.py`, `pyproject.toml`, `setup.bat` and
+  `src/__init__.py`. No tag.
+- **Verify:**
+  - the full suite, `tools/integration_check.py` and ruff;
+  - a live headless run with `--review`, checking the dashboard in the browser
+    and a bundle grep for secrets;
+  - then ask James before pushing;
+  - CI on Linux and Windows;
+  - a manual `release` workflow build of the exe for him to test.
+
+## Environment (this machine)
+
+- **Python:** bare `python` is Inkscape's MinGW build. Use
+  `.venv\Scripts\python.exe` (CPython 3.12), which has the test dependencies and
+  ruff.
+- **Tests in Claude's sandbox:** set `XDG_CACHE_HOME` to a scratch folder, or
+  scapy cannot read `~\.cache` and about 175 tests skip silently. Expect about 53
+  skips. Set `PYTHONIOENCODING=utf-8` too.
+- **Git:** this repo commits as `148652101+jamesccupps@users.noreply.github.com`
+  (repo-local config). GitHub rejects pushes that expose his Gmail.
+- **Live test:** a headless run against a throwaway home folder works without
+  admin (Npcap is installed). This network delivers 802.1Q-tagged frames to the
+  desktop.
+- **Leftover folder:** `C:\proc` was left by an old test run. The sandbox cannot
+  delete it; James can.
+
+## Left for James
+
+- Test a fresh exe built from `main` once this lands.
+- Tag v1.8.0 at `7d6fc3c`, if he wants it released first.
+- For netmon on the sensor: `netmon geoip --update`, SMTP settings in the secrets
+  file, `--allow-summarise`, `netmon bpf --verify` on an unfiltered sample (then
+  delete the sample), and `netmon sync`.
+- Turn on GeoIP and audits (Settings), and set review mode to taste.
+- Expect more alerts once H1 lands. Review mode is how to sort them.
