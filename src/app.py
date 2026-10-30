@@ -621,6 +621,10 @@ class NetSentinelApp:
             if k not in self._forensics_alerted_services
         ]
         for key, svc in pending_services:
+            # A signed software update over plain HTTP is not exposed. Not marked
+            # as alerted, so a non-update request to the same server still is.
+            if svc.get('update_only'):
+                continue
             # Only alert after seeing some traffic (not a single SYN)
             if svc['packet_count'] >= 5:
                 self._forensics_alerted_services.add(key)

@@ -31,6 +31,7 @@ where cooldowns apply.
 import ipaddress
 import logging
 import os
+import re
 import struct
 import threading
 import time
@@ -202,6 +203,14 @@ def parse_dns_wire(payload, netbios=False):
 def _short_name(name):
     name = name.lower().rstrip('.')
     return name[:-6] if name.endswith('.local') else name
+
+
+# A browser in a WebRTC call hides its local addresses behind random UUID names in
+# .local (draft-ietf-mmusic-mdns-ice-candidates) and answers mDNS for each one, so
+# a single call made this computer "answer for 4 different names". Responder
+# answers whatever is asked, wpad and mistyped names included, so leaving these
+# out does not hide it.
+_WEBRTC_NAME = re.compile(r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}')
 
 
 # ─── The monitor ─────────────────────────────────────────────────────────────
@@ -599,7 +608,7 @@ class LanThreatMonitor:
         entry['protocols'].add(protocol)
         for name, _address in parsed[1]:
             short = _short_name(name)
-            if not short:
+            if not short or (protocol == 'mDNS' and _WEBRTC_NAME.fullmatch(short)):
                 continue
             entry['names'][short] = now
             owners = self._name_owners.setdefault(short, set())

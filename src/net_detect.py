@@ -33,6 +33,29 @@ except ImportError:
     PSUTIL_AVAILABLE = False
 
 
+def gateways_from_route_print(text):
+    """
+    The gateways of the default routes in `route print` output.
+
+    A default route reads "0.0.0.0  0.0.0.0  <gateway>  <interface>  <metric>"
+    (persistent routes: "... <gateway>  <metric>"). Taking every address on the
+    line also took the interface, so this computer's own address was treated as
+    a gateway, and its traffic as infrastructure's.
+    """
+    gateways = []
+    for line in text.splitlines():
+        parts = line.split()
+        if len(parts) < 3 or parts[0] != '0.0.0.0' or parts[1] != '0.0.0.0':
+            continue
+        try:
+            addr = ipaddress.ip_address(parts[2])   # "On-link" is not an address
+        except ValueError:
+            continue
+        if not addr.is_unspecified and not addr.is_loopback:
+            gateways.append(str(addr))
+    return gateways
+
+
 def detect_default_gateway():
     """Detect the default gateway IP address."""
     gateways = []
@@ -46,17 +69,7 @@ def detect_default_gateway():
                 capture_output=True, text=True, timeout=5,
                 creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0)
             )
-            for line in result.stdout.split('\n'):
-                line = line.strip()
-                if '0.0.0.0' in line:
-                    parts = line.split()
-                    for part in parts:
-                        try:
-                            addr = ipaddress.ip_address(part)
-                            if not addr.is_unspecified and not addr.is_loopback:
-                                gateways.append(str(addr))
-                        except ValueError:
-                            continue
+            gateways.extend(gateways_from_route_print(result.stdout))
         except Exception as e:
             logger.debug("route print failed: %s", e)
 
