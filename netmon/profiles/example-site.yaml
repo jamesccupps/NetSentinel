@@ -133,6 +133,11 @@ roles:
     internet_expected: true
     allowed_domains:
       - gateway.example-payments.test
+    # The networks (ASNs) it may reach. Any other is the
+    # egress_unexpected_network finding. Needs the GeoIP files (see geoip:
+    # below); 64500 is a documentation ASN, so replace it with your
+    # processor's.
+    allowed_asns: [64500]
 
   workstation:
     description: Operator or staff workstation.
@@ -399,6 +404,20 @@ router_macs:
 sensor_macs:
   - 00:11:22:ff:ff:01
   - 00:11:22:ff:ff:02
+
+
+# ─── GeoIP ───────────────────────────────────────────────────────────────────
+# Country and network for internet addresses, from DB-IP Lite (CC BY 4.0, "IP
+# Geolocation by DB-IP", https://db-ip.com), read offline with maxminddb.
+# Download it on the sensor, opt-in — nothing about your traffic is sent:
+#
+#     pip install maxminddb
+#     python -m netmon geoip --update --dir /var/lib/netmon/geoip
+#
+# then uncomment this. Without it, those fields are simply absent.
+
+# geoip:
+#   directory: /var/lib/netmon/geoip
 
 
 # ─── Capture ─────────────────────────────────────────────────────────────────
