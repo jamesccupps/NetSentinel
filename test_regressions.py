@@ -92,7 +92,9 @@ class TestBaselineLearningWindow(unittest.TestCase):
     def test_post_baseline_domain_is_not_whitelisted(self):
         self.bl.learning_start = time.time() - 10 * 3600
         self.bl.check_learning_complete()
-        bad = 'kj4h3kj2h4kj23h4kj2h34kj2h34kj2h34k2j3h4kj23h4k2j3h4kj23h4kj.evil.xyz'
+        # Base32 of random bytes, as a real tunnel sends: DNS-TUNNEL now also asks
+        # for encoded-looking entropy, which a six-letter repeating string lacks.
+        bad = 'mzxw6ytboi2dmnzrgq3tqojqhe4dcmrtgq2tmnzyhe3dknbvgu4dsnrx.evil.xyz'
 
         alerts = []
         ids = IDSEngine(self.cfg, alert_callback=alerts.append)
