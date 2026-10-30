@@ -2,7 +2,8 @@
 // NetSentinel dashboard. Everything that came off the network or out of a
 // scanned file is put on the page as text (textContent), never as HTML.
 
-const TOKEN = document.querySelector('meta[name="netsentinel-token"]').content;
+let token = document.querySelector('meta[name="netsentinel-token"]').content;
+const TOKEN_REFUSED = 'missing or wrong token';   // the server's words, in headless.py
 const $ = (id) => document.getElementById(id);
 const SEVERITIES = ['CRITICAL', 'HIGH', 'MEDIUM', 'LOW'];
 const COLOURS = { red: '#f85149', orange: '#db6d28', yellow: '#d29922', green: '#3fb950' };
@@ -37,11 +38,31 @@ function fmtDuration(s) {
   return d ? `${d}d ${hr}h` : hr ? `${hr}h ${m}m` : `${m}m ${s % 60}s`;
 }
 
-async function api(path, options = {}) {
+// Each NetSentinel process makes its own token, so a page left open across a
+// restart holds a dead one and every button failed until a reload. The page
+// it would reload carries the new one; read it from there. Returns whether
+// the token changed, so a refusal for any other reason is not retried.
+async function renewToken() {
+  const res = await fetch('/', { cache: 'no-store' });
+  if (!res.ok) return false;
+  const page = new DOMParser().parseFromString(await res.text(), 'text/html');
+  const meta = page.querySelector('meta[name="netsentinel-token"]');
+  if (!meta || !meta.content || meta.content === token) return false;
+  token = meta.content;
+  return true;
+}
+
+async function api(path, options = {}, renewed = false) {
   const headers = Object.assign({}, options.headers);
-  if (options.method === 'POST') headers['X-NetSentinel-Token'] = TOKEN;
+  if (options.method === 'POST') headers['X-NetSentinel-Token'] = token;
   const res = await fetch(path, Object.assign({ cache: 'no-store' }, options, { headers }));
   const body = await res.json().catch(() => ({}));
+  // The server checks the token before doing anything, so trying again
+  // cannot do the action twice.
+  if (res.status === 403 && body.error === TOKEN_REFUSED && !renewed
+      && await renewToken().catch(() => false)) {
+    return api(path, options, true);
+  }
   if (!res.ok) throw new Error(body.error || `${res.status} ${res.statusText}`);
   return body;
 }
@@ -423,7 +444,7 @@ function upload(id, batch, onProgress) {
     xhr.open('POST', batch.single
       ? `/api/scan/upload?id=${encodeURIComponent(id)}&name=${encodeURIComponent(batch.single.path)}`
       : `/api/scan/upload-batch?id=${encodeURIComponent(id)}`);
-    xhr.setRequestHeader('X-NetSentinel-Token', TOKEN);
+    xhr.setRequestHeader('X-NetSentinel-Token', token);
     xhr.upload.onprogress = (e) => onProgress(e.loaded);
     xhr.onload = () => {
       if (xhr.status < 300) resolve();
