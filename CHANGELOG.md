@@ -1,5 +1,163 @@
 # NetSentinel Changelog
 
+## v1.9.0 — Watching this PC's own traffic, review mode, and an audit of your network
+
+**2057 unit tests** (up from 1456) plus 14 integration checks. The suite no
+longer downloads threat feeds, so it runs in about a minute.
+
+### This PC's own traffic is inspected
+
+The gateway, the DNS servers (8.8.8.8 and 1.1.1.1 included) and this computer's
+own addresses used to skip almost every rule. On a PC that mostly sees its own
+traffic, that was nearly all of it: port scans, DNS tunnels, uploads and gateway
+ARP spoofing on the machine NetSentinel protects were never looked at. Now only
+multicast, broadcast, link-local and discovery chatter, and devices you list as
+known, are skipped; the few rules that misfire on infrastructure exempt it
+themselves. **Expect more alerts.** Review mode is the way to sort them.
+
+Also in live detection:
+- Browsers have SNI and JA3/JA4 again. Post-quantum ClientHellos span two TCP
+  segments and are now joined; QUIC Initial packets are decrypted for their server
+  name; ports 8443 and 5061 are parsed.
+- Capture files go through the live parser, on packet time: files get SNI, DNS
+  answers and IPv6 ports, and replaying a capture no longer looks like a flood.
+- Malware URLs are matched exactly on plain HTTP, live and in files.
+- New detections: ARP spoofing with the gateway's MAC pinned across restarts;
+  rogue DHCP, IPv6 router advertisements and DHCPv6; LLMNR, NBT-NS and mDNS
+  poisoning (the Responder pattern); lateral movement over SMB, RDP, WinRM and RPC;
+  uploads far above a host's own baseline; new devices, with their vendor; DNS
+  tunnelling by length, volume and TXT rate; cryptocurrency mining pools;
+  self-signed and expired server certificates; newly registered domains (WhoisDS's
+  free daily list, checked locally).
+- GeoIP, off until you turn it on: country and network operator of destinations
+  from DB-IP Lite, downloaded monthly and looked up on this machine. IP Geolocation
+  by DB-IP, CC BY 4.0.
+- Fewer feed false alarms, the github.com pattern again: one alert per connection,
+  not one per direction; lists of attacking hosts no longer condemn cloud and CDN
+  addresses you connect to (shipped, dated ranges); delisted entries expire and a
+  week-old cache is not trusted; DShield's /24 blocks match; file hosts and URL
+  shorteners are never malicious domains; dynamic DNS matches on label boundaries
+  (`myfooddns.net` is not a ddns.net host); fast-flux leaves CDNs alone.
+- Quieter: curl and okhttp are no longer CRITICAL; IOC-DGA, IOC-DOH-BYPASS and
+  IOC-TOR stop repeating, and port 9001 alone is not Tor; IOC and ML alerts get the
+  same cooldown as the IDS's.
+- Bounded: forensics findings, the device table (now keyed by MAC) and capture
+  buffers. A stop on a quiet interface really stops, and a restart no longer leaves
+  the last run's capture threads going.
+- URLhaus's keyless export is gone (HTTP 410). It now needs a free abuse.ch
+  Auth-Key (`threat_intel.abuse_ch_auth_key`); abuse.ch's terms allow free
+  not-for-profit use. A feed that answers 410 or 404 is not retried for a week.
+
+### Review mode: give Claude your alerts and the traffic behind them
+
+`--review DIR`, or Settings → Review mode, keeps what it takes to judge alerts:
+a capture of the traffic around every alert whatever its severity (cut before
+verification can lower it), a rolling full capture within a disk budget, and
+alerts.jsonl, written once each alert's verdict is final.
+
+Build Review Bundle (desktop Review menu, the dashboard's Alerts page, or
+`python -m src.review build`) writes a folder and a zip under 20 MB and 30 files:
+a README telling the reviewer how to answer, a summary that points at rules firing
+over and over on one host, the redacted alerts, and a text digest per group, one
+line per packet with DNS names, TLS server names and HTTP host and path. Query
+strings, cookies, credentials, tokens and user names in paths are never written;
+LAN addresses can be replaced by labels; every file is audited for secret shapes
+before it is written.
+
+Verdicts come back the other way: Real or False positive on any alert in the
+dashboard, or import the JSON the README asks for (Review → Import verdicts). A
+false positive is never raised again for that rule and that host or domain.
+
+### An audit of your own network, when you ask
+
+Settings → Network audit, then the Audit page: finds the devices on networks this
+computer is on (ARP, or TCP without Npcap), scans 83 common ports at a limited
+rate, and flags risky services (Telnet, FTP, SMB on workstations, RDP, VNC, UPnP,
+WinRM, exposed databases, controller protocols, admin pages without TLS), each
+with why it matters and how to fix it. It reads every TLS certificate, including
+the TLS 1.3 ones the passive monitor cannot see, and compares each audit with the
+last so new devices and newly opened ports stand out. Gentle mode (16 ports, 5 a
+second) is for building and industrial controllers. It never tries a password,
+never runs on its own, and only scans private networks of a /16 or smaller that
+sit on one of this computer's interfaces. CLI: `python -m src.audit --network
+192.168.1.0/24`. Its own probes are labelled as such in the alerts they cause.
+
+### File scans
+
+- Secrets no longer leak through URLs in the report: query values, tokens before
+  the @, token-shaped path segments, webhook paths and Azure SAS signatures are
+  masked, and URLs end at a comma, so a browser password export cannot spill a
+  password into the URL list. Browser and password-manager CSV exports are
+  recognised and every saved password is reported masked.
+- Weak feed guesses (dynamic DNS, a high-abuse TLD) are "suspicious" at LOW, not
+  known-bad at HIGH: `window.top` no longer raises a HIGH alert. Internal names are
+  never sent to threat feeds; UNC paths and internal host names are listed.
+- New secrets: Azure storage keys and SAS tokens, GCP service-account keys, Twilio,
+  SendGrid, Mailgun, npm and .npmrc, PyPI, GitLab, Discord and Slack webhooks,
+  Telegram bot tokens, Docker registry auths, bearer tokens, and `DB_PASSWORD=`
+  style settings and .env files. Windows leaks: unattend.xml passwords, Group Policy
+  cpassword (decrypted and masked at once), Wi-Fi keys, KeePass databases, PuTTY
+  keys. High-entropy values in settings.
+- Scripts: encoded PowerShell is decoded and scanned; download cradles and
+  certutil, mshta, regsvr32, rundll32 and bitsadmin abuse are flagged, and Defender
+  tampering. Office macros, .evtx event logs, and your own YARA rules if
+  yara-python is installed.
+- Archives by content: tar, gzip, bzip2, xz, 7z and zip-shaped files (.jar, .apk),
+  nested three deep, with a decompression budget and a zip-bomb check. RAR is
+  reported as not opened. Every file gets a SHA-256, checked against known-bad hash
+  lists you put in `~/.netsentinel/data/hash_lists` (MalwareBazaar now requires a
+  key even for its exports).
+- An ignore list for false positives, per value (by keyed hash) or, for cards and
+  SSNs, per file and line. One alert per kind of secret per file. Folder scans run
+  at background priority and give way between files.
+
+### The dashboard can do things, on this computer only
+
+Start and stop monitoring, acknowledge alerts, record verdicts, build review
+bundles, run audits and manage the scan ignore list from the browser. These need
+the token the dashboard page carries and are refused unless the server is bound
+to localhost; configuration still cannot be changed over HTTP. The dashboard also
+shows what NetSentinel costs (CPU, memory, threads, dropped and sampled-out
+packets), and `performance.low_priority` runs it below normal priority.
+
+### netmon
+
+- The web UI refuses foreign Host headers while bound to localhost, closing a DNS
+  rebinding path to its page token. Acknowledge, snooze and maintenance buttons
+  (`serve --allow-edit`, `web --state ... --allow-edit`).
+- A model-triage button behind `--allow-summarise`: it shows the exact redacted
+  payload and an estimate first, and only a second click sends it. The daily
+  budget is enforced and kept under `--state`, with an hourly cap and a timeout.
+  Canary and configuration findings from metadata-only segments never reach the
+  model.
+- The daily digest opens with an open-items checklist and marks acknowledged and
+  maintenance findings; findings are kept across restarts and pushed once, not on
+  every capture rotation; optional email digest over STARTTLS or SMTPS.
+- GeoIP from DB-IP Lite (`netmon geoip --update`); role `allowed_asns` enforced.
+- Inbound internet traffic is no longer dropped by router deduplication; new
+  `inbound_https_bypass` rule for origins published through Cloudflare.
+- Packet-side VLAN leak check: restricted frames on disk and restricted traffic
+  outside its VLAN are reported; the capture filter also excludes restricted
+  subnets and QinQ; `netmon bpf --verify` exits 3 on a leak. A capture filter with
+  both host and port exclusions let untagged frames through; fixed.
+
+### Fixes
+
+- Starting twice ran everything twice; a quick stop and start left the last run's
+  loops going; a failed capture left the window saying MONITORING; the feature
+  store stopped for good after a stop; alerts reached disk only on a clean stop.
+- Alert captures matched only untagged Ethernet, so on a network that delivers
+  VLAN-tagged frames an alert got a capture of everyone's traffic.
+- The baseline whitelist learned by the last two labels, so one github.io or
+  .co.za site whitelisted all of them; it learns registrable domains now.
+- config.json saved by Notepad (UTF-8 with a BOM, or a non-ASCII name) failed to
+  load and every setting fell back to defaults.
+- The Settings threshold row edited a key the engine ignores; reloaded incidents
+  said "0 alerts"; one incident kept every alert it absorbed.
+- The elevated relaunch on Windows started in System32, so relative paths in
+  arguments broke.
+- CI's GitHub actions run on Node 24.
+
 ## v1.8.0 — A browser dashboard, scan any file for leaks, and a Windows download
 
 **1456 unit tests** (up from 384) plus 14 integration checks.

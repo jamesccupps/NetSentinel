@@ -19,8 +19,10 @@ failure modes of getting authentication wrong are worse than the inconvenience
 of editing config.json.
 
 **Controls on loopback only.** A POST can upload files to be scanned and, only
-while the server is bound to a loopback address, start or stop monitoring and
-acknowledge alerts. Every POST needs the token embedded in the dashboard page: a
+while the server is bound to a loopback address, start or stop monitoring,
+acknowledge alerts, record verdicts, build a review bundle, run a network audit
+and edit the scan ignore list. Turning audits on, like every other setting, stays
+in the desktop app. Every POST needs the token embedded in the dashboard page: a
 custom header no other site can send without a CORS preflight this server never
 answers, so no web page can drive it. Bound to anything else, the controls are
 refused, because then the token is the only thing between a network and turning
