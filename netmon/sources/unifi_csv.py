@@ -193,6 +193,11 @@ def parse_row(row):
         'dst_network': (row.get('Dst. Network') or '').strip(),
         'unifi_src_zone': (row.get('Src. Zone') or '').strip(),
         'unifi_dst_zone': (row.get('Dst. Zone') or '').strip(),
+        # The gateway's own geolocation of each end. Kept as it comes; enrich
+        # uses a two-letter one as the country when no GeoIP files answer.
+        # What else these hold varies by firmware, which is unverified.
+        'src_region': (row.get('Src. Region') or '').strip(),
+        'dst_region': (row.get('Dst. Region') or '').strip(),
         'session_id': (row.get('Session Id') or '').strip(),
         'flow_count': _to_int(row.get('Flow Count')),
         'query': (row.get('Query') or '').strip(),

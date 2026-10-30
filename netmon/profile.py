@@ -278,7 +278,25 @@ class SiteProfile:
             int(v) for v in (data.get('metadata_only_vlans') or [])
         } | {v.id for v in self.vlans.values() if not v.store_payload}
 
+        # Where the DB-IP country and ASN databases were downloaded to (see
+        # netmon.geoip). Opt-in: with no directory, no lookup is attempted.
+        geoip = data.get('geoip') or {}
+        self.geoip_dir = str((geoip.get('directory') if isinstance(geoip, dict)
+                              else '') or os.environ.get('NETMON_GEOIP_DIR', ''))
+        self._geoip = None
+
         self.validate()
+
+    def geoip(self):
+        """The GeoIP reader for this site, or None when none is configured."""
+        if self._geoip is None and self.geoip_dir:
+            from netmon.geoip import for_directory
+            self._geoip = for_directory(self.geoip_dir)
+        return self._geoip
+
+    def set_geoip(self, reader):
+        """Use this reader for lookups — a test's fake, or a shared instance."""
+        self._geoip = reader
 
     # ─── Lookup ──────────────────────────────────────────────────────────
 

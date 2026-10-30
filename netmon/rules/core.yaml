@@ -394,6 +394,31 @@
     zones: [ot, restricted]
     learn_sec: 604800          # a week of observation before it starts reporting
 
+- id: egress_unexpected_network
+  title: A device reached a network its role does not list
+  severity: medium
+  tier: digest
+  grounded_in: >
+    A payment kiosk reaches its processor's network and nothing else; a
+    controller's vendor cloud is one network, not the internet. Where a role
+    lists the networks (allowed_asns) it is expected to reach, any other is
+    either a gap in the profile or something the device should not be doing.
+    Inert until a role lists them and the GeoIP files are installed.
+  when:
+    direction: outbound
+    # Unset means "nothing to judge" (no list, no database, no ASN), and a bare
+    # `false` would match it too, so the field has to exist as well.
+    dst_asn_allowed: {exists: true, eq: false}
+  device: src_name
+  key: "{dst_asn}"
+  describe: "{src_name} ({src_role}) reached {dst_ip}[ in {dst_country}] on network AS{dst_asn}[ ({dst_as_org})], which its role does not list"
+  evidence: [dst_ip, dst_port, dst_asn, dst_as_org, dst_country, src_role]
+  escalate:
+    when: {src_zone: [ot, restricted]}
+    severity: high
+    tier: push
+  next_check: "Find out what on {src_name} talks to AS{dst_asn}; if it should, add {dst_asn} to the role's allowed_asns in the profile."
+
 - id: p2_anomaly
   type: stateful
   handler: p2_roster

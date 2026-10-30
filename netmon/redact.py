@@ -74,6 +74,10 @@ SAFE_EVIDENCE_FIELDS = frozenset({
     'known_destinations', 'days_of_history', 'quiet_hours', 'zone',
     'mac', 'ip', 'macs', 'vlans', 'search_target', 'queries', 'name',
     'destination_count', 'reason',
+    # Where an internet address is, from local GeoIP files or the gateway's
+    # own Region column: a country code, a network number and its name.
+    'dst_country', 'dst_asn', 'dst_as_org', 'src_country', 'src_asn',
+    'src_as_org', 'dst_region', 'src_region', 'dst_asn_allowed',
 })
 
 #: A name containing any of these is never transmitted, whatever the allowlist

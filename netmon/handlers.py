@@ -345,13 +345,23 @@ def new_destination(event, rule, state):
     if learning or not first_time:
         return None
 
+    # Where it is, when the GeoIP files know: "a controller contacted an
+    # address in a country it never has" is the finding this exists for.
+    where = ', '.join(part for part in (
+        str(event.get('dst_country') or ''),
+        f"AS{event.get('dst_asn')}" if event.get('dst_asn') else '',
+        str(event.get('dst_as_org') or '')) if part)
     return _finding(
         rule, event, key=str(target),
         description=f"{event.get('src_name') or event.src_ip} contacted "
-                    f"{target} for the first time",
+                    f"{target} for the first time"
+                    + (f" ({where})" if where else ''),
         evidence={'destination': target, 'dst_ip': event.dst_ip,
                   'dst_port': event.dst_port, 'zone': zone,
-                  'known_destinations': len(known)},
+                  'known_destinations': len(known),
+                  'dst_country': event.get('dst_country'),
+                  'dst_asn': event.get('dst_asn'),
+                  'dst_as_org': event.get('dst_as_org')},
         next_check=f"Check whether {event.get('src_name') or event.src_ip} "
                    f"should reach {target} at all.")
 

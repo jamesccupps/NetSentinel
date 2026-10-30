@@ -290,6 +290,8 @@ def enrich(event, profile, now=None):
         event.fields['direction'] = 'internal'
     event.fields['internet'] = dst_public or src_public
 
+    _geolocate(event, profile, src, src_public, dst_public)
+
     crosses = (event.fields['src_vlan'] is not None
                and event.fields['dst_vlan'] is not None
                and event.fields['src_vlan'] != event.fields['dst_vlan'])
@@ -351,6 +353,46 @@ def enrich(event, profile, now=None):
     event.fields['approved_remote_access'] = _is_approved_remote_access(
         event, getattr(profile, 'remote_access_allowed', ()))
     return event
+
+
+def _geolocate(event, profile, src_device, src_public, dst_public):
+    """
+    Country and network for the internet end of the event, and whether the
+    source's role expects that network.
+
+    Looked up from local DB-IP files (netmon.geoip); never a network call. A
+    UniFi export's own Region column stands in for the country when there are
+    no files, or they do not know the address.
+    """
+    reader = profile.geoip() if hasattr(profile, 'geoip') else None
+    for side, ip, public in (('dst', event.dst_ip, dst_public),
+                             ('src', event.src_ip, src_public)):
+        info = reader.lookup(ip) if (reader is not None and public) else {}
+        if info.get('country'):
+            event.fields[f'{side}_country'] = info['country']
+        elif not event.fields.get(f'{side}_country'):
+            region = str(event.fields.get(f'{side}_region') or '').strip()
+            # Only a code: what else the column holds varies by firmware and
+            # is unverified, and an invented country is worse than none.
+            if len(region) == 2 and region.isalpha():
+                event.fields[f'{side}_country'] = region.upper()
+        if info.get('asn'):
+            event.fields[f'{side}_asn'] = info['asn']
+        if info.get('as_org'):
+            event.fields[f'{side}_as_org'] = info['as_org']
+
+    # `allowed_asns` on a role: true, false, or None when there is nothing to
+    # judge — no list recorded, nothing on the internet, or no ASN known. None
+    # is not false: an incomplete profile, or no database, produces silence.
+    event.fields['dst_asn_allowed'] = None
+    roles = getattr(profile, 'roles', {}) or {}
+    role = roles.get(src_device.role)
+    allowed = getattr(role, 'allowed_asns', None) if role is not None else None
+    asn = event.fields.get('dst_asn')
+    if allowed and dst_public and asn:
+        from netmon.geoip import normalise_asn
+        permitted = {normalise_asn(a) for a in allowed} - {None}
+        event.fields['dst_asn_allowed'] = normalise_asn(asn) in permitted
 
 
 def _is_approved_remote_access(event, approved):
