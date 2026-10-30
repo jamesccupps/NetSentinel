@@ -204,6 +204,8 @@ class _Handler(BaseHTTPRequestHandler):
             body = json.loads(raw.decode('utf-8')) if raw else {}
         except (UnicodeDecodeError, json.JSONDecodeError) as e:
             return self._send_json({'error': 'body is not JSON', 'detail': str(e)}, 400)
+        if not isinstance(body, dict):
+            return self._send_json({'error': 'the body must be a JSON object'}, 400)
 
         try:
             payload, status = route(body)
