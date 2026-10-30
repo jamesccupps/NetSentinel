@@ -14,8 +14,16 @@ numpy>=1.24.0
 # Desktop notifications (optional)
 plyer>=2.1.0
 
-# Encryption for forensics credential storage
+# Encryption for forensics credential storage; also QUIC SNI, certificates and
+# Group Policy passwords found in scanned files
 cryptography>=41.0.0
+
+# Country and network operator of destinations (opt-in GeoIP, DB-IP Lite)
+maxminddb>=2.5
+
+# File scanning: .7z archives and Windows event logs (.evtx)
+py7zr>=1.0
+python-evtx>=0.8
 
 # Build tools (for creating Windows executable)
 pyinstaller>=6.0.0
