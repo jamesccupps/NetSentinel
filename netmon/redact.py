@@ -78,6 +78,8 @@ SAFE_EVIDENCE_FIELDS = frozenset({
     # own Region column: a country code, a network number and its name.
     'dst_country', 'dst_asn', 'dst_as_org', 'src_country', 'src_asn',
     'src_as_org', 'dst_region', 'src_region', 'dst_asn_allowed',
+    # Inbound from outside Cloudflare: who, how many, and the flags.
+    'sources', 'source_count', 'src_is_cloudflare', 'dst_is_cloudflare',
 })
 
 #: A name containing any of these is never transmitted, whatever the allowlist

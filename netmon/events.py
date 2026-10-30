@@ -292,6 +292,17 @@ def enrich(event, profile, now=None):
 
     _geolocate(event, profile, src, src_public, dst_public)
 
+    # Cloudflare's ranges are a CIDR test against a shipped list, so this is
+    # cheap enough to answer for every event rather than for one rule.
+    is_cloudflare = getattr(profile, 'is_cloudflare', None)
+    event.fields['src_is_cloudflare'] = bool(
+        src_public and is_cloudflare is not None and is_cloudflare(event.src_ip))
+    event.fields['dst_is_cloudflare'] = bool(
+        dst_public and is_cloudflare is not None and is_cloudflare(event.dst_ip))
+    is_origin = getattr(profile, 'is_cloudflare_origin', None)
+    event.fields['dst_cloudflare_origin'] = bool(
+        not dst_public and is_origin is not None and is_origin(event.dst_ip))
+
     crosses = (event.fields['src_vlan'] is not None
                and event.fields['dst_vlan'] is not None
                and event.fields['src_vlan'] != event.fields['dst_vlan'])

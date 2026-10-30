@@ -285,7 +285,39 @@ class SiteProfile:
                               else '') or os.environ.get('NETMON_GEOIP_DIR', ''))
         self._geoip = None
 
+        # Services published only through Cloudflare. `origins` are the
+        # internal hosts behind it (names, addresses, CIDRs or roles); inbound
+        # on 443 to one of them from anywhere but Cloudflare is the
+        # inbound_https_bypass finding. `ranges` replaces the shipped list.
+        cloudflare = data.get('cloudflare') or {}
+        if not isinstance(cloudflare, dict):
+            cloudflare = {}
+        self.cloudflare_origins = [str(o) for o in (cloudflare.get('origins') or [])
+                                   if str(o).strip()]
+        self.cloudflare_ranges = _load_ranges(cloudflare.get('ranges'))
+
         self.validate()
+
+    def is_cloudflare(self, ip):
+        """Whether an address is in Cloudflare's published ranges."""
+        try:
+            address = ipaddress.ip_address(ip)
+        except ValueError:
+            return False
+        return any(address in network for network in self.cloudflare_ranges
+                   if network.version == address.version)
+
+    def is_cloudflare_origin(self, ip):
+        """Whether an internal address is one the site publishes via Cloudflare."""
+        if not self.cloudflare_origins or not ip:
+            return False
+        device = self.device_for_ip(ip)
+        for spec in self.cloudflare_origins:
+            if device is not None and spec in (device.name, device.role):
+                return True
+            if _endpoint_matches(spec, ip):
+                return True
+        return False
 
     def geoip(self):
         """The GeoIP reader for this site, or None when none is configured."""
@@ -451,6 +483,44 @@ class SiteProfile:
             'router_macs': len(self.router_macs),
             'site_services': len(self.services),
         }
+
+
+#: Cloudflare's published ranges, shipped dated beside the rules. Not fetched:
+#: nothing here makes a call about the site's traffic.
+CLOUDFLARE_RANGES = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                 'rules', 'cloudflare-ranges.txt')
+
+
+def _parse_networks(lines, where):
+    networks = []
+    for raw in lines:
+        text = str(raw).split('#', 1)[0].strip()
+        if not text:
+            continue
+        try:
+            networks.append(ipaddress.ip_network(text, strict=False))
+        except ValueError:
+            raise ProfileError(f"{where}: '{text}' is not a network")
+    return tuple(networks)
+
+
+_SHIPPED_RANGES = None
+
+
+def _load_ranges(override):
+    """The profile's own list if it has one, else the shipped file."""
+    global _SHIPPED_RANGES
+    if override:
+        return _parse_networks(override, 'cloudflare.ranges')
+    if _SHIPPED_RANGES is None:
+        try:
+            with open(CLOUDFLARE_RANGES, encoding='utf-8') as handle:
+                _SHIPPED_RANGES = _parse_networks(handle.readlines(),
+                                                  CLOUDFLARE_RANGES)
+        except OSError as e:
+            logger.warning('could not read %s: %s', CLOUDFLARE_RANGES, e)
+            _SHIPPED_RANGES = ()
+    return _SHIPPED_RANGES
 
 
 def _load_services(entries):

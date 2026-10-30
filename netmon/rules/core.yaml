@@ -419,6 +419,27 @@
     tier: push
   next_check: "Find out what on {src_name} talks to AS{dst_asn}; if it should, add {dst_asn} to the role's allowed_asns in the profile."
 
+- id: inbound_https_bypass
+  type: stateful
+  handler: inbound_volume
+  title: Inbound HTTPS from outside Cloudflare, above this host's usual level
+  severity: high
+  tier: push
+  grounded_in: >
+    The site publishes its services through Cloudflare, so an origin should
+    hear on 443 only from Cloudflare's ranges. Scanners try every address on
+    443 all day, which is the usual level from elsewhere; a day well above it
+    is someone using the origin directly, around Cloudflare and whatever it
+    filters. Inert until the profile lists origins under `cloudflare:`.
+  when:
+    direction: inbound
+  params:
+    ports: [443]
+    min_bytes: 1048576         # 1 MB from outside Cloudflare before judging
+    multiple: 4                # times the origin's median day
+    min_days: 1                # days seen on the port before it reports
+    history_days: 30
+
 - id: p2_anomaly
   type: stateful
   handler: p2_roster
