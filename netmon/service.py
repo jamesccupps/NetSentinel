@@ -374,15 +374,24 @@ class Service:
 
     def _analyse(self, path):
         from netmon.analyze import Analyzer
+        from netmon.leakcheck import LeakCounter
         from netmon.sources.pcap import PcapError, read_pcap
 
         analyzer = Analyzer(self.profile, self.rules)
+        # These files were written under the capture filter, so anything from
+        # a metadata-only segment in one is a leak, not a sample.
+        leaks = LeakCounter(self.profile, on_disk=True,
+                            source=os.path.basename(path))
         try:
-            analyzer.feed(read_pcap(path, self.profile))
+            analyzer.feed(read_pcap(path, self.profile, leaks=leaks))
         except PcapError as e:
             logger.warning('could not read %s: %s', os.path.basename(path), e)
             self.counts['errors'] += 1
             return []
+        if leaks.restricted_frames:
+            logger.error('%s holds %d frames from metadata-only segments',
+                         os.path.basename(path), leaks.restricted_frames)
+        analyzer.findings.extend(leaks.findings())
         self.counts['events'] += analyzer.events_seen
         self.window.add_events(analyzer.events_seen)
         logger.info('%s: %d events, %d findings', os.path.basename(path),
@@ -523,7 +532,12 @@ class Service:
                 self.counts['errors'] += 1
                 return
             self.counts['pushed'] += len(sent)
+            fresh_ids = {id(f) for f in fresh}
             for finding in sent:
+                if id(finding) not in fresh_ids:
+                    # Raised while sending — an extract that found restricted
+                    # frames on disk — so it is kept like any other.
+                    self.window.admit(finding)
                 self.window.mark_pushed(finding)
         finally:
             self.window.save()

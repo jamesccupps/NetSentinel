@@ -289,7 +289,7 @@ class RingBuffer:
         marked metadata-only since then must not come back out.
         """
         try:
-            from scapy.all import Dot1Q, PcapReader, PcapWriter
+            from scapy.all import PcapReader, PcapWriter
         except ImportError as e:
             raise RingBufferError(
                 'scapy is needed to extract from the ring buffer') from e
@@ -306,8 +306,10 @@ class RingBuffer:
             stamp = time.strftime('%Y%m%d-%H%M%S', time.localtime(around))
             out_path = os.path.join(self.directory, f'extract-{stamp}.pcap')
 
+        from netmon.leakcheck import Restricted, frame_layout
+
         wanted = {str(e) for e in endpoints if e}
-        restricted = set(self.restricted_vlans())
+        restricted = Restricted(self.profile)
         written = skipped_restricted = 0
         writer = None
 
@@ -323,11 +325,13 @@ class RingBuffer:
                         stamp = float(getattr(packet, 'time', 0) or 0)
                         if not start <= stamp <= end:
                             continue
-                        if restricted:
-                            tag = packet.getlayer(Dot1Q)
-                            if tag is not None and int(tag.vlan) in restricted:
-                                skipped_restricted += 1
-                                continue
+                        # By any tag in the stack and by address, not only
+                        # the outer tag: a QinQ frame or a routed copy carries
+                        # the same payload.
+                        if restricted and restricted.is_restricted(frame_layout(
+                                getattr(packet, 'original', None) or bytes(packet))):
+                            skipped_restricted += 1
+                            continue
                         if wanted and not _involves(packet, wanted):
                             continue
                         if writer is None:

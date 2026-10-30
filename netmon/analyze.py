@@ -157,6 +157,12 @@ def _main(argv=None):
                         help='a capture file. Protocol-aware rules — BACnet, '
                              'TLS server names, DNS, DHCP — need this; a flow '
                              'export does not carry any of it')
+    parser.add_argument('--from-ring', action='store_true',
+                        help='the capture came from the rolling capture, so '
+                             'any frame from a metadata-only segment in it is '
+                             'a leak, reported as one. Without this, a capture '
+                             'is treated as an unfiltered sample: such frames '
+                             'are read as metadata only and counted')
     parser.add_argument('--no-dedup-router', action='store_true',
                         help='keep the router-relayed copy of routed packets. '
                              'A trunk mirror shows each one twice')
@@ -227,14 +233,20 @@ def _main(argv=None):
             return 1
         sources.append(os.path.basename(args.unifi))
 
+    leaks = None
     if args.pcap:
+        from netmon.leakcheck import LeakCounter
         from netmon.sources.pcap import PcapError, read_pcap
+        leaks = LeakCounter(profile, on_disk=args.from_ring,
+                            source=os.path.basename(args.pcap))
         try:
             analyzer.feed(read_pcap(args.pcap, profile, limit=args.limit,
-                                    dedup_router=not args.no_dedup_router))
+                                    dedup_router=not args.no_dedup_router,
+                                    leaks=leaks))
         except PcapError as e:
             print(f'capture: {e}', file=sys.stderr)
             return 1
+        analyzer.findings.extend(leaks.findings())
         sources.append(os.path.basename(args.pcap))
 
     floor = Severity.rank(args.min_severity)
@@ -251,6 +263,11 @@ def _main(argv=None):
     print(f"{profile.name} — {' + '.join(sources)}")
     print(f"  {report['events']} events, {len(rules)} rules, "
           f"{report['seconds']}s")
+    if leaks is not None and leaks.restricted_frames and not args.from_ring:
+        print(f"  {leaks.restricted_frames} frames from metadata-only segments, "
+              f"read as metadata only. Expected in an unfiltered sample; in a "
+              f"file from the rolling capture it means the filter is leaking "
+              f"(--from-ring reports it as such).")
     if report['suppressed_repeats']:
         print(f"  {report['suppressed_repeats']} repeats collapsed")
     print()

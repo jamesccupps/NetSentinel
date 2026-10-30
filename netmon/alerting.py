@@ -195,6 +195,10 @@ class Notifier:
         # cover is held back from push; the digest still lists it.
         self.silences = silences
         self.silenced = []
+        # Extracts that had to leave restricted frames out: the ring buffer
+        # holds what it never should. Pushed once per set of files.
+        self.leaks = []
+        self._leak_keys = set()
 
     # ─── Sending ─────────────────────────────────────────────────────────
 
@@ -231,6 +235,14 @@ class Notifier:
                 sent.append(finding)
             else:
                 skipped.append(finding)
+
+        for leak in self.leaks:
+            if leak.key in self._leak_keys:
+                continue
+            self._leak_keys.add(leak.key)
+            if self._deliver(redact_finding(leak, self.profile, audience=ALERT)):
+                sent.append(leak)
+        self.leaks = []
         return sent, skipped
 
     def send_digest(self, analyzer, title=None, open_items=None, body=None):
@@ -264,6 +276,11 @@ class Notifier:
             logger.info('no capture extract for %s: %s', finding.rule_id, e)
             return ''
         self.extracts.append(result)
+        if result.get('excluded_restricted'):
+            from netmon.leakcheck import extraction_finding
+            leak = extraction_finding(result, self.profile)
+            if leak is not None:
+                self.leaks.append(leak)
         return result['path']
 
     def _deliver(self, record, topic=None, priority=None, tags=None):
