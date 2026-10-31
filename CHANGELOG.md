@@ -1,5 +1,22 @@
 # NetSentinel Changelog
 
+## Unreleased
+
+### ARP: a remembered address is not spoofing
+
+Two smart-home devices that each remembered 192.168.1.80 from the network they
+were set up on announced it once whenever they rejoined Wi-Fi, hours apart, and
+NetSentinel called it a CRITICAL "ARP Spoofing": the address had gone back to a
+MAC that held it before, and that counted however long ago it was.
+- An address now changes hands only when the new MAC claims it twice within two
+  minutes; a spoofer repeats itself every few seconds to keep caches poisoned.
+- It is spoofing only while the previous owner is still using the address
+  (heard in the last ten minutes).
+- A device that is not the gateway is no longer met with "verify your gateway".
+- The traffic saved with an ARP alert now holds the ARP that raised it.
+- This computer's MAC, pinned as a "gateway" before 1.9.0 read the route table
+  properly, is dropped from the saved pins.
+
 ## v1.9.0 — Watching this PC's own traffic, review mode, and an audit of your network
 
 **2100 unit tests** (up from 1456) plus 14 integration checks. The suite no

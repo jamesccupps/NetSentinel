@@ -72,7 +72,9 @@ class TestArp(_Lan):
         """A relay keeps the Ethernet source constant; the claim is in the payload."""
         ids, alerts = self.engine(env=False)
         ids.inspect_packet(arp('192.168.1.20', '02:00:00:00:00:01', ether='02:aa:aa:aa:aa:aa'))
-        ids.inspect_packet(arp('192.168.1.20', '02:00:00:00:00:02', ether='02:aa:aa:aa:aa:aa'))
+        for _ in range(2):              # a spoofer repeats its claim
+            ids.inspect_packet(arp('192.168.1.20', '02:00:00:00:00:02',
+                                   ether='02:aa:aa:aa:aa:aa'))
         self.assertIn('ARP-SPOOF', self.rules(alerts))
 
     def test_a_proxy_relaying_the_same_claim_is_not_spoofing(self):
@@ -113,7 +115,8 @@ class TestArp(_Lan):
         ids, alerts = self.engine(env=False)
         for mac in ('00:1b:21:00:00:01', '00:1b:21:00:00:02', '00:1b:21:00:00:01'):
             ids._alert_cooldowns.clear()
-            ids.inspect_packet(arp('192.168.1.41', mac))
+            for _ in range(2):          # each side keeps repeating its claim
+                ids.inspect_packet(arp('192.168.1.41', mac))
         self.assertEqual([a.severity for a in alerts if a.rule_id == 'ARP-SPOOF'][-1],
                          'CRITICAL')
 
