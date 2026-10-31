@@ -1,6 +1,10 @@
 # NetSentinel Changelog
 
-## Unreleased
+## v1.9.1 — A day of real alerts, and what they were
+
+**2124 unit tests** plus 14 integration checks. A day of 1.9.0 on a real
+network raised 263 alerts; none was an attack, and every rule behind them is
+fixed here, each with a test that fails on 1.9.0.
 
 ### ARP: a remembered address is not spoofing
 
@@ -17,9 +21,9 @@ MAC that held it before, and that counted however long ago it was.
 - This computer's MAC, pinned as a "gateway" before 1.9.0 read the route table
   properly, is dropped from the saved pins.
 
-### A day of real alerts, none of them an attack
+### The rest of the day's alerts
 
-The rest of 263 alerts from one day on the owner's network, all false:
+All false, and all from rules that misread ordinary traffic:
 - **Services are named by the server's port.** The capture now records which
   end of each TCP connection is the server, from the handshake. For one
   already open, this computer is the server only if it listens on the port.
