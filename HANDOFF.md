@@ -1,4 +1,13 @@
-# Handoff: v1.9.0 released; second review of real alerts under way
+# Handoff: v1.9.1 released (the second review's fixes)
+
+**v1.9.1** (James asked, 2026-10-31):
+- the tag `v1.9.1` is at `a1d745c`, after CI passed on all five jobs;
+- release run #6 published https://github.com/jamesccupps/NetSentinel/releases/tag/v1.9.1
+  as Latest, with `NetSentinel.exe` (81.6 MB) and its `.sha256`;
+- it holds the ARP fix and the nine below.
+
+Next: James runs 1.9.1 with review mode on, and the next batch of alerts gets
+the same review.
 
 Kept current during the work so it survives a context reset. Last updated
 2026-10-31 by the local Claude Code session on James's desktop. Read `CLAUDE.md`
