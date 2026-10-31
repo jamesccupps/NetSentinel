@@ -46,6 +46,16 @@ __all__ = ['LanThreatMonitor', 'is_randomized_mac', 'is_failover_mac',
 
 STATE_FILE = 'lan_state.json'
 
+# An address changes hands only when the new MAC claims it twice this close
+# together. A device rejoining Wi-Fi announces, once, the address it had on the
+# network it was set up on, and moves on to its real one: two smart-home devices
+# that both remembered 192.168.1.80 took turns "stealing" it hours apart, as a
+# CRITICAL. A spoofer repeats itself every few seconds to keep caches poisoned,
+# and a device that really owns an address keeps using it.
+ARP_CONFIRM_SECONDS = 120
+# A change is contested only if the previous owner was heard this recently.
+ARP_CONTEST_SECONDS = 600
+
 # ─── MAC helpers ─────────────────────────────────────────────────────────────
 
 # Virtual MACs that move between routers by design (RFC 5798 VRRP, Cisco HSRP
@@ -246,6 +256,12 @@ class LanThreatMonitor:
         self.state = {'created': time.time(), 'gateway_macs': {}, 'dhcp_servers': [],
                       'routers': [], 'dhcpv6_servers': [], 'known_macs': {}}
         self._load()
+        # This computer is never its own gateway. Before 1.9.0 read the route table
+        # properly it was taken for one, and its MAC pinned; the pin outlived the fix.
+        own = set(getattr(net_env, 'local_ips', None) or [])
+        for ip in [ip for ip in self.state['gateway_macs'] if ip in own]:
+            del self.state['gateway_macs'][ip]
+            self._dirty = True
 
         # ARP
         self._started = time.time()
@@ -372,8 +388,10 @@ class LanThreatMonitor:
 
         entry = self._arp.get(ip)
         if entry is None:
-            self._arp[ip] = {'mac': mac, 'last': now, 'history': [mac]}
-        elif entry['mac'] != mac:
+            self._arp[ip] = {'mac': mac, 'last': now, 'history': [mac], 'pending': {}}
+        elif entry['mac'] == mac:
+            entry['last'] = now
+        elif self._claim_confirmed(entry, mac, now):
             previous, prev_last = entry['mac'], entry['last']
             history = entry['history']
             flapping = mac in history[:-1]
@@ -381,8 +399,10 @@ class LanThreatMonitor:
             history.append(mac)
             del history[:-6]
             failover = is_failover_mac(mac) or is_failover_mac(previous)
-            recent = now - prev_last <= 600
-            if not failover and ip not in self._gateways() and (recent or flapping):
+            # Both must be using the address at once. "Flapping" used to count on
+            # its own, so a back-and-forth hours apart was two hosts fighting.
+            contested = now - prev_last <= ARP_CONTEST_SECONDS
+            if not failover and ip not in self._gateways() and contested:
                 both_random = is_randomized_mac(mac) and is_randomized_mac(previous)
                 severity = 'CRITICAL' if flapping else ('MEDIUM' if both_random else 'HIGH')
                 findings.append(self._finding(
@@ -404,11 +424,11 @@ class LanThreatMonitor:
                                      + (' Both MACs are randomised, which can also be one '
                                         'phone or laptop changing its private address.'
                                         if both_random else '')),
-                     'recommendation': 'Verify your gateway MAC address. Someone on your '
-                                       'local network may be intercepting traffic.'},
+                     'recommendation': 'Find both MACs in your router\'s list of clients. '
+                                       'One you do not recognise is the one to look at; '
+                                       'two of your own on one address is an address '
+                                       'conflict, fixed by giving one another address.'},
                     'MITM'))
-        else:
-            entry['last'] = now
 
         # One MAC claiming many IPs.
         claims = self._mac_ips.setdefault(mac, {})
@@ -440,6 +460,18 @@ class LanThreatMonitor:
             for k in list(self._garp)[:512]:
                 del self._garp[k]
         return findings
+
+    @staticmethod
+    def _claim_confirmed(entry, mac, now):
+        """Whether mac has now claimed the address twice within ARP_CONFIRM_SECONDS."""
+        pending = entry.setdefault('pending', {})
+        first = pending.pop(mac, None)
+        if first is not None and now - first <= ARP_CONFIRM_SECONDS:
+            return True
+        pending[mac] = now
+        while len(pending) > 8:
+            pending.pop(min(pending, key=pending.get))
+        return False
 
     def _check_gateway(self, ip, mac, now):
         pins = self.state['gateway_macs']

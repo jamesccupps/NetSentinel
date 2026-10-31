@@ -152,7 +152,10 @@ def test_ids_full_pipeline():
         # ARP normal
         make_packet(src_ip="192.168.1.1", src_mac="aa:bb:cc:11:22:33",
                     protocol="ARP"),
-        # ARP spoof (different MAC same IP)
+        # ARP spoof (different MAC same IP), repeated as spoofers do to keep
+        # caches poisoned; one announcement alone is a device's stale address
+        make_packet(src_ip="192.168.1.1", src_mac="ff:ee:dd:99:88:77",
+                    protocol="ARP"),
         make_packet(src_ip="192.168.1.1", src_mac="ff:ee:dd:99:88:77",
                     protocol="ARP"),
     ]

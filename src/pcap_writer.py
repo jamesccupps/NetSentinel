@@ -45,7 +45,8 @@ def _frame_involves(frame, endpoints):
 
     VLAN tags are skipped. A network that delivers tagged frames to this machine
     had every tagged packet fail the check, so alerts about them got a capture of
-    all traffic instead of theirs.
+    all traffic instead of theirs. ARP is read too: without it an ARP alert's
+    capture held everything but the ARP that raised it.
     """
     try:
         offset = 12
@@ -54,7 +55,10 @@ def _frame_involves(frame, endpoints):
             offset += 4
             ethertype = (frame[offset] << 8) | frame[offset + 1]
         ip = offset + 2
-        if ethertype == 0x0800 and len(frame) >= ip + 20:          # IPv4
+        if ethertype == 0x0806 and len(frame) >= ip + 28:           # ARP, IPv4 over Ethernet
+            src = '.'.join(str(b) for b in frame[ip + 14:ip + 18])  # sender address
+            dst = '.'.join(str(b) for b in frame[ip + 24:ip + 28])  # target address
+        elif ethertype == 0x0800 and len(frame) >= ip + 20:          # IPv4
             src = '.'.join(str(b) for b in frame[ip + 12:ip + 16])
             dst = '.'.join(str(b) for b in frame[ip + 16:ip + 20])
         elif ethertype == 0x86dd and len(frame) >= ip + 40:        # IPv6

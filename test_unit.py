@@ -508,6 +508,7 @@ class TestIDSRules(unittest.TestCase):
                            protocol="ARP")
         self.ids.inspect_packet(pkt1)
         self.ids.inspect_packet(pkt2)
+        self.ids.inspect_packet(pkt2)       # a spoofer repeats itself to keep caches poisoned
         spoof = [a for a in self.alerts if a.rule_id == "ARP-SPOOF"]
         self.assertGreater(len(spoof), 0, "Should detect ARP spoofing")
 

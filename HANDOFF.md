@@ -1,9 +1,65 @@
-# Handoff: v1.9.0 released
+# Handoff: v1.9.0 released; second review of real alerts under way
 
 Kept current during the work so it survives a context reset. Last updated
-2026-10-30 by the local Claude Code session on James's desktop. Read `CLAUDE.md`
+2026-10-31 by the local Claude Code session on James's desktop. Read `CLAUDE.md`
 first. The approved plan, with its findings by file:line, is outside the repo at
 `C:\Users\james\.claude\plans\parallel-inventing-lovelace.md`.
+
+## Second review, 2026-10-31 (263 alerts since 10-30 13:47)
+
+James's network:
+- This PC is 192.168.8.32, on VLAN-tagged traffic from the UniFi router (MAC
+  70:a7:41:fe:68:b4; it is also the source MAC of everything routed from other
+  VLANs).
+- 192.168.8.69 is a Raspberry Pi (d8:3a:dd), and 192.168.8.54 is a printer.
+- **Windows' TCP dynamic port range on this PC starts at 1024** (the default
+  is 49152), so this PC's outgoing connections use local ports like 1433,
+  5900, 6379, 9050 and 9100.
+- An audit of 192.168.8.0/24 ran 10-30 14:17:52–14:17:59 (3 hosts, 7 findings).
+
+**Fixed (committed, not pushed):** the CRITICAL ARP-SPOOF on 192.168.1.80. Two
+smart-home devices, `98:17:3c:4f:61:64` and a Govee/Intellirocks
+(`d4:ad:fc:63:19:0a`), each announce that remembered address once when they
+rejoin Wi-Fi, hours apart; the capture showed the first one then taking
+192.168.12.169 from DHCP. See CHANGELOG "Unreleased"; tests in
+`test_second_review.py`.
+
+**Found, not yet fixed** (proposed to James):
+1. **Port-only detections fire on the client's port.** With the 1024 range,
+   replies to this PC's own connections became the following, though nothing
+   listens on any of those ports:
+   - "Unencrypted VNC Service" (CRITICAL; from Google and Akamai);
+   - "MSSQL" (from Cloudflare);
+   - "HTTP-Admin";
+   - IOC-TOR 9050/9051/9150 (from the Pi);
+   - BAD-PORT 6666 (Tailscale);
+   - "Network Printer" 9100;
+   - "Redis No Auth" (an HTTP GET sent from local port 6379).
+
+   The fix needs to know which side is the server, from SYN/SYN-ACK.
+2. **Redis check: operator precedence.** `startswith(b'*') and b'SET' in p or
+   b'GET' in p` means any GET counts.
+3. **Modbus/SCADA CRITICAL on any payload under 8 bytes** on port 502. Require
+   a valid MBAP header.
+4. **BACnet matched on TCP** (localcast's client port 47808). BACnet/IP is UDP.
+5. **DNS-FAST-FLUX, 87 HIGH alerts every 5 minutes.**
+   - The domains were api.weather.gov and catalog.gamepass.com, on Akamai:
+     8 addresses in 2–3 /24s.
+   - The "1 s TTL" is the router's cache counting down; the minimum remaining
+     TTL means nothing.
+   - Real fast-flux spreads across many unrelated networks.
+6. **PORT-SCAN: 87 LOW alerts for one 7-second audit.** The count is per
+   scanner, but there is an alert per last-packet destination, so internet
+   hosts were named as targets.
+7. **SYN-FLOOD CRITICAL** for 51 SYNs at 5/s from this PC to the Pi's port
+   8500: a client retrying, not a flood.
+8. **ESET's hourly Digest login** is "[CONFIRMED]" HIGH. Forensics rates it LOW;
+   the verifier confirms every credential and raises it. It repeats hourly.
+9. **Certificate revocation checks** (lencr.org, HARICA, DigiCert CRLs) are
+   reported as insecure HTTP. They are signed by design, like updates.
+
+Fine as they are: the NEW-DEVICE (Withings), the two LIKELY-SAFE ML anomalies,
+and the DNS-FLOOD LOW (Tailscale's DNS).
 
 ## Where it stands
 
