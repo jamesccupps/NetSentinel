@@ -24,7 +24,10 @@ rejoin Wi-Fi, hours apart; the capture showed the first one then taking
 192.168.12.169 from DHCP. See CHANGELOG "Unreleased"; tests in
 `test_second_review.py`.
 
-**Found, not yet fixed** (proposed to James):
+**The other nine are fixed as well** (James: "Fix all 9"; committed, not pushed).
+Each has a test in `test_second_review.py` that fails on the old detectors.
+Problem 1 added `PacketInfo.server_port` (`capture.TcpRoles`); rules that name a
+service by port now go by it. The list as found:
 1. **Port-only detections fire on the client's port.** With the 1024 range,
    replies to this PC's own connections became the following, though nothing
    listens on any of those ports:

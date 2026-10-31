@@ -1017,6 +1017,18 @@ class AlertVerifier:
         protocol = evidence.get('protocol', '')
         cred_type = evidence.get('credential_type', '')
 
+        # Forensics rates an updater's hashed login LOW, and confirming it here
+        # raised it to "[CONFIRMED]" HIGH: ESET's hourly update check, every hour.
+        if '(Update Service)' in protocol:
+            return {'verdict': AlertVerdict.LIKELY_FALSE_POSITIVE, 'confidence': 0.8,
+                    'reasoning': [f"{protocol}: a hashed login an updater sends by design"],
+                    'summary': 'Update service login, hashed, by design'}
+        if 'digest' in cred_type.lower() or 'hash' in cred_type.lower():
+            return {'verdict': AlertVerdict.LIKELY_THREAT, 'confidence': 0.7,
+                    'reasoning': [f"Hashed {protocol} {cred_type} captured from network traffic",
+                                  "Not readable, but a weak password can be guessed from it"],
+                    'summary': f"{protocol}: hashed credential exposed"}
+
         # Credentials in plaintext are always serious
         reasoning.append(f"Plaintext {protocol} {cred_type} captured from network traffic")
         reasoning.append("Anyone on the same network segment could have intercepted this")
