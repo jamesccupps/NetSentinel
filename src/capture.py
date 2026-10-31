@@ -4,10 +4,11 @@ Captures packets, extracts metadata, and feeds them to the analysis pipeline.
 """
 
 import inspect
+import socket
 import threading
 import time
 import logging
-from collections import defaultdict, deque
+from collections import OrderedDict, defaultdict, deque
 
 from src.tls_inspect import (
     ClientHelloReassembler, QuicHelloReassembler, looks_like_quic,
@@ -114,7 +115,7 @@ class PacketInfo:
         'dns_rcode', 'dns_ttl', 'dns_answers', 'dns_qtype',
         'arp_op', 'arp_hwsrc', 'icmp_type',
         'http_method', 'http_host', 'http_path', 'app_protocol',
-        'sample_weight',
+        'sample_weight', 'server_port',
         '_raw_payload', '_tls_certs',
     ]
 
@@ -163,6 +164,9 @@ class PacketInfo:
         # How many packets this one stands for: under adaptive sampling only one in
         # N reaches the rules, so byte-counting rules scale by this.
         self.sample_weight = 1
+        # TCP only: the port of the end that accepted the connection, 0 if unknown
+        # (see TcpRoles). Rules that name a service by its port go by this one.
+        self.server_port = 0
         self._raw_payload = None
         self._tls_certs = ()       # DER certificates from a TLS <= 1.2 server flight
 
@@ -260,23 +264,71 @@ class NetworkFlow:
         return self.src_packets / max(total, 1)
 
 
+class TcpRoles:
+    """
+    Which end of each TCP connection is the server.
+
+    A rule that names a service by its port number has to look at the server's
+    port. This computer's outgoing connections used local ports from 1024 up
+    (Windows can be set that way), so a reply from Google to local port 5900 was
+    an "Unencrypted VNC Service" here, and one from a Raspberry Pi to 9050 was Tor.
+
+    The handshake says it: a SYN goes to the server, a SYN-ACK comes from it.
+    For a connection already open when capture started, this computer's own end
+    is the server only if something listens on that port. Otherwise, as for a
+    connection between two other hosts joined mid-way, it is unknown (0), and
+    rules keep their old reading of both ports.
+    """
+
+    def __init__(self, max_connections=50000):
+        self._servers = OrderedDict()     # connection key -> server's (ip, port)
+        self._max = max_connections
+
+    def server_port(self, info, local_ips=(), listening=()):
+        a, b = (info.src_ip, info.src_port), (info.dst_ip, info.dst_port)
+        key = (a, b) if a <= b else (b, a)
+        flags = info.flags or ''
+        server = None
+        if 'S' in flags:
+            server = a if 'A' in flags else b
+        elif key in self._servers:
+            self._servers.move_to_end(key)
+            return self._servers[key][1]
+        elif info.src_ip in local_ips:
+            server = a if info.src_port in listening else b
+        elif info.dst_ip in local_ips:
+            server = b if info.dst_port in listening else a
+        if server is None:
+            return 0
+        self._servers[key] = server
+        self._servers.move_to_end(key)
+        while len(self._servers) > self._max:
+            self._servers.popitem(last=False)
+        return server[1]
+
+
 # Map port numbers to process (Windows)
 _port_process_cache = {}
 _port_cache_time = 0
 _PORT_CACHE_TTL = 2  # seconds between full psutil enumerations
+# Refreshed with it, for TcpRoles: this computer's addresses and listening ports.
+_local_addresses = frozenset()
+_listening_ports = frozenset()
 
 
 def _refresh_port_process_map(force=False):
     """Build a map of local ports to process names using psutil."""
-    global _port_process_cache, _port_cache_time
+    global _port_process_cache, _port_cache_time, _local_addresses, _listening_ports
     if not PSUTIL_AVAILABLE:
         return
     now = time.time()
     if not force and now - _port_cache_time < _PORT_CACHE_TTL:
         return
     try:
-        new_map = {}
+        new_map, listening = {}, set()
         for conn in psutil.net_connections(kind='inet'):
+            if conn.laddr and conn.status == psutil.CONN_LISTEN:
+                listening.add(conn.laddr.port)
             if conn.laddr and conn.pid:
                 try:
                     proc = psutil.Process(conn.pid)
@@ -284,6 +336,10 @@ def _refresh_port_process_map(force=False):
                 except (psutil.NoSuchProcess, psutil.AccessDenied):
                     pass
         _port_process_cache = new_map
+        _listening_ports = frozenset(listening)
+        _local_addresses = frozenset(
+            a.address.split('%')[0] for addrs in psutil.net_if_addrs().values()
+            for a in addrs if a.family in (socket.AF_INET, socket.AF_INET6))
         _port_cache_time = now
     except Exception:
         pass
@@ -414,6 +470,7 @@ class CaptureEngine:
         self._hello_reassembler = ClientHelloReassembler()
         self._quic_reassembler = QuicHelloReassembler()
         self._cert_reassembler = ServerHandshakeReassembler()
+        self._tcp_roles = TcpRoles()
         self._stats_lock = threading.Lock()  # Lightweight lock for rate calculations
 
         # Queue-based processing: capture thread enqueues, worker dequeues
@@ -626,6 +683,10 @@ class CaptureEngine:
                 info.src_port = tcp.sport
                 info.dst_port = tcp.dport
                 info.flags = str(tcp.flags)
+                # A capture file is someone else's network: only its handshakes count.
+                info.server_port = self._tcp_roles.server_port(
+                    info, () if offline else _local_addresses,
+                    () if offline else _listening_ports)
                 tcp_seq = tcp.seq
                 payload = self._transport_payload(packet)
                 info.payload_size = len(payload)

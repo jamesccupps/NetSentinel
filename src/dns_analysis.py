@@ -65,6 +65,13 @@ DGA_MIN_LABEL_LEN = 7
 FLUX_MIN_ADDRESSES = 8
 FLUX_TTL_CEILING = 300
 FLUX_WINDOW_SEC = 900
+# And spread across this many unrelated networks (/16 for IPv4, /32 for IPv6).
+# Fast-flux rotates through compromised home machines all over the internet; a
+# CDN answers from a few blocks of its own. Akamai gave api.weather.gov 8
+# addresses in two /16s, and that was HIGH every five minutes all night.
+FLUX_MIN_NETWORKS = 4
+# A name reported once is not reported again for this long.
+FLUX_REPORT_HOLD_SEC = 3600
 
 # One address answering for this many unrelated registrable domains.
 SHARED_IP_DOMAIN_COUNT = 25
@@ -142,7 +149,7 @@ class DnsResponseMonitor:
 
         # {src_ip: deque[(timestamp, queried_name)]}
         self._failures = defaultdict(lambda: deque(maxlen=512))
-        # {domain: {'addresses': {ip: last_seen}, 'min_ttl': int, 'first': ts}}
+        # {domain: {'addresses': {ip: last_seen}, 'ttl': largest seen, 'first': ts}}
         self._resolutions = {}
         # {address: {registrable_domain}}
         self._addr_to_domains = defaultdict(set)
@@ -239,14 +246,15 @@ class DnsResponseMonitor:
 
         entry = self._resolutions.get(name)
         if entry is None:
-            entry = {'addresses': {}, 'min_ttl': ttl if ttl >= 0 else 1 << 30,
-                     'first': now}
+            entry = {'addresses': {}, 'ttl': -1, 'first': now}
             self._resolutions[name] = entry
         for addr in addresses:
             entry['addresses'][addr] = now
             self._addr_to_domains[addr].add(_registrable(name))
-        if 0 <= ttl < entry['min_ttl']:
-            entry['min_ttl'] = ttl
+        # The largest TTL seen. A caching resolver (the router, usually) hands out
+        # what is left of its copy's TTL, counting down to 1, so the smallest one
+        # seen said every name had a TTL of a second.
+        entry['ttl'] = max(entry.get('ttl', -1), ttl)
 
         cutoff = now - FLUX_WINDOW_SEC
         live = {a: t for a, t in entry['addresses'].items() if t >= cutoff}
@@ -254,10 +262,13 @@ class DnsResponseMonitor:
 
         if len(live) < self.flux_threshold:
             return None
-        if entry['min_ttl'] > FLUX_TTL_CEILING:
+        if entry['ttl'] > FLUX_TTL_CEILING:
             # Many addresses with a long TTL is ordinary load balancing.
             return None
-        if now - self._reported_flux.get(name, 0) < self._report_cooldown:
+        networks = {_network_of(a) for a in live}
+        if len(networks) < FLUX_MIN_NETWORKS:
+            return None
+        if name in self._reported_flux and now - self._reported_flux[name] < FLUX_REPORT_HOLD_SEC:
             return None
         try:
             if self.cdn_check(name, list(live)):
@@ -273,13 +284,15 @@ class DnsResponseMonitor:
             'severity': 'HIGH',
             'domain': name,
             'address_count': len(live),
-            'min_ttl': entry['min_ttl'],
+            'network_count': len(networks),
+            'min_ttl': entry['ttl'],
             'window_sec': FLUX_WINDOW_SEC,
             'sample_addresses': sorted(live)[:10],
             'description': (
-                f"{name} resolved to {len(live)} different addresses within "
-                f"{FLUX_WINDOW_SEC // 60} minutes with a TTL of "
-                f"{entry['min_ttl']}s."),
+                f"{name} resolved to {len(live)} different addresses in "
+                f"{len(networks)} unrelated networks within "
+                f"{FLUX_WINDOW_SEC // 60} minutes, with a TTL of at most "
+                f"{entry['ttl']}s."),
             'recommendation': (
                 'Hosting that moves this fast is characteristic of fast-flux '
                 'networks, which rotate through compromised hosts to stay '
@@ -332,9 +345,9 @@ class DnsResponseMonitor:
         for ip in empty:
             del self._failures[ip]
 
-        for store in (self._reported_nxdomain, self._reported_flux):
-            for key in [k for k, t in store.items()
-                        if now - t > self._report_cooldown * 4]:
+        for store, hold in ((self._reported_nxdomain, self._report_cooldown * 4),
+                            (self._reported_flux, FLUX_REPORT_HOLD_SEC)):
+            for key in [k for k, t in store.items() if now - t > hold]:
                 del store[key]
 
         # Bounded regardless of traffic: a resolver under a flood would otherwise
@@ -352,6 +365,13 @@ def _looks_like_address(value):
         return True
     parts = value.split('.')
     return len(parts) == 4 and all(p.isdigit() and len(p) <= 3 for p in parts)
+
+
+def _network_of(address):
+    """The /16 an IPv4 address sits in, or the /32 for IPv6."""
+    if ':' in address:
+        return ':'.join(address.split(':')[:2])
+    return '.'.join(address.split('.')[:2])
 
 
 def _default_cdn_check(name, addresses):

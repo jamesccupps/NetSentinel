@@ -197,8 +197,8 @@ class TestFastFlux(unittest.TestCase):
 
     def test_many_addresses_and_short_ttl_fires(self):
         findings = []
-        for i in range(20):
-            findings += self._resolve('flux.example.net', [f'93.184.{i}.{i}'],
+        for i in range(20):         # spread across the internet, as fast-flux is
+            findings += self._resolve('flux.example.net', [f'{60 + i}.184.{i}.{i}'],
                                       60, T0 + i * 10)
         self.assertEqual(len(findings), 1)
         f = findings[0]
@@ -224,7 +224,7 @@ class TestFastFlux(unittest.TestCase):
     def test_ipv6_answers_count(self):
         findings = []
         for i in range(20):
-            findings += self._resolve('flux6.example.net', [f'2001:db8::{i}'],
+            findings += self._resolve('flux6.example.net', [f'2001:{i:x}::1'],
                                       60, T0 + i * 10)
         self.assertTrue(findings)
 
@@ -292,7 +292,7 @@ class TestIdsIntegration(unittest.TestCase):
     def test_fast_flux_raises_an_alert(self):
         for i in range(20):
             self.ids.inspect_packet(self._response(
-                'flux.example.net', 0, [f'93.184.{i}.{i}'], 60, T0 + i * 10))
+                'flux.example.net', 0, [f'{60 + i}.184.{i}.{i}'], 60, T0 + i * 10))
         self.assertIn('DNS-FAST-FLUX', self._rules())
 
     def test_normal_dns_traffic_raises_nothing(self):

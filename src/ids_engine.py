@@ -5,6 +5,7 @@ Rule-based detection for known attack patterns, port scans,
 brute force attempts, suspicious payloads, and protocol anomalies.
 """
 
+import copy
 import os
 import sys
 import json
@@ -263,10 +264,18 @@ class SlidingPortWindow:
         many ports on its targets; peer-to-peer and voice apps reach many peers on
         one or two ports each, which adds up to many ports but none per peer.
         """
+        return max((len(p) for p in self._ports_per_destination().values()), default=0)
+
+    def most_probed(self):
+        """The destination that received the most distinct ports."""
+        per_dst = self._ports_per_destination()
+        return max(per_dst, key=lambda d: len(per_dst[d]), default='')
+
+    def _ports_per_destination(self):
         per_dst = {}
         for _, port, dst in self._events:
             per_dst.setdefault(dst, set()).add(port)
-        return max((len(p) for p in per_dst.values()), default=0)
+        return per_dst
 
     @property
     def last_seen(self):
@@ -1041,9 +1050,12 @@ class IDSEngine:
         # === Rule 4: Suspicious Ports ===
         # 4444 and 5555 are also two of the commonest Stratum ports; to a known
         # pool, the mining alert above is the right description, not
-        # "Metasploit" or "Android ADB".
+        # "Metasploit" or "Android ADB". And only when it is the server's port
+        # (capture.TcpRoles): a reply to this computer's outgoing port 6666 is not
+        # a connection to one.
         if pkt_info.dst_port in self.known_bad_ports and not (
-                pool and pkt_info.dst_port in _MINING_PORTS):
+                pool and pkt_info.dst_port in _MINING_PORTS) and \
+                getattr(pkt_info, 'server_port', 0) in (0, pkt_info.dst_port):
             alerts.append(self._create_alert(
                 "BAD-PORT", Severity.HIGH,
                 "Known Malicious Port",
@@ -1078,8 +1090,11 @@ class IDSEngine:
         #     its targets.
         if pkt_info.src_ip and pkt_info.dst_port:
             # Don't track as "scanning" if src is sending FROM a well-known service
-            # port — that's response traffic, not reconnaissance
-            src_is_service_response = pkt_info.src_port in _COMMON_SERVICE_PORTS
+            # port — that's response traffic, not reconnaissance. Nor when the
+            # handshake says the destination is the client (capture.TcpRoles).
+            server = getattr(pkt_info, 'server_port', 0)
+            src_is_service_response = (pkt_info.src_port in _COMMON_SERVICE_PORTS
+                                       or server not in (0, pkt_info.dst_port))
 
             if not src_is_service_response:
                 window = self._port_access[pkt_info.src_ip]
@@ -1089,7 +1104,6 @@ class IDSEngine:
                 if unique_ports >= self.port_scan_threshold:
                     # Only materialised when an alert fires, not on every packet.
                     scanned_ports = window.ports()
-                    dst_ips_hit = window.destinations()
                     # Check if ALL scanned ports are ephemeral (>= 1024)
                     # If so, this is a server responding to many clients, not a scan
                     has_low_ports = scanned_ports[0] < 1024
@@ -1097,17 +1111,29 @@ class IDSEngine:
                         2, self.port_scan_threshold // 2)
 
                     if has_low_ports and concentrated:
+                        # One alert per scanner, about its main target. The count
+                        # is per scanner, but the alert went to whatever packet
+                        # crossed the line, one per destination: a 7-second audit
+                        # of three hosts raised 87, most naming internet servers
+                        # this computer was only browsing.
+                        per_dst = window._ports_per_destination()
+                        targets = sorted((d for d in per_dst if len(per_dst[d]) >= 2),
+                                         key=lambda d: -len(per_dst[d]))
+                        target = copy.copy(pkt_info)
+                        target.dst_ip = window.most_probed() or pkt_info.dst_ip
                         alerts.append(self._create_alert(
                             "PORT-SCAN", Severity.HIGH,
                             "Port Scan Detected",
                             f"{pkt_info.src_ip} scanned {unique_ports} ports in {self.port_scan_window}s",
-                            pkt_info,
+                            target,
+                            cooldown_key=f"PORT-SCAN:{pkt_info.src_ip}",
+                            hold_sec=600,
                             evidence={
                                 'scanner_ip': pkt_info.src_ip,
                                 'unique_port_count': unique_ports,
                                 'ports_scanned': scanned_ports[:50],
                                 'window_seconds': self.port_scan_window,
-                                'target_ips': list(dst_ips_hit)[:10],
+                                'target_ips': targets[:10],
                                 'scan_rate': f"{unique_ports / self.port_scan_window:.1f} ports/sec",
                                 'process': pkt_info.process_name or 'Unknown',
                                 'recommendation': 'A port scan probes for open services. This may indicate '
@@ -1170,7 +1196,7 @@ class IDSEngine:
                 # Track per (src, dst) pair — this is the key change
                 pair_key = f"syn-{pkt_info.src_ip}->{pkt_info.dst_ip}"
                 if pair_key not in self._conn_failures:
-                    self._conn_failures[pair_key] = deque(maxlen=500)
+                    self._conn_failures[pair_key] = deque(maxlen=600)   # above both thresholds
                 self._conn_failures[pair_key].append(now)
                 recent = [t for t in self._conn_failures[pair_key] if now - t < 10]
 
@@ -1183,10 +1209,13 @@ class IDSEngine:
                     src_is_local and pkt_info.dst_port in _STANDARD_OUTBOUND_PORTS
                 )
 
+                # A SYN flood is thousands a second. 50 in ten seconds was this
+                # computer retrying a Raspberry Pi's service five times a second,
+                # as a CRITICAL "SYN Flood Attack".
                 if is_outbound_to_service:
-                    threshold = 200  # Local machine → CDN, much higher bar
+                    threshold = 500  # Local machine → CDN, much higher bar
                 else:
-                    threshold = 50   # External → internal, or non-standard ports
+                    threshold = 300  # External → internal, or non-standard ports
 
                 if len(recent) > threshold:
                     # Final check: skip if destination is a known gateway or whitelisted
@@ -1653,7 +1682,8 @@ class IDSEngine:
                 evidence={
                     'domain': finding['domain'],
                     'distinct_addresses': finding['address_count'],
-                    'minimum_ttl_seconds': finding['min_ttl'],
+                    'distinct_networks': finding.get('network_count'),
+                    'ttl_seconds': finding['min_ttl'],
                     'window_seconds': finding['window_sec'],
                     'sample_addresses': finding['sample_addresses'],
                     'process': pkt_info.process_name or 'Unknown',

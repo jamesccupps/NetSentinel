@@ -146,9 +146,57 @@ SOFTWARE_UPDATE_HOSTS = (
 )
 
 
-def is_software_update_host(host):
+def is_modbus_frame(payload):
+    """A Modbus/TCP message: an MBAP header (protocol id 0, a length that covers
+    the rest) and a function code."""
+    if len(payload) < 8 or payload[2:4] != b'\x00\x00':
+        return False
+    return int.from_bytes(payload[4:6], 'big') == len(payload) - 6
+
+
+def service_ports(pkt_info):
+    """
+    A packet's (destination, source) ports, as services. Once capture knows
+    which end of a TCP connection is the server (capture.TcpRoles), the client's
+    port is 0, so it matches no service. Taking either port for the service made
+    this computer's outgoing ports into services: an HTTP GET sent from local
+    port 6379 was "Redis", the reply to one sent from 5900 "VNC".
+    """
+    server = getattr(pkt_info, 'server_port', 0) if pkt_info.protocol == 'TCP' else 0
+    if not server:
+        return pkt_info.dst_port, pkt_info.src_port
+    return (pkt_info.dst_port if pkt_info.dst_port == server else 0,
+            pkt_info.src_port if pkt_info.src_port == server else 0)
+
+
+def host_matches(host, suffixes):
+    """Whether host is one of these names or under one, on a dot boundary."""
     host = (host or '').lower().strip().rstrip('.').split(':')[0]
-    return any(host == s or host.endswith('.' + s) for s in SOFTWARE_UPDATE_HOSTS)
+    return any(host == s or host.endswith('.' + s) for s in suffixes)
+
+
+def is_software_update_host(host):
+    return host_matches(host, SOFTWARE_UPDATE_HOSTS)
+
+
+# Certificate checks go over plain HTTP by design too (RFC 5280, RFC 6960): a
+# revocation list, an OCSP answer or an issuer's certificate is signed by the
+# certificate authority. Let's Encrypt, HARICA and DigiCert fetches were each
+# an "Unencrypted HTTP Service".
+_CERTIFICATE_HOSTS = ('c.lencr.org', 'o.lencr.org', 'i.lencr.org', 'pki.goog')
+_SIGNED_FILE_SUFFIXES = (b'.crl', b'.crt', b'.cer', b'.p7c')
+
+
+def is_signed_fetch(host, payload):
+    """An HTTP request for something signed: a software update, a revocation
+    list, an OCSP check or a certificate."""
+    if is_software_update_host(host) or host_matches(host, _CERTIFICATE_HOSTS):
+        return True
+    if (host or '').lower().startswith(('ocsp', 'crl')):
+        return True
+    request = HTTP_REQUEST_RE.search(payload)
+    path = request.group(2).split(b'?')[0].lower() if request else b''
+    return path.endswith(_SIGNED_FILE_SUFFIXES) or b'application/ocsp-request' in payload.lower()
 
 
 FTP_USER_RE = re.compile(rb'USER\s+(\S+)', re.IGNORECASE)
@@ -828,6 +876,7 @@ class NetworkForensics:
 
         # Security audit findings
         self.insecure_services = {}  # {(ip, port): service_info}
+        self._seen_on = {}           # _seen_today: key -> when last reported
         self.security_findings = BoundedLog(MAX_SECURITY_FINDINGS)
 
         # DHCP device inventory
@@ -996,9 +1045,19 @@ class NetworkForensics:
         """
         self.analyze_packet(pkt_info, payload=raw_payload or None)
 
+    def _seen_today(self, key, ts):
+        """True if key was reported in the last day; otherwise notes it now."""
+        last = self._seen_on.get(key)
+        if last is not None and 0 <= ts - last < 86400:
+            return True
+        if len(self._seen_on) > 4096:
+            self._seen_on.clear()
+        self._seen_on[key] = ts
+        return False
+
     def _check_insecure_protocol(self, pkt_info):
         """Flag insecure protocol usage."""
-        port = pkt_info.dst_port
+        port, _ = service_ports(pkt_info)
         if port in INSECURE_PROTOCOLS and pkt_info.payload_size > 0:
             self.unencrypted_packets += 1
             key = (pkt_info.dst_ip, port)
@@ -1033,7 +1092,7 @@ class NetworkForensics:
 
     def _flag_unencrypted_data(self, pkt_info):
         """Flag unencrypted data transfer even without payload access."""
-        port = pkt_info.dst_port
+        port, _ = service_ports(pkt_info)
         if port in INSECURE_PROTOCOLS and pkt_info.payload_size > 5:
             proto_info = INSECURE_PROTOCOLS[port]
             self._add_timeline_event(pkt_info.timestamp, 'security',
@@ -1049,10 +1108,10 @@ class NetworkForensics:
         ts = pkt_info.timestamp
         src = pkt_info.src_ip
         dst = pkt_info.dst_ip
-        port = pkt_info.dst_port
+        port, sport = service_ports(pkt_info)
 
         # ─── FTP Credentials ─────────────────────────────────
-        if port == 21 or pkt_info.src_port == 21:
+        if port == 21 or sport == 21:
             match = FTP_USER_RE.search(payload)
             if match:
                 username = match.group(1).decode('utf-8', errors='replace')
@@ -1067,7 +1126,7 @@ class NetworkForensics:
 
         # ─── HTTP Credentials ─────────────────────────────────
         HTTP_PORTS = {80, 3000, 4200, 5000, 8000, 8008, 8080, 8081, 8888, 9090}
-        if port in HTTP_PORTS or pkt_info.src_port in HTTP_PORTS:
+        if port in HTTP_PORTS or sport in HTTP_PORTS:
             # Track HTTP method for session context
             req_match = HTTP_REQUEST_RE.search(payload)
             if req_match:
@@ -1124,24 +1183,24 @@ class NetworkForensics:
                 # Check if this is a known software update service using Digest Auth
                 # (ESET updates use HTTP Digest Auth by design — not a real credential leak
                 # since Digest Auth sends a hashed response, not the plaintext password)
-                KNOWN_DIGEST_AUTH_SERVICES = {
-                    'update.eset.com', 'eset.com', 'update.nod32.com',
-                }
-                is_known_update = any(svc in host.lower() for svc in KNOWN_DIGEST_AUTH_SERVICES)
+                is_known_update = host_matches(host, ('eset.com', 'nod32.com'))
 
                 raw_digest = (f"username={username}, realm={realm}, uri={uri}, "
                              f"nonce={nonce}, response={response}")
 
                 if is_known_update:
                     # Downgrade: Digest Auth is hashed, not plaintext, and this is
-                    # a known update service that uses it by design
-                    self._add_credential('HTTP Digest Auth (Update Service)', 'digest_hash',
-                        f"{username}@{realm} via {host} (hashed, not plaintext)",
-                        src, dst, port, ts,
-                        extra={'host': host, 'realm': realm, 'uri': uri,
-                               'note': 'Digest Auth sends a hashed response, not the actual password. '
-                                       'This is a known software update service using HTTP Digest by design.'},
-                        raw_value=raw_digest, risk='LOW')
+                    # a known update service that uses it by design. Once a day
+                    # per account: ESET checks every hour, each one another alert.
+                    if not self._seen_today(('update-login', src, host.lower(), username), ts):
+                        self._add_credential('HTTP Digest Auth (Update Service)', 'digest_hash',
+                            f"{username}@{realm} via {host} (hashed, not plaintext)",
+                            src, dst, port, ts,
+                            extra={'host': host, 'realm': realm, 'uri': uri,
+                                   'note': 'Digest Auth sends a hashed response, not the actual '
+                                           'password. This is a known software update service '
+                                           'using HTTP Digest by design.'},
+                            raw_value=raw_digest, risk='LOW')
                 else:
                     self._add_credential('HTTP Digest Auth', 'digest_credentials',
                         f"{username}@{realm} (uri: {uri})",
@@ -1202,7 +1261,7 @@ class NetworkForensics:
                             self._add_sensitive_data('Session Cookie', cookie[:80], src, dst, port, ts)
 
         # ─── Telnet ──────────────────────────────────────────
-        if port == 23 or pkt_info.src_port == 23:
+        if port == 23 or sport == 23:
             match = TELNET_LOGIN_RE.search(payload)
             if match:
                 username = match.group(1).decode('utf-8', errors='replace')
@@ -1221,7 +1280,7 @@ class NetworkForensics:
                 self._add_credential('SMTP', 'auth_attempt',
                     f"Method: {match.group(1).decode()}", src, dst, port, ts)
 
-        if port == 110 or pkt_info.src_port == 110:
+        if port == 110 or sport == 110:
             match = POP3_USER_RE.search(payload)
             if match:
                 username = match.group(1).decode('utf-8', errors='replace')
@@ -1250,21 +1309,22 @@ class NetworkForensics:
                     community, src, dst, port, ts, raw_value=community)
 
         # ─── Redis AUTH ──────────────────────────────────────
-        if port == 6379 or pkt_info.src_port == 6379:
+        if port == 6379 or sport == 6379:
             match = REDIS_AUTH_RE.search(payload)
             if match:
                 redis_pass = match.group(1).decode('utf-8', errors='replace')
                 self._add_credential('Redis', 'auth_password',
                     self._mask(redis_pass), src, dst, port, ts, raw_value=redis_pass)
-            # Redis commands without auth = open database
-            if payload.startswith(b'*') and b'SET' in payload or b'GET' in payload:
+            # Redis commands without auth = open database. Bracketed: "and" binds
+            # tighter than "or", so any payload containing GET counted.
+            if payload.startswith(b'*') and (b'SET' in payload or b'GET' in payload):
                 if not REDIS_AUTH_RE.search(payload):
                     self._add_sensitive_data('Redis No Auth',
                         'Redis commands without authentication — database is open',
                         src, dst, port, ts, risk='CRITICAL')
 
         # ─── MongoDB ─────────────────────────────────────────
-        if port == 27017 or pkt_info.src_port == 27017:
+        if port == 27017 or sport == 27017:
             match = MONGO_AUTH_RE.search(payload)
             if match:
                 mongo_val = match.group(1).decode('utf-8', errors='replace')
@@ -1272,14 +1332,14 @@ class NetworkForensics:
                     self._mask(mongo_val), src, dst, port, ts, raw_value=mongo_val)
 
         # ─── VNC ─────────────────────────────────────────────
-        if port in (5900, 5901, 5800) or pkt_info.src_port in (5900, 5901):
+        if port in (5900, 5901, 5800) or sport in (5900, 5901):
             if VNC_AUTH_RE.search(payload):
                 self._add_sensitive_data('VNC Session',
                     'VNC remote desktop connection — screen contents visible on network',
                     src, dst, port, ts, risk='CRITICAL')
 
         # ─── SIP (VoIP) ─────────────────────────────────────
-        if port == 5060 or pkt_info.src_port == 5060:
+        if port == 5060 or sport == 5060:
             match = SIP_AUTH_RE.search(payload)
             if match:
                 sip_auth = match.group(1).decode('utf-8', errors='replace')
@@ -1287,7 +1347,7 @@ class NetworkForensics:
                     self._mask(sip_auth, show=20), src, dst, port, ts, raw_value=sip_auth)
 
         # ─── RTSP (Cameras) ─────────────────────────────────
-        if port == 554 or pkt_info.src_port == 554:
+        if port == 554 or sport == 554:
             match = HTTP_BASIC_AUTH_RE.search(payload)
             if match:
                 try:
@@ -1308,14 +1368,14 @@ class NetworkForensics:
                     src, dst, port, ts, risk='HIGH')
 
         # ─── rsync ───────────────────────────────────────────
-        if port == 873 or pkt_info.src_port == 873:
+        if port == 873 or sport == 873:
             if RSYNC_MODULE_RE.search(payload):
                 self._add_sensitive_data('rsync',
                     'rsync server responding — file shares may be exposed',
                     src, dst, port, ts, risk='HIGH')
 
         # ─── IRC ─────────────────────────────────────────────
-        if port in (6667, 6668, 6669) or pkt_info.src_port in (6667, 6668, 6669):
+        if port in (6667, 6668, 6669) or sport in (6667, 6668, 6669):
             match = IRC_PASS_RE.search(payload)
             if match:
                 irc_pass = match.group(1).decode('utf-8', errors='replace')
@@ -1323,10 +1383,13 @@ class NetworkForensics:
                     self._mask(irc_pass), src, dst, port, ts, raw_value=irc_pass)
 
         # ─── Modbus/SCADA ────────────────────────────────────
-        if port == 502 or pkt_info.src_port == 502:
+        if port == 502 or sport == 502:
             # Modbus TCP: 7-byte MBAP header + function code
-            # Byte 7 (index 7 after MBAP) is the function code
-            if len(payload) >= 8:
+            # Byte 7 (index 7 after MBAP) is the function code. Only a real MBAP
+            # header counts: protocol id 0 and a length that matches. Anything
+            # shorter than one used to be "Modbus traffic, NO authentication",
+            # CRITICAL; a printer and a router answering a port probe were that.
+            if is_modbus_frame(payload):
                 # MBAP header: transaction_id(2) + protocol_id(2) + length(2) + unit_id(1)
                 func_code = payload[7] if len(payload) > 7 else 0
 
@@ -1367,19 +1430,18 @@ class NetworkForensics:
                     # Read commands — still noteworthy, someone is polling
                     self._add_timeline_event(ts, 'scada',
                         f"Modbus READ: {func_name} from {src} → {dst}:{port}")
-            else:
-                self._add_sensitive_data('Modbus/SCADA',
-                    'Modbus traffic detected — NO authentication, equipment can be controlled',
-                    src, dst, port, ts, risk='CRITICAL')
 
         # ─── BACnet (Building Automation) ─────────────────────
         # Only trigger on actual BACnet port 47808 — exclude UniFi discovery (10001)
-        # and other protocols that may share the 0x81 BVLC byte signature
+        # and other protocols that may share the 0x81 BVLC byte signature. BACnet/IP
+        # is UDP: a TCP connection whose client port happened to be 47808 (Linux
+        # picks client ports up to 60999) was "BACnet" on a web server.
         BACNET_PORT = 47808
         BACNET_FALSE_POSITIVE_PORTS = {10001, 8443}  # UniFi discovery, UniFi controller
-        is_bacnet_port = (port == BACNET_PORT or pkt_info.src_port == BACNET_PORT)
+        is_bacnet_port = pkt_info.protocol == 'UDP' and (port == BACNET_PORT
+                                                          or sport == BACNET_PORT)
         is_fp_port = (port in BACNET_FALSE_POSITIVE_PORTS or
-                      pkt_info.src_port in BACNET_FALSE_POSITIVE_PORTS)
+                      sport in BACNET_FALSE_POSITIVE_PORTS)
         if is_bacnet_port and not is_fp_port:
             # BACnet/IP: starts with 0x81 (BACnet Virtual Link Control)
             if payload and len(payload) >= 4:
@@ -1484,7 +1546,7 @@ class NetworkForensics:
         # Cleartext XML commands on UDP 31769 (parking controller overlay)
         # Detects: credit card last-4 + type, EZPass RFID tags, NFC credentials,
         # ticket metadata, gate PC identity, and GETEIP heartbeats
-        if port == SKIDATA_PORT or pkt_info.src_port == SKIDATA_PORT:
+        if port == SKIDATA_PORT or sport == SKIDATA_PORT:
             # Identify the command type
             cmd_match = SKIDATA_COMMAND_RE.search(payload)
             cmd_type = cmd_match.group(1).decode('utf-8', errors='replace') if cmd_match else 'Unknown'
@@ -1653,7 +1715,7 @@ class NetworkForensics:
                     src, dst, port, ts, risk='MEDIUM')
 
         # ─── Elasticsearch ───────────────────────────────────
-        if port == 9200 or pkt_info.src_port == 9200:
+        if port == 9200 or sport == 9200:
             if b'/_search' in payload or b'/_cat' in payload or b'/_cluster' in payload:
                 self._add_sensitive_data('Elasticsearch',
                     'Elasticsearch API access without TLS — database queries visible',
@@ -1680,7 +1742,7 @@ class NetworkForensics:
         # 5. HTTP method: POST with card-like form fields is serious, GET is not
         # 6. Domain check: known cloud/CDN domain resolving to this IP = benign
         HTTP_SERVER_PORTS = {80, 443, 3000, 4200, 5000, 8000, 8008, 8080, 8081, 8443, 8888, 9090}
-        is_server_response = pkt_info.src_port in HTTP_SERVER_PORTS
+        is_server_response = sport in HTTP_SERVER_PORTS
 
         if not is_server_response:
             match = CC_PATTERN_RE.search(payload)
@@ -1717,28 +1779,28 @@ class NetworkForensics:
         # ═════════════════════════════════════════════════════
         # FEATURE 1: DHCP Device Snooping
         # ═════════════════════════════════════════════════════
-        if port in (67, 68) or pkt_info.src_port in (67, 68):
+        if port in (67, 68) or sport in (67, 68):
             self._parse_dhcp(pkt_info, payload, ts)
 
         # ═════════════════════════════════════════════════════
         # FEATURE 2: mDNS / LLMNR Poisoning Detection
         # ═════════════════════════════════════════════════════
-        if port == 5353 or pkt_info.src_port == 5353:
+        if port == 5353 or sport == 5353:
             self._check_mdns_poisoning(pkt_info, payload, ts)
-        if port == 5355 or pkt_info.src_port == 5355:
+        if port == 5355 or sport == 5355:
             self._check_llmnr_poisoning(pkt_info, payload, ts)
 
         # ═════════════════════════════════════════════════════
         # FEATURE 3: SMB Version Detection (SMBv1 = critical risk)
         # ═════════════════════════════════════════════════════
-        if port == 445 or pkt_info.src_port == 445:
+        if port == 445 or sport == 445:
             self._check_smb_version(pkt_info, payload, ts)
 
         # ═════════════════════════════════════════════════════
         # FEATURE 4: HTTP Response Header Info Leakage
         # ═════════════════════════════════════════════════════
         HTTP_PORTS = {80, 3000, 4200, 5000, 8000, 8008, 8080, 8081, 8888, 9090}
-        if pkt_info.src_port in HTTP_PORTS:
+        if sport in HTTP_PORTS:
             # This is a response FROM a web server
             self._check_http_response_headers(pkt_info, payload, ts)
 
@@ -1776,10 +1838,10 @@ class NetworkForensics:
                         if host_match else '')
         svc = self.insecure_services.get((dst, port))
         if svc is not None and request_host and HTTP_REQUEST_RE.search(payload):
-            # One address can serve other sites too, so the service counts as an
-            # updater only while every request to it has been for one.
-            svc['update_only'] = (is_software_update_host(request_host)
-                                  and svc.get('update_only', True))
+            # One address can serve other sites too, so the service counts as
+            # signed downloads only while every request to it has been for one.
+            svc['signed_only'] = (is_signed_fetch(request_host, payload)
+                                  and svc.get('signed_only', True))
 
         # Extract user agent
         ua_match = HTTP_USER_AGENT_RE.search(payload)
@@ -2419,8 +2481,8 @@ class NetworkForensics:
         # Generate insecure service findings
         for key, svc in self.insecure_services.items():
             svc['src_ips'] = list(svc['src_ips'])[:20]
-            if svc.get('update_only'):
-                continue        # signed software updates (SOFTWARE_UPDATE_HOSTS)
+            if svc.get('signed_only'):
+                continue        # signed downloads (is_signed_fetch)
             self.security_findings.append({
                 'type': 'insecure_protocol',
                 'risk': svc['risk'],

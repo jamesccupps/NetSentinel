@@ -348,7 +348,10 @@ class IOCScanner:
         now = getattr(pkt_info, 'timestamp', 0) or time.time()
 
         # ─── TOR / Anonymizer Detection ──────────────────────
-        if pkt_info.dst_port in TOR_PORTS and self._hold(
+        # Only when 9050 is the server's end (capture.TcpRoles): replies to this
+        # computer's own outgoing port 9050, from a Raspberry Pi, were "Tor".
+        server = getattr(pkt_info, 'server_port', 0)
+        if pkt_info.dst_port in TOR_PORTS and server in (0, pkt_info.dst_port) and self._hold(
                 f"IOC-TOR:{pkt_info.src_ip}:{pkt_info.dst_ip}", now):
             findings.append({
                 'rule_id': 'IOC-TOR',

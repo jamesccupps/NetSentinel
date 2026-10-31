@@ -17,6 +17,38 @@ MAC that held it before, and that counted however long ago it was.
 - This computer's MAC, pinned as a "gateway" before 1.9.0 read the route table
   properly, is dropped from the saved pins.
 
+### A day of real alerts, none of them an attack
+
+The rest of 263 alerts from one day on the owner's network, all false:
+- **Services are named by the server's port.** The capture now records which
+  end of each TCP connection is the server, from the handshake. For one
+  already open, this computer is the server only if it listens on the port.
+  - Windows here is set to give outgoing connections local ports from 1024 up,
+    so replies came back to ports like 5900 and 9050. Google "ran a VNC server"
+    on this PC (CRITICAL), and a Raspberry Pi "connected to Tor" on it.
+  - The same went for MSSQL, an admin page, a printer, a malware port, and
+    "Redis" from an HTTP request sent from local port 6379.
+- **Redis** needs a Redis command: `a and b or c` let any "GET" count.
+- **Modbus** needs a real MBAP header. A few bytes on port 502, from a printer
+  and a router answering the audit's probe, were CRITICAL "unauthenticated
+  Modbus".
+- **BACnet** is UDP: a web client whose port happened to be 47808 made a local
+  web server "BACnet".
+- **Fast-flux** needs addresses spread over at least four unrelated networks,
+  and goes by the largest TTL seen. A caching router hands out what is left of
+  a TTL, down to 1 second. api.weather.gov and Xbox's catalogue, both on Akamai
+  (8 addresses in two networks), were HIGH every five minutes all night. A name
+  is reported at most once an hour.
+- **Port scans** raise one alert per scanner, about its main target. A
+  7-second audit raised 87, naming internet servers as "targets".
+- **SYN flood** needs 300 SYNs in ten seconds, not 50. A program retrying a
+  Raspberry Pi's service five times a second was CRITICAL.
+- **ESET's hourly update login** (HTTP Digest, hashed) is noted once a day as
+  "likely safe". The verifier had confirmed every captured credential, which
+  raised it from LOW to HIGH.
+- **Certificate checks** over plain HTTP are not insecure services, like
+  updates: revocation lists, OCSP and issuer certificates are signed by design.
+
 ## v1.9.0 — Watching this PC's own traffic, review mode, and an audit of your network
 
 **2100 unit tests** (up from 1456) plus 14 integration checks. The suite no
