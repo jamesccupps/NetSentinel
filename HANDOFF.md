@@ -1,4 +1,13 @@
-# Handoff: the third review's fixes, after v1.9.1
+# Handoff: v1.9.2 released (the third review's fixes)
+
+**v1.9.2** (James asked, 2026-11-01):
+- the tag `v1.9.2` is at `b2f12c0`, after CI passed on all five jobs;
+- the release workflow published https://github.com/jamesccupps/NetSentinel/releases/tag/v1.9.2
+  as Latest, with `NetSentinel.exe` (81.6 MB) and its `.sha256`;
+- it holds the nine fixes below and the PCAP credential fix.
+
+Next: James replaces the running 1.9.1 exe with 1.9.2, and the next batch of
+alerts gets the same review.
 
 ## Third review, 2026-11-01 (36 alerts in 23.5 hours of 1.9.1)
 
