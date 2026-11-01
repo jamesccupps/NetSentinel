@@ -1,4 +1,19 @@
-# Handoff: v1.9.2 released; the updater is built, not released
+# Handoff: v1.10.0 released, the first with the updater
+
+**v1.10.0** (James: "release it", 2026-11-01):
+- the tag `v1.10.0` is at `8155ada`, after CI passed on all five jobs;
+- release run 41342181923 signed the build and published
+  https://github.com/jamesccupps/NetSentinel/releases/tag/v1.10.0 as Latest,
+  with `NetSentinel.exe` (81.6 MB), `.sha256` and `.sig`;
+- the updater's own checks against that live release, run as a 1.9.2: it
+  finds 1.10.0, the signature verifies with `PUBLIC_KEY`, and the signed
+  SHA-256 matches the `.sha256`. As 1.10.0, it finds nothing newer.
+
+Next:
+- James installs 1.10.0 by hand (the last manual download).
+- The next release is the first one-click update, and the first real test of
+  the exe swap.
+- The signing secret is proven, so the key file can go once a copy is safe.
 
 ## Updater, 2026-11-01 (James: "can we make an updater into this?")
 
@@ -12,12 +27,9 @@ dashboard's Version row. `release.yml` signs the build and uploads
   `C:\Users\james\NetSentinel-release-signing-key.txt`, outside the repo and
   never read into a session. The public half is `PUBLIC_KEY` in
   `src/updater.py`. A dummy file signed with the file's key verified against it.
-- **Secret:** James added `NETSENTINEL_SIGNING_KEY` on 2026-11-01 and skipped a
-  manual test build. The next tag build is the first check: a bad paste fails at
-  "Sign the build for the updater" and publishes nothing; re-paste and re-run.
-  Keep the key file until a signed release is out, then delete it once a copy
-  is somewhere safe. Losing the key means a new key pair, and copies trusting
-  the old key then have to be updated by hand once.
+- **Secret:** James added `NETSENTINEL_SIGNING_KEY` on 2026-11-01, and the
+  v1.10.0 build signed with it. Losing the key means a new key pair, and
+  copies trusting the old key then have to be updated by hand once.
 - 1.9.2 has no updater, so moving to the first release with it is manual.
 - **Not tested on the real exe:** the swap. I can't run the exe here (it asks
   for UAC). `finish_update` copies itself over after the old process and its
