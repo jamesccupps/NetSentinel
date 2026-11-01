@@ -1,8 +1,10 @@
 # NetSentinel Changelog
 
-## Unreleased — NetSentinel updates itself
+## v1.10.0 — NetSentinel updates itself
 
-**2169 unit tests** plus 14 integration checks.
+**2169 unit tests** plus 14 integration checks. Earlier versions have no
+updater, so moving to this one is a manual download, the last one; later
+releases install from the Update button.
 
 - **One-click updates.** NetSentinel asks GitHub for a newer release at start
   and once a day, sending only its version (Settings → Updates turns this off).
