@@ -148,6 +148,11 @@ DEFAULT_CONFIG = {
         "enabled": False,
         "auto_update": True,
     },
+    "updates": {
+        # Ask GitHub for a newer NetSentinel at start and daily. Only the version
+        # goes out; installing is always a click (src/updater.py).
+        "check": True,
+    },
     "verification": {
         "auto_verify": True,              # Auto-verify process alerts
         "virustotal_api_key": "",         # Free VT API key (4 lookups/min)

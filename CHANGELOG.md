@@ -1,5 +1,28 @@
 # NetSentinel Changelog
 
+## Unreleased — NetSentinel updates itself
+
+**2169 unit tests** plus 14 integration checks.
+
+- **One-click updates.** NetSentinel asks GitHub for a newer release at start
+  and once a day, sending only its version (Settings → Updates turns this off).
+  An **Update** button then appears in the status bar, with the release notes.
+  **Install and restart**:
+  - checks the release's signed manifest (Ed25519, against a key built in);
+  - downloads the exe and checks its SHA-256 against the signed one, and
+    against the published `.sha256`;
+  - hands over to the new exe, which waits for this one to exit, puts itself in
+    place (the old one is kept as `NetSentinel.exe.old` until the next start)
+    and starts with the same arguments, monitoring if it was.
+
+  A signature that does not verify, a version older than the running one, or a
+  download that is not the signed file installs nothing. Run from source,
+  NetSentinel only says a new version is out. The browser dashboard shows the
+  new version but cannot install it.
+- **Releases are signed** for the updater: `tools/sign_release.py`, run by the
+  release workflow with the `NETSENTINEL_SIGNING_KEY` secret. A tag built
+  without the secret fails rather than ship a release the updater cannot check.
+
 ## v1.9.2 — A third day of real alerts
 
 **2145 unit tests** plus 14 integration checks. A day of 1.9.1 raised 36 alerts,

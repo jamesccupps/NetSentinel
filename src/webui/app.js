@@ -251,6 +251,8 @@ async function refreshOverview() {
   const res = o.resources || {};
   const rate = Number(o.capture.sample_rate || 1);
   const facts = [
+    ['Version', o.update ? `${o.version}; ${o.update.version} is out (Update, in the desktop app)`
+      : o.version],
     ['Monitoring', o.monitoring ? 'Yes' : 'No'],
     ['Review mode', o.review && o.review.enabled ? 'Recording' : 'Off'],
     ['Suppressed by your verdicts', fmtNum(o.suppressed_alerts)],

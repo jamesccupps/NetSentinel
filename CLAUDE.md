@@ -17,6 +17,9 @@ and what is left. Keep it current during long work (the owner asked for that).
   redacted text bundle for Claude chat; verdicts come back as confirmed false
   positives (`src/baseline_whitelist.py: ConfirmedFalsePositives`).
 - **Network audit** (`src/audit.py`): the one active feature, opt-in, see the rules.
+- **Updater** (`src/updater.py`, `tools/sign_release.py`): finds a newer GitHub
+  release, checks its Ed25519-signed manifest and SHA-256, and hands over to the
+  new exe (`--finish-update`), on a click.
 - **netmon** (`netmon/`, tests in `netmon_tests/`): a separate site monitor for a
   Linux sensor, driven by a YAML site profile. See `netmon/README.md`. Only the
   fictional `netmon/profiles/example-site.yaml` belongs in the repo.
@@ -53,9 +56,14 @@ Code must work on 3.10: no multi-line expressions inside f-strings, and remember
 Bump the version in `main.py` (APP_VERSION), `pyproject.toml`, `setup.bat` and
 `src/__init__.py`; add a `CHANGELOG.md` section; push a `vX.Y.Z` tag.
 `.github/workflows/release.yml` builds `NetSentinel.exe` on Windows and attaches
-it with a SHA-256 to the GitHub release. Running that workflow by hand
-(workflow_dispatch) builds the exe as an artifact without releasing.
-Publishing a release is the owner's call: ask before pushing a tag.
+it with a SHA-256 to the GitHub release. It also attaches `NetSentinel.exe.sig`,
+signed with the `NETSENTINEL_SIGNING_KEY` repository secret
+(`tools/sign_release.py`), which is the only thing the updater
+(`src/updater.py`) installs. A tag build without that secret fails. Running
+that workflow by hand (workflow_dispatch) builds the exe as an artifact without
+releasing. Publishing a release is the owner's call: ask before pushing a tag.
+The signing key's private half never goes in the repo, a prompt or a log;
+`PUBLIC_KEY` in `src/updater.py` is its public half.
 
 ## Conventions
 
@@ -92,4 +100,7 @@ Publishing a release is the owner's call: ask before pushing a tag.
 - Review bundles leave the machine: by default no payloads, pcaps, query strings,
   cookies, credentials or tokens, and every file passes the secret audit.
 - Threat data is downloaded and checked locally; nothing about the owner's
-  traffic or files is sent out for lookups.
+  traffic or files is sent out for lookups. The update check
+  (`updates.check`) sends GitHub only NetSentinel's version, and an update is
+  installed only when the owner clicks, after its signature verifies. (Owner's
+  decision, 2026-11-01.)

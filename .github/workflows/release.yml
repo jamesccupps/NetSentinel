@@ -1,8 +1,9 @@
 name: release
 
 # Builds NetSentinel.exe on Windows. Pushing a v* tag publishes it, with a
-# SHA-256 checksum, on that tag's GitHub release; a manual run only keeps it
-# as a workflow artifact, for trying a build without releasing it.
+# SHA-256 checksum and the updater's signature, on that tag's GitHub release; a
+# manual run only keeps it as a workflow artifact, for trying a build without
+# releasing it.
 on:
   push:
     tags: ['v*']
@@ -39,12 +40,35 @@ jobs:
           "$hash  NetSentinel.exe" | Out-File -Encoding ascii dist\NetSentinel.exe.sha256
           Get-Item dist\NetSentinel.exe | Format-Table Name, Length
 
+      # The updater installs only what this signs (src/updater.py). A release
+      # without the key fails here rather than ship something it cannot install.
+      - name: Sign the build for the updater
+        shell: bash
+        env:
+          NETSENTINEL_SIGNING_KEY: ${{ secrets.NETSENTINEL_SIGNING_KEY }}
+          PYTHONIOENCODING: utf-8
+        run: |
+          if [ -z "$NETSENTINEL_SIGNING_KEY" ]; then
+            if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+              echo "::error::The NETSENTINEL_SIGNING_KEY secret is not set, so this release cannot be signed."
+              exit 1
+            fi
+            echo "::warning::NETSENTINEL_SIGNING_KEY is not set; this build is not signed."
+            exit 0
+          fi
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            python tools/sign_release.py sign dist/NetSentinel.exe --tag "$GITHUB_REF_NAME"
+          else
+            python tools/sign_release.py sign dist/NetSentinel.exe
+          fi
+
       - uses: actions/upload-artifact@v6
         with:
           name: NetSentinel-exe
           path: |
             dist/NetSentinel.exe
             dist/NetSentinel.exe.sha256
+            dist/NetSentinel.exe.sig
 
       - name: Publish the release
         if: startsWith(github.ref, 'refs/tags/v')
@@ -57,4 +81,5 @@ jobs:
           python tools/release_notes.py "$TAG" > notes.md
           gh release view "$TAG" >/dev/null 2>&1 || \
             gh release create "$TAG" --title "NetSentinel $TAG" --notes-file notes.md
-          gh release upload "$TAG" dist/NetSentinel.exe dist/NetSentinel.exe.sha256 --clobber
+          gh release upload "$TAG" dist/NetSentinel.exe dist/NetSentinel.exe.sha256 \
+            dist/NetSentinel.exe.sig --clobber

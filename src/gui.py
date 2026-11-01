@@ -865,6 +865,13 @@ class NetSentinelGUI:
         )
         self._statusbar_right.pack(side='right', padx=12)
 
+        # Shown once the updater finds a newer release (_sync_update_notice).
+        self._update_button = tk.Button(
+            status_bar, text="", font=('Segoe UI', 8, 'bold'),
+            bg=COLORS['accent'], fg=COLORS['bg_dark'], relief='flat', padx=8,
+            cursor='hand2', command=self._show_update)
+        self._update_shown = None
+
     # ──────────────────────────────────────────────────────────────────────────
     # Dashboard Tab
     # ──────────────────────────────────────────────────────────────────────────
@@ -2718,6 +2725,17 @@ class NetSentinelGUI:
             audit_card, 'audit.enabled',
             'Allow audits of my own networks, run only when I ask (Audit button)', False)
 
+        updates_card = Card(scroll_frame, title="UPDATES")
+        updates_card.pack(fill='x', padx=8, pady=(0, 8))
+        self._add_setting_toggle(
+            updates_card, 'updates.check',
+            'Check GitHub for a new version at start and daily (sends only the version)',
+            True)
+        tk.Button(updates_card, text="Check now", font=('Segoe UI', 9),
+                  bg=COLORS['bg_input'], fg=COLORS['text'], relief='flat', padx=12,
+                  cursor='hand2', command=self._check_for_update_now
+                  ).pack(anchor='w', pady=4)
+
         # Blacklist management
         bl_card = Card(scroll_frame, title="BLACKLISTED IPs (one per line)")
         bl_card.pack(fill='x', padx=8, pady=(0, 8))
@@ -3076,6 +3094,7 @@ class NetSentinelGUI:
     def _schedule_update(self):
         """Periodic GUI update."""
         self._sync_monitoring()
+        self._sync_update_notice()
         self._update_dashboard()
         refresh = self.app.config.get('gui', 'refresh_rate_ms', default=1000)
         self.root.after(refresh, self._schedule_update)
@@ -3768,6 +3787,119 @@ class NetSentinelGUI:
     def _quit(self):
         self._shutdown()
         self.root.destroy()
+
+    # ─── Updates (src/updater.py) ────────────────────────────────────────
+
+    def _sync_update_notice(self):
+        """Show the status bar's update button once a newer release is known."""
+        updater = getattr(self.app, 'updater', None)
+        info = updater.available if updater is not None else None
+        version = info.version if info else None
+        if version == self._update_shown:
+            return
+        self._update_shown = version
+        if version:
+            self._update_button.config(text=f"⬆  Update to {version}")
+            self._update_button.pack(side='right', padx=4, pady=3)
+        else:
+            self._update_button.pack_forget()
+
+    def _check_for_update_now(self):
+        updater = getattr(self.app, 'updater', None)
+        if updater is None:
+            return
+
+        def work():
+            info = updater.check()
+            self.root.after(0, done, info)
+
+        def done(info):
+            self._sync_update_notice()
+            if info:
+                self._show_update()
+            elif updater.last_error:
+                messagebox.showwarning("Updates", f"Could not reach GitHub: {updater.last_error}")
+            else:
+                messagebox.showinfo("Updates", f"NetSentinel {__version__} is the latest version.")
+
+        threading.Thread(target=work, name='update-check-now', daemon=True).start()
+
+    def _show_update(self):
+        """The release's notes, and Install for the exe."""
+        import webbrowser
+        updater = getattr(self.app, 'updater', None)
+        info = updater.available if updater is not None else None
+        if info is None:
+            return
+        win = tk.Toplevel(self.root)
+        win.title(f"NetSentinel {info.version}")
+        win.geometry("640x520")
+        win.configure(bg=COLORS['bg_dark'])
+        tk.Label(win, text=f"NetSentinel {info.version} is available. This is {__version__}.",
+                 font=('Segoe UI', 11, 'bold'), fg=COLORS['text'], bg=COLORS['bg_dark'],
+                 anchor='w').pack(fill='x', padx=12, pady=(12, 6))
+        notes = tk.Text(win, bg=COLORS['bg_input'], fg=COLORS['text'], font=('Segoe UI', 9),
+                        relief='flat', wrap='word', height=18)
+        notes.insert('1.0', info.notes or 'No release notes.')
+        notes.config(state='disabled')
+        notes.pack(fill='both', expand=True, padx=12)
+
+        if not updater.can_install:
+            why = "Running from source: update with git pull, or download the exe."
+        elif not info.installable:
+            why = "This release has no signature to check. Download it from the release page."
+        else:
+            why = ("Install downloads the exe, checks its signature and checksum, and "
+                   "restarts into it. Monitoring resumes if it is running.")
+        status = tk.Label(win, text=why, font=('Segoe UI', 9), fg=COLORS['text_dim'],
+                          bg=COLORS['bg_dark'], anchor='w', justify='left', wraplength=600)
+        status.pack(fill='x', padx=12, pady=6)
+
+        buttons = tk.Frame(win, bg=COLORS['bg_dark'])
+        buttons.pack(fill='x', padx=12, pady=(0, 12))
+        install = tk.Button(buttons, text="Install and restart", font=('Segoe UI', 9, 'bold'),
+                            bg=COLORS['accent'], fg=COLORS['bg_dark'], relief='flat',
+                            padx=12, cursor='hand2')
+        if updater.can_install and info.installable:
+            install.pack(side='left')
+        tk.Button(buttons, text="Release page", font=('Segoe UI', 9), relief='flat', padx=12,
+                  command=lambda: webbrowser.open(info.page_url)).pack(side='left', padx=8)
+        tk.Button(buttons, text="Later", font=('Segoe UI', 9), relief='flat', padx=12,
+                  command=win.destroy).pack(side='right')
+
+        def say(text):
+            self.root.after(0, lambda: status.config(text=text))
+
+        def work():
+            try:
+                path = updater.download(info, progress=say)
+            except Exception as e:
+                self.root.after(0, failed, str(e) or e.__class__.__name__)
+                return
+            self.root.after(0, finish, path)
+
+        def failed(message):
+            status.config(text=message, fg=COLORS['red'])
+            install.config(state='normal')
+
+        def finish(path):
+            try:
+                updater.hand_over(path, monitor=self.app.is_monitoring)
+            except OSError as e:
+                failed(f"Could not start the new version: {e}")
+                return
+            self._statusbar_text.config(text=f"Updating to {info.version}...")
+            self._shutdown()
+            self.root.destroy()
+
+        def start():
+            install.config(state='disabled')
+            size = f" ({info.exe_size / 1e6:.0f} MB)" if info.exe_size else ''
+            status.config(text=f"Downloading NetSentinel {info.version}{size}...",
+                          fg=COLORS['text_dim'])
+            threading.Thread(target=work, name='update-download', daemon=True).start()
+
+        install.config(command=start)
 
     def _restart(self):
         """Start a new copy with the same arguments, monitoring if this one was, and exit."""

@@ -204,6 +204,23 @@ def parse_args(argv=None):
     return parser.parse_args(argv)
 
 
+def start_update_checks(app):
+    """
+    The updater (src/updater.py): asks GitHub for a newer release at start and
+    daily unless `updates.check` is off, and installs one only when asked.
+    """
+    import threading
+    from src.updater import Updater, cleanup_leftovers
+    app.updater = Updater(APP_VERSION)
+    if app.updater.frozen:
+        # What an update left: the old exe, and the installer, which may still be
+        # exiting as this copy starts.
+        timer = threading.Timer(30, cleanup_leftovers)
+        timer.daemon = True
+        timer.start()
+    app.updater.start_checking(app.config.get('updates', 'check', default=True))
+
+
 def run_headless_mode(args):
     """Start the engine with no GUI. Returns a process exit code."""
     logger.info("Starting in headless mode.")
@@ -211,11 +228,18 @@ def run_headless_mode(args):
     from src.headless import run_headless
 
     app = NetSentinelApp(review_dir=args.review)
+    start_update_checks(app)
     return run_headless(app, host=args.host, port=args.port,
                         serve_api=not args.no_api)
 
 
 def main(argv=None):
+    argv = sys.argv[1:] if argv is None else list(argv)
+    if argv[:1] == ['--finish-update'] and len(argv) >= 3:
+        # A new exe finishing an update (src/updater.py). First, and with no
+        # elevation request: the old copy, elevated, started this one.
+        from src.updater import finish_update
+        return finish_update(argv[1], argv[2], argv[3:])
     args = parse_args(argv)
 
     logger.info("=" * 60)
@@ -331,6 +355,7 @@ def main(argv=None):
             logger.warning("Browser dashboard unavailable: %s", e)
             app.web_server = None
 
+    start_update_checks(app)
     app.start_on_launch = args.monitor
     try:
         app.run(tk_root=tk_root)
