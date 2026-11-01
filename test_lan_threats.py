@@ -184,26 +184,45 @@ class TestRogueServers(_Lan):
         self.assertIn('ROGUE-DHCPV6', self.rules(alerts))
 
 
+def _wire(name, netbios=False):
+    if netbios:
+        raw = name.upper().ljust(15)[:15].encode() + b'\x00'
+        return bytes([32]) + b''.join(bytes([0x41 + (b >> 4), 0x41 + (b & 0x0f)])
+                                      for b in raw) + b'\x00'
+    return b''.join(bytes([len(part)]) + part.encode() for part in name.split('.')) + b'\x00'
+
+
 def name_response(names, address, netbios=False):
     """A DNS-format response answering `names` with `address`."""
     import ipaddress
     out = struct.pack('>HHHHHH', 0x1234, 0x8400, 0, len(names), 0, 0)
     for name in names:
         if netbios:
-            raw = name.upper().ljust(15)[:15].encode() + b'\x00'
-            label = b''.join(bytes([0x41 + (b >> 4), 0x41 + (b & 0x0f)]) for b in raw)
-            out += bytes([32]) + label + b'\x00' + struct.pack('>HHIH', 0x20, 1, 300, 6)
+            out += _wire(name, netbios=True) + struct.pack('>HHIH', 0x20, 1, 300, 6)
             out += b'\x00\x00' + ipaddress.IPv4Address(address).packed
         else:
-            for part in name.split('.'):
-                out += bytes([len(part)]) + part.encode()
             addr = ipaddress.ip_address(address)
             rtype = 1 if addr.version == 4 else 28
-            out += b'\x00' + struct.pack('>HHIH', rtype, 1, 30, len(addr.packed)) + addr.packed
+            out += _wire(name) + struct.pack('>HHIH', rtype, 1, 30, len(addr.packed))
+            out += addr.packed
+    return out
+
+
+def name_query(names, netbios=False):
+    """A DNS-format query asking for `names`."""
+    out = struct.pack('>HHHHHH', 0x1234, 0, len(names), 0, 0, 0)
+    for name in names:
+        out += _wire(name, netbios) + struct.pack('>HH', 0x20 if netbios else 1, 1)
     return out
 
 
 class TestNamePoisoning(_Lan):
+
+    def _ask(self, ids, names, port=5355, netbios=False):
+        payload = name_query(names, netbios=netbios)
+        ids.inspect_packet(pkt(protocol='UDP', src_ip='192.168.1.50', dst_ip='224.0.0.252',
+                               src_port=50000, dst_port=port, src_mac='00:1b:21:00:00:50',
+                               _raw_payload=payload, payload_size=len(payload)))
 
     def _answer(self, ids, names, src_ip='192.168.1.66', mac='00:1b:21:66:00:01',
                 port=5355, address=None, netbios=False):
@@ -215,6 +234,7 @@ class TestNamePoisoning(_Lan):
     def test_one_host_answering_many_names_is_responder(self):
         ids, alerts = self.engine()
         for name in ('fileserver', 'wpad', 'printer', 'intranet'):
+            self._ask(ids, [name])
             self._answer(ids, [name])
         hit = [a for a in alerts if a.rule_id == 'NAME-POISONING']
         self.assertTrue(hit)
@@ -224,6 +244,7 @@ class TestNamePoisoning(_Lan):
     def test_netbios_answers_are_read_too(self):
         ids, alerts = self.engine()
         for name in ('FILESERVER', 'WPAD', 'PRINTER', 'INTRANET'):
+            self._ask(ids, [name], port=137, netbios=True)
             self._answer(ids, [name], port=137, netbios=True)
         self.assertIn('NAME-POISONING', self.rules(alerts))
 

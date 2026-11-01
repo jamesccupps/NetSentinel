@@ -1,5 +1,45 @@
 # NetSentinel Changelog
 
+## Unreleased — A third day of real alerts
+
+**2144 unit tests** plus 14 integration checks. A day of 1.9.1 raised 36 alerts,
+none CRITICAL. Three new devices on the network were real; the nine HIGH alerts
+were not, and neither was most of the rest. Each fix has a test that fails on
+1.9.1.
+
+### The HIGH ones
+- **Fast-flux follows CNAMEs.** api.weather.gov and Xbox's catalogue point at
+  Akamai through CNAMEs (edgekey.net, akamaiedge.net, edgesuite.net), and
+  Akamai publishes no address list, so its addresses in 23.x looked like many
+  unrelated networks: HIGH six times in a day. A name whose answer goes through
+  a known CDN's domain is the CDN's; the resolver follows the CNAME to the
+  CDN's own servers, so the name cannot be borrowed.
+- **A port scan is many ports, service ports among them, on one host.** The
+  two were checked across hosts: Tailscale reaching three peers behind one NAT,
+  each on its own high port, plus DNS to the router and HTTPS elsewhere, was a
+  scan of the NAT.
+- **Name poisoning counts only answers to lookups.** Responder answers what
+  others ask for. Home Assistant announcing its own names unasked (its
+  hostname, instance ID, Matter name, an add-on) was a HIGH. Names a host's own
+  service and reverse-lookup records point to are its own too. Lookups are told
+  from this PC's ordinary DNS, which can leave from port 5353 or 5355.
+
+### The rest
+- **A port names a service only on its transport:** Tailscale's encrypted
+  WireGuard to a peer's NAT port 8081 was "Unencrypted HTTP-Alt".
+- **ESET's LiveGrid** (eset.systems) is known like eset.com: its lookups carry
+  no User-Agent and a body ESET encrypts itself.
+- **OCSP checks sent by GET** are recognised from the request (a DER request in
+  the path), whoever answers them: status.thawte.com, oneocsp.microsoft.com.
+  So are Windows Update downloads from a cache server addressed by IP.
+- **One insecure-service alert per service name a day**, not one per address:
+  Steam's client config and ESET were five each, one per CDN address.
+- **A server's version banner is LOW** (an end-of-life version stays HIGH), and
+  so is a request without a User-Agent: what a device runs, not an exposure.
+- **DNS volume is judged on the lookups.** Run on the QUIC handshakes that
+  followed a page load, it skipped the exemption for this PC's own resolver
+  and raised two alerts a second apart, naming Google's servers.
+
 ## v1.9.1 — A day of real alerts, and what they were
 
 **2124 unit tests** plus 14 integration checks. A day of 1.9.0 on a real
