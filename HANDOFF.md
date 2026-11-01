@@ -35,6 +35,19 @@ tests, OK with 63 skipped; 14 integration checks pass.
 Not changed: the ML anomaly (an upload burst), ESET's daily digest note, a few
 LOW "likely safe" HTTP alerts, and plain HTTP to a device on 192.168.8.54:8008.
 
+Replay check: the day's saved alert captures went through the offline analyser
+on 1.9.1 and on the fixes (counts are HIGH and MEDIUM only):
+- PORT-SCAN: 2 → 0.
+- Sensitive-data and server-info alerts: 11 → 0.
+- Insecure-service alerts: 45 → 28 (offline has neither the verifier nor the
+  one-per-name rule).
+
+**Open, found by that replay:** `pcap_analyzer.py` (around line 310) raises
+every credential as a CRITICAL "Plaintext Credential". That includes ESET's
+hashed update login, which the live path (`app._check_forensics_alerts`) rates
+by the finding's own risk, LOW. Offline DNS-FLOOD also has no resolver to
+exempt, since there is no `net_env`.
+
 ## v1.9.1
 
 **v1.9.1** (James asked, 2026-10-31):
