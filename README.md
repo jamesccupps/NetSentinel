@@ -129,6 +129,21 @@ build_exe.bat
 6. The **Devices** tab shows all discovered devices and their classifications
 7. The **Incidents** tab groups related alerts into correlated events
 
+### Updates
+
+NetSentinel asks GitHub for a newer release at start and once a day, sending
+nothing but its version (turn it off under Settings → Updates). When one is out,
+an **Update** button appears in the status bar. Clicking it shows the release
+notes, and **Install and restart** does the rest:
+1. It checks the release's signature (`NetSentinel.exe.sig`, Ed25519, made by
+   the release workflow) against a key built into NetSentinel.
+2. It downloads the exe and checks its SHA-256 against the signed one.
+3. It swaps the exe, keeping the old one as `NetSentinel.exe.old` until the
+   next start, and restarts. Monitoring resumes if it was running.
+
+Nothing is installed without that click, nor anything that fails a check. Run
+from source, NetSentinel only says a new version is out.
+
 ## Screenshots
 
 <img width="1897" height="1033" alt="image" src="https://github.com/user-attachments/assets/ced27cca-5803-4f50-b0ed-73edd7dbd627" />

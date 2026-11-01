@@ -1,4 +1,26 @@
-# Handoff: v1.9.2 released (the third review's fixes)
+# Handoff: v1.9.2 released; the updater is built, not released
+
+## Updater, 2026-11-01 (James: "can we make an updater into this?")
+
+James chose: one-click install, signature plus SHA-256, check at start and
+daily. Built in `src/updater.py`, `tools/sign_release.py`, `main.py`
+(`start_update_checks`, and `--finish-update` before anything else), `gui.py`
+(the status-bar button, `_show_update`, Settings → Updates), and the
+dashboard's Version row. `release.yml` signs the build and uploads
+`NetSentinel.exe.sig`. Tests are in `test_updater.py` (24); the suite has 2169.
+- **Signing key:** generated 2026-11-01. The private half is the one line in
+  `C:\Users\james\NetSentinel-release-signing-key.txt`, outside the repo and
+  never read into a session. The public half is `PUBLIC_KEY` in
+  `src/updater.py`. A dummy file signed with the file's key verified against it.
+- **James has to:** add that line as the repository secret
+  `NETSENTINEL_SIGNING_KEY` (GitHub → Settings → Secrets and variables →
+  Actions), keep a copy somewhere safe, and delete the file. Until then a tag
+  build fails at "Sign the build". Losing the key means a new key pair, and
+  copies trusting the old key then have to be updated by hand once.
+- 1.9.2 has no updater, so moving to the first release with it is manual.
+- **Not tested on the real exe:** the swap. I can't run the exe here (it asks
+  for UAC). `finish_update` copies itself over after the old process and its
+  onefile bootloader exit, retrying while the file stays locked.
 
 **v1.9.2** (James asked, 2026-11-01):
 - the tag `v1.9.2` is at `b2f12c0`, after CI passed on all five jobs;

@@ -408,8 +408,13 @@ class HeadlessServer:
             talkers_out = geo.annotate_talkers(talkers)
         else:
             talkers_out = [{'ip': ip, 'bytes': b} for ip, b in talkers]
+        # Shown here, installed only from the desktop app: an install is no
+        # control this server has.
+        updater = getattr(self.app, 'updater', None)
+        update = updater.available.to_dict() if updater is not None and updater.available else None
         return {
             'version': __version__,
+            'update': update,
             'monitoring': bool(data.get('is_monitoring')),
             'controls': self.controls_allowed,
             'uptime_sec': int(time.time() - start) if start and data.get('is_monitoring') else 0,
