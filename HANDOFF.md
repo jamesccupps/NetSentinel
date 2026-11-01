@@ -12,11 +12,12 @@ dashboard's Version row. `release.yml` signs the build and uploads
   `C:\Users\james\NetSentinel-release-signing-key.txt`, outside the repo and
   never read into a session. The public half is `PUBLIC_KEY` in
   `src/updater.py`. A dummy file signed with the file's key verified against it.
-- **James has to:** add that line as the repository secret
-  `NETSENTINEL_SIGNING_KEY` (GitHub → Settings → Secrets and variables →
-  Actions), keep a copy somewhere safe, and delete the file. Until then a tag
-  build fails at "Sign the build". Losing the key means a new key pair, and
-  copies trusting the old key then have to be updated by hand once.
+- **Secret:** James added `NETSENTINEL_SIGNING_KEY` on 2026-11-01 and skipped a
+  manual test build. The next tag build is the first check: a bad paste fails at
+  "Sign the build for the updater" and publishes nothing; re-paste and re-run.
+  Keep the key file until a signed release is out, then delete it once a copy
+  is somewhere safe. Losing the key means a new key pair, and copies trusting
+  the old key then have to be updated by hand once.
 - 1.9.2 has no updater, so moving to the first release with it is manual.
 - **Not tested on the real exe:** the swap. I can't run the exe here (it asks
   for UAC). `finish_update` copies itself over after the old process and its
