@@ -2,7 +2,7 @@
 
 ## Unreleased — A third day of real alerts
 
-**2144 unit tests** plus 14 integration checks. A day of 1.9.1 raised 36 alerts,
+**2145 unit tests** plus 14 integration checks. A day of 1.9.1 raised 36 alerts,
 none CRITICAL. Three new devices on the network were real; the nine HIGH alerts
 were not, and neither was most of the rest. Each fix has a test that fails on
 1.9.1.
@@ -39,6 +39,11 @@ were not, and neither was most of the rest. Each fix has a test that fails on
 - **DNS volume is judged on the lookups.** Run on the QUIC handshakes that
   followed a page load, it skipped the exemption for this PC's own resolver
   and raised two alerts a second apart, naming Google's servers.
+
+### Captures are rated like live traffic
+Replaying the day's captures showed PCAP analysis building its own credential
+alert: every credential was a CRITICAL "Plaintext Credential", ESET's hashed
+update login included. It now uses the live alert, rated by the finding.
 
 ## v1.9.1 — A day of real alerts, and what they were
 

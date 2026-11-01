@@ -42,11 +42,14 @@ on 1.9.1 and on the fixes (counts are HIGH and MEDIUM only):
 - Insecure-service alerts: 45 → 28 (offline has neither the verifier nor the
   one-per-name rule).
 
-**Open, found by that replay:** `pcap_analyzer.py` (around line 310) raises
-every credential as a CRITICAL "Plaintext Credential". That includes ESET's
-hashed update login, which the live path (`app._check_forensics_alerts`) rates
-by the finding's own risk, LOW. Offline DNS-FLOOD also has no resolver to
-exempt, since there is no `net_env`.
+**Found by that replay, and fixed** (James: "Fix it, then push"): PCAP
+analysis built its own credential alert, CRITICAL "Plaintext Credential" for
+everything, ESET's hashed login included. Both paths now use
+`forensics.credential_alert(cred)`, rated by the finding. The evidence key is
+`connection` (it was `source` offline); `batch_scan` reads either. The test
+is in `test_third_review.py`, and the suite now has 2145 tests.
+Still open: offline DNS-FLOOD has no resolver to exempt, since there is no
+`net_env`.
 
 ## v1.9.1
 

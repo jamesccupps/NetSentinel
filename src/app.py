@@ -600,6 +600,7 @@ class NetSentinelApp:
     def _check_forensics_alerts(self):
         """Generate alerts for new forensics findings (credentials, insecure services)."""
         from src.ids_engine import Alert
+        from src.forensics import credential_alert
 
         # Check for new credentials — only entries appended since the last call.
         creds = self.forensics.credentials_found
@@ -609,42 +610,7 @@ class NetSentinelApp:
         else:
             new_creds = ()
         for cred in new_creds:
-            # Use risk from the finding (LOW for known update services, CRITICAL otherwise)
-            severity = cred.get('risk', 'CRITICAL')
-            is_digest = 'digest' in cred.get('credential_type', '').lower()
-            title_prefix = "Hashed Credential" if is_digest else "Plaintext Credential"
-            desc_suffix = (" (hashed response, not plaintext password)" if is_digest
-                           else ". Anyone on the same network can capture this credential.")
-            alert = Alert(
-                rule_id='FORENSICS-CREDENTIAL',
-                severity=severity,
-                title=f"{title_prefix} ({cred['protocol']})",
-                description=(f"{cred['protocol']} {cred['credential_type']} "
-                             f"transmitted over unencrypted HTTP{desc_suffix}"),
-                src_ip=cred.get('source_ip', ''),
-                dst_ip=cred.get('destination_ip', ''),
-                dst_port=cred.get('port', 0),
-                category="Credential Exposure",
-                evidence={
-                    'protocol': cred['protocol'],
-                    'credential_type': cred['credential_type'],
-                    'value': cred['value'],
-                    'connection': f"{cred['source_ip']} → "
-                                  f"{cred['destination_ip']}:{cred['port']}",
-                    'extra': cred.get('extra', {}),
-                    'description': (
-                        f"A {cred['credential_type']} for {cred['protocol']} "
-                        f"was found in network traffic{desc_suffix}"
-                    ),
-                    'recommendation': (
-                        'Switch to the encrypted version of this protocol.'
-                        if is_digest else
-                        'Change this password immediately. Switch to the '
-                        'encrypted version of this protocol.'
-                    ),
-                },
-            )
-            self._alert_gateway(alert)
+            self._alert_gateway(credential_alert(cred))
 
         # Check for new insecure services. Small and bounded by (ip, port) pairs on
         # the LAN, so a full pass is fine — but skip it entirely when nothing is new.

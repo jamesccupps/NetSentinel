@@ -23,7 +23,7 @@ from urllib.parse import quote
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import _test_support  # noqa: E402,F401
-from _test_support import reset_config  # noqa: E402
+from _test_support import SCAPY_REAL, reset_config  # noqa: E402
 
 from test_lan_threats import _Lan, _wire, name_query, pkt  # noqa: E402
 
@@ -346,6 +346,30 @@ class TestObservedIsLow(unittest.TestCase):
         f.analyze_packet(tcp(PC, 50000, '192.168.1.81', 80, http_get('192.168.1.81'),
                              server=80))
         self.assertEqual(kinds(f).get('Missing User Agent'), 'LOW')
+
+
+@unittest.skipUnless(SCAPY_REAL, 'needs real scapy')
+class TestCapturesRateCredentialsLikeLive(unittest.TestCase):
+
+    def test_an_updaters_hashed_login_in_a_capture_is_low(self):
+        """Replaying the day's captures made ESET's update login CRITICAL "Plaintext"."""
+        import shutil
+        import tempfile
+        from scapy.all import Ether, IP, TCP, Raw, wrpcap
+        from src.pcap_analyzer import PcapAnalyzer
+        tmp = tempfile.mkdtemp(prefix='ns_third_')
+        self.addCleanup(shutil.rmtree, tmp, True)
+        digest = (b'GET /v1/update.ver HTTP/1.1\r\nHost: update.eset.com\r\n'
+                  b'Authorization: Digest username="EAV-0000000000", realm="eset", '
+                  b'nonce="1", uri="/v1/update.ver", response="0123456789abcdef"\r\n\r\n')
+        cap = os.path.join(tmp, 'eset.pcap')
+        wrpcap(cap, [Ether(src='02:00:00:00:00:01', dst='02:00:00:00:00:02')
+                     / IP(src=PC, dst='38.90.226.40') / TCP(sport=50000, dport=80, flags='PA')
+                     / Raw(load=digest)])
+        alerts = PcapAnalyzer(reset_config()).analyze_file(cap)['alerts']
+        creds = [a for a in alerts if a['rule_id'] == 'FORENSICS-CREDENTIAL']
+        self.assertEqual([(a['severity'], a['title'].split(' (')[0]) for a in creds],
+                         [('LOW', 'Hashed Credential')])
 
 
 # ─── DNS volume ──────────────────────────────────────────────────────────────

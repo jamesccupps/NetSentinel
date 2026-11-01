@@ -813,6 +813,44 @@ SECURE_EQUIVALENTS = {
 }
 
 
+def credential_alert(cred):
+    """
+    The alert for one credential found in traffic, live or in a capture. Rated
+    by the finding (LOW for an updater's own login, CRITICAL otherwise), and a
+    digest is called what it is: a hash, not the password.
+    """
+    from src.ids_engine import Alert
+    is_digest = 'digest' in cred.get('credential_type', '').lower()
+    title_prefix = "Hashed Credential" if is_digest else "Plaintext Credential"
+    desc_suffix = (" (hashed response, not plaintext password)" if is_digest
+                   else ". Anyone on the same network can capture this credential.")
+    return Alert(
+        rule_id='FORENSICS-CREDENTIAL',
+        severity=cred.get('risk', 'CRITICAL'),
+        title=f"{title_prefix} ({cred['protocol']})",
+        description=(f"{cred['protocol']} {cred['credential_type']} "
+                     f"transmitted unencrypted{desc_suffix}"),
+        src_ip=cred.get('source_ip', ''),
+        dst_ip=cred.get('destination_ip', ''),
+        dst_port=cred.get('port', 0),
+        category="Credential Exposure",
+        evidence={
+            'protocol': cred['protocol'],
+            'credential_type': cred['credential_type'],
+            'value': cred['value'],
+            'connection': f"{cred.get('source_ip', '')} → "
+                          f"{cred.get('destination_ip', '')}:{cred.get('port', 0)}",
+            'extra': cred.get('extra', {}),
+            'description': (f"A {cred['credential_type']} for {cred['protocol']} "
+                            f"was found in network traffic{desc_suffix}"),
+            'recommendation': (
+                'Switch to the encrypted version of this protocol.' if is_digest else
+                'Change this password immediately. Switch to the encrypted version '
+                'of this protocol.'),
+        },
+    )
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 #  FLOW BEHAVIOR CLASSIFICATION
 # ═══════════════════════════════════════════════════════════════════════════════
