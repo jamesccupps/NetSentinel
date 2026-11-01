@@ -258,20 +258,12 @@ class SlidingPortWindow:
         """Distinct destinations in the window. Only called when an alert fires."""
         return {dst for _, _, dst in self._events if dst}
 
-    def max_ports_per_destination(self):
+    def ports_per_destination(self):
         """
-        The most distinct ports any single destination received. A scan probes
-        many ports on its targets; peer-to-peer and voice apps reach many peers on
-        one or two ports each, which adds up to many ports but none per peer.
+        destination -> the distinct ports it received. A scan probes many ports
+        on its targets; peer-to-peer and voice apps reach many peers on one or
+        two ports each, which adds up to many ports but few per peer.
         """
-        return max((len(p) for p in self._ports_per_destination().values()), default=0)
-
-    def most_probed(self):
-        """The destination that received the most distinct ports."""
-        per_dst = self._ports_per_destination()
-        return max(per_dst, key=lambda d: len(per_dst[d]), default='')
-
-    def _ports_per_destination(self):
         per_dst = {}
         for _, port, dst in self._events:
             per_dst.setdefault(dst, set()).add(port)
@@ -1104,23 +1096,26 @@ class IDSEngine:
                 if unique_ports >= self.port_scan_threshold:
                     # Only materialised when an alert fires, not on every packet.
                     scanned_ports = window.ports()
-                    # Check if ALL scanned ports are ephemeral (>= 1024)
-                    # If so, this is a server responding to many clients, not a scan
-                    has_low_ports = scanned_ports[0] < 1024
-                    concentrated = window.max_ports_per_destination() >= max(
-                        2, self.port_scan_threshold // 2)
+                    # A scanned host gets many ports, service ports among them; a
+                    # server answering many clients reaches only their high ports.
+                    # Both are judged on the same host. Across hosts, Tailscale
+                    # reaching three peers behind one NAT, each on its own high
+                    # port, plus DNS to the router and HTTPS elsewhere, was a scan.
+                    per_dst = window.ports_per_destination()
+                    needed = max(2, self.port_scan_threshold // 2)
+                    probed = {d: p for d, p in per_dst.items()
+                              if len(p) >= needed and min(p) < 1024}
 
-                    if has_low_ports and concentrated:
+                    if probed:
                         # One alert per scanner, about its main target. The count
                         # is per scanner, but the alert went to whatever packet
                         # crossed the line, one per destination: a 7-second audit
                         # of three hosts raised 87, most naming internet servers
                         # this computer was only browsing.
-                        per_dst = window._ports_per_destination()
                         targets = sorted((d for d in per_dst if len(per_dst[d]) >= 2),
                                          key=lambda d: -len(per_dst[d]))
                         target = copy.copy(pkt_info)
-                        target.dst_ip = window.most_probed() or pkt_info.dst_ip
+                        target.dst_ip = max(probed, key=lambda d: len(probed[d]))
                         alerts.append(self._create_alert(
                             "PORT-SCAN", Severity.HIGH,
                             "Port Scan Detected",
@@ -1331,10 +1326,12 @@ class IDSEngine:
             # High DNS query rate from single source. Not to this machine's own
             # resolver: a browser opening a news page makes 50 lookups in seconds.
             # Tunnels through that resolver are what DnsTunnelMonitor is for.
+            # Judged on the lookups themselves: run on the handshakes that came
+            # next, it charged a page load to the web servers, twice in a second.
             to_own_resolver = bool(self.net_env) and \
                 self.net_env.is_configured_resolver(pkt_info.dst_ip)
             recent_dns = [t for t, _ in self._dns_queries_by_ip[pkt_info.src_ip]
-                          if now - t < 10]
+                          if now - t < 10] if is_dns_query else ()
             if len(recent_dns) > 50 and not to_own_resolver:  # 50+ DNS queries in 10 seconds
                 recent_domains = [q for t, q in self._dns_queries_by_ip[pkt_info.src_ip]
                                   if now - t < 10]
@@ -1344,6 +1341,8 @@ class IDSEngine:
                     "Excessive DNS Queries",
                     f"{len(recent_dns)} DNS queries in 10s from {pkt_info.src_ip}",
                     pkt_info,
+                    cooldown_key=f"DNS-FLOOD:{pkt_info.src_ip}",
+                    hold_sec=300,
                     evidence={
                         'query_count': len(recent_dns),
                         'unique_domains': len(unique_domains),

@@ -1,4 +1,41 @@
-# Handoff: v1.9.1 released (the second review's fixes)
+# Handoff: the third review's fixes, after v1.9.1
+
+## Third review, 2026-11-01 (36 alerts in 23.5 hours of 1.9.1)
+
+1.9.1 ran from 10-31 13:25 at about 2% CPU (12 logical CPUs) and 324 MB, with
+3% of packets dropped in bursts. No alert was CRITICAL. Three NEW-DEVICE alerts
+were real: a Dialog Semiconductor device on 192.168.8.83 and two TP-Link
+devices on 192.168.12.x that Home Assistant began talking to at once (likely
+smart plugs; James to confirm). Everything else was false or over-rated.
+James said "Fix all 9"; all are fixed and committed, not pushed. Tests are in
+`test_third_review.py`, and 13 of its 20 fail on 1.9.1. The suite has 2144
+tests, OK with 63 skipped; 14 integration checks pass.
+1. Fast-flux (6 HIGH): Akamai via CNAMEs. `dns_analysis` keeps the CNAMEs per
+   name, and `_default_cdn_check(name, addresses, via)` matches them against
+   `KNOWN_CLOUD_DOMAINS`.
+2. Port scan (2 HIGH): Tailscale to a remote site where three peers share one
+   NAT. "Many ports" and "a service port" are now judged on the same host
+   (`ids_engine`, Rule 5).
+3. Name poisoning (1 HIGH): Home Assistant announcing its own names.
+   `lan_threats.parse_name_message` reads questions, SRV targets and
+   reverse-PTR targets. An answer counts only within 5 s of a lookup for the
+   name, and not for the host's own names. Existing Responder tests now ask
+   first.
+4. `forensics.runs_over`: HTTP-family ports only on TCP.
+5. ESET LiveGrid: `eset.systems` added to `SOFTWARE_UPDATE_HOSTS`.
+6. `forensics.is_ocsp_get`, and Delivery Optimization's
+   `/filestreamingservice/files/` path with its own User-Agent, count as
+   signed fetches.
+7. `app._insecure_service_named_today`: one insecure-service alert per
+   (port, host name) a day.
+8. HTTP Server Info with a version number is LOW (EOL versions stay HIGH).
+   Missing User Agent is LOW.
+9. DNS-FLOOD runs only on DNS queries, keyed per source with a 5-minute hold.
+
+Not changed: the ML anomaly (an upload burst), ESET's daily digest note, a few
+LOW "likely safe" HTTP alerts, and plain HTTP to a device on 192.168.8.54:8008.
+
+## v1.9.1
 
 **v1.9.1** (James asked, 2026-10-31):
 - the tag `v1.9.1` is at `a1d745c`, after CI passed on all five jobs;
@@ -10,7 +47,7 @@ Next: James runs 1.9.1 with review mode on, and the next batch of alerts gets
 the same review.
 
 Kept current during the work so it survives a context reset. Last updated
-2026-10-31 by the local Claude Code session on James's desktop. Read `CLAUDE.md`
+2026-11-01 by the local Claude Code session on James's desktop. Read `CLAUDE.md`
 first. The approved plan, with its findings by file:line, is outside the repo at
 `C:\Users\james\.claude\plans\parallel-inventing-lovelace.md`.
 

@@ -139,9 +139,11 @@ def is_private_address(ip):
 # checked before use, so the transport protects nothing. Windows Update and Edge's
 # updater were reported as insecure services. Matched on a dot boundary, so
 # eset.com.example.net is not ESET (a substring match used to say it was).
+# ESET's LiveGrid reputation lookups (eset.systems) go over plain HTTP too, with
+# a body ESET encrypts itself: 77 bytes as random as 77 bytes can be.
 SOFTWARE_UPDATE_HOSTS = (
     'windowsupdate.com', 'update.microsoft.com', 'delivery.mp.microsoft.com',
-    'download.microsoft.com', 'officecdn.microsoft.com', 'eset.com',
+    'download.microsoft.com', 'officecdn.microsoft.com', 'eset.com', 'eset.systems',
     'edgedl.me.gvt1.com', 'dl.google.com', 'steamcontent.com',
 )
 
@@ -185,6 +187,36 @@ def is_software_update_host(host):
 # an "Unencrypted HTTP Service".
 _CERTIFICATE_HOSTS = ('c.lencr.org', 'o.lencr.org', 'i.lencr.org', 'pki.goog')
 _SIGNED_FILE_SUFFIXES = (b'.crl', b'.crt', b'.cer', b'.p7c')
+# Windows Update and Store downloads, also from a cache server addressed by IP
+# (Microsoft Connected Cache, often inside the ISP), where no host name matches:
+# Delivery Optimization asking for its own path.
+_SIGNED_PATH_PREFIXES = (b'/filestreamingservice/files/',)
+_SIGNED_PATH_AGENT = b'user-agent: microsoft-delivery-optimization/'
+
+
+def is_ocsp_get(path):
+    """
+    An OCSP check sent by GET (RFC 6960, appendix A.1): the last segment of the
+    path is the DER request, base64 and URL-encoded. Recognised by what it is,
+    since the responders' names vary: status.thawte.com, oneocsp.microsoft.com.
+    """
+    segment = path.split(b'?')[0].rsplit(b'/', 1)[-1]
+    segment = re.sub(rb'%([0-9A-Fa-f]{2})', lambda m: bytes([int(m.group(1), 16)]), segment)
+    if not 8 <= len(segment) <= 2048:
+        return False
+    try:
+        der = base64.b64decode(segment + b'=' * (-len(segment) % 4), validate=True)
+    except ValueError:
+        return False
+    if len(der) < 2 or der[0] != 0x30:          # a DER SEQUENCE...
+        return False
+    size = der[1]
+    if size < 0x80:
+        return len(der) == size + 2              # ...exactly as long as it says
+    width = size & 0x7f
+    if width not in (1, 2) or len(der) < 2 + width:
+        return False
+    return len(der) == int.from_bytes(der[2:2 + width], 'big') + 2 + width
 
 
 def is_signed_fetch(host, payload):
@@ -195,8 +227,15 @@ def is_signed_fetch(host, payload):
     if (host or '').lower().startswith(('ocsp', 'crl')):
         return True
     request = HTTP_REQUEST_RE.search(payload)
-    path = request.group(2).split(b'?')[0].lower() if request else b''
-    return path.endswith(_SIGNED_FILE_SUFFIXES) or b'application/ocsp-request' in payload.lower()
+    target = request.group(2).split(b'?')[0] if request else b''
+    # Windows Update asks for /filestreamingservice//files/ as often as not.
+    path = re.sub(rb'/{2,}', b'/', target.lower())
+    lowered = payload.lower()
+    return (path.endswith(_SIGNED_FILE_SUFFIXES)
+            or (path.startswith(_SIGNED_PATH_PREFIXES) and _SIGNED_PATH_AGENT in lowered)
+            or b'application/ocsp-request' in lowered
+            or (request is not None and request.group(1).upper() == b'GET'
+                and is_ocsp_get(target)))
 
 
 FTP_USER_RE = re.compile(rb'USER\s+(\S+)', re.IGNORECASE)
@@ -723,6 +762,25 @@ INSECURE_PROTOCOLS = {
     31769:{'name': 'Skidata/Parking', 'risk': 'CRITICAL', 'desc': 'Parking system — cleartext XML with credit card data, EZPass tags, and transaction metadata (PCI-DSS violation)'},
 }
 
+# What each service above runs over; TCP unless listed. A port number names a
+# service only on its own transport: Tailscale's encrypted WireGuard to a peer
+# whose NAT had given it UDP port 8081 was an "Unencrypted HTTP-Alt Service".
+_SERVICE_TRANSPORTS = {
+    69: ('UDP',), 161: ('UDP',), 162: ('UDP',), 1812: ('UDP',), 1813: ('UDP',),
+    47808: ('UDP',),
+    389: ('TCP', 'UDP'), 514: ('TCP', 'UDP'), 2049: ('TCP', 'UDP'),
+    5060: ('TCP', 'UDP'), 11211: ('TCP', 'UDP'),
+}
+
+
+def runs_over(port, protocol):
+    """Whether the insecure service on `port` uses `protocol`. A packet whose
+    transport is not known is given the benefit of the doubt."""
+    if protocol not in ('TCP', 'UDP'):
+        return True
+    return protocol in _SERVICE_TRANSPORTS.get(port, ('TCP',))
+
+
 # Secure equivalents
 SECURE_EQUIVALENTS = {
     21: 'SFTP (port 22) or FTPS (port 990)',
@@ -1058,7 +1116,8 @@ class NetworkForensics:
     def _check_insecure_protocol(self, pkt_info):
         """Flag insecure protocol usage."""
         port, _ = service_ports(pkt_info)
-        if port in INSECURE_PROTOCOLS and pkt_info.payload_size > 0:
+        if (port in INSECURE_PROTOCOLS and pkt_info.payload_size > 0
+                and runs_over(port, pkt_info.protocol)):
             self.unencrypted_packets += 1
             key = (pkt_info.dst_ip, port)
             if key not in self.insecure_services:
@@ -1093,7 +1152,8 @@ class NetworkForensics:
     def _flag_unencrypted_data(self, pkt_info):
         """Flag unencrypted data transfer even without payload access."""
         port, _ = service_ports(pkt_info)
-        if port in INSECURE_PROTOCOLS and pkt_info.payload_size > 5:
+        if (port in INSECURE_PROTOCOLS and pkt_info.payload_size > 5
+                and runs_over(port, pkt_info.protocol)):
             proto_info = INSECURE_PROTOCOLS[port]
             self._add_timeline_event(pkt_info.timestamp, 'security',
                 f"Unencrypted {proto_info['name']} data: "
@@ -1939,9 +1999,11 @@ class NetworkForensics:
                     dedup_key = (src, 'no_ua')
                     if dedup_key not in self._http_ua_alerted:
                         self._http_ua_alerted.add(dedup_key)
+                        # LOW: plenty of updaters and devices send none, and on
+                        # its own it shows nothing being exposed.
                         self._add_sensitive_data('Missing User Agent',
                             f'HTTP request with no User-Agent header from {src} → {dst}:{port}',
-                            src, dst, port, ts, risk='MEDIUM')
+                            src, dst, port, ts, risk='LOW')
 
         # ─── Check URL for attack patterns ────────────────────
         # Only scan the request line and headers, not response bodies
@@ -2342,9 +2404,9 @@ class NetworkForensics:
         for header, value in findings.items():
             details_parts.append(f"{header}: {value}")
 
-            # Version numbers in server headers = exploitable info
-            if re.search(r'\d+\.\d+', value):
-                risk = 'MEDIUM'
+            # A version number on its own stays LOW: it says what a device runs,
+            # not that anything is wrong with it. Home Assistant talking to two new
+            # smart plugs was two MEDIUM "Sensitive Data in Transit" alerts.
 
             # Very old/known-vulnerable versions
             old_patterns = [

@@ -25,7 +25,7 @@ import _test_support  # noqa: E402,F401
 from _test_support import SCAPY_REAL, reset_config  # noqa: E402
 
 from src.capture import PacketInfo  # noqa: E402
-from test_lan_threats import _Lan, name_response, pkt as lan_pkt  # noqa: E402
+from test_lan_threats import _Lan, name_query, name_response, pkt as lan_pkt  # noqa: E402
 
 REPO = os.path.dirname(os.path.abspath(__file__))
 PC, ROUTER = '192.168.8.32', '192.168.8.1'
@@ -135,6 +135,11 @@ class TestWebRtcNames(_Lan):
         ids, alerts = self.engine()
         for name in ('wpad.local', 'fileserver.local', 'printer.local',
                      '3612d913-2ec0-47d2-ad52-92475112964d.local', 'intranet.local'):
+            query = name_query([name])
+            ids.inspect_packet(lan_pkt(protocol='UDP', src_ip='192.168.1.50',
+                                       dst_ip='224.0.0.251', src_port=5353, dst_port=5353,
+                                       src_mac='00:1b:21:00:00:50', _raw_payload=query,
+                                       payload_size=len(query)))
             payload = name_response([name], '192.168.1.66')
             ids.inspect_packet(lan_pkt(protocol='UDP', src_ip='192.168.1.66',
                                        dst_ip='224.0.0.251', src_port=5353, dst_port=5353,
@@ -155,8 +160,8 @@ class TestForensics(unittest.TestCase):
                                   protocol='TCP', payload_size=len(payload),
                                   _raw_payload=payload))
 
-    def request(self, server, host, n=1):
-        payload = (f'GET /filestreamingservice/files/x HTTP/1.1\r\nHost: {host}\r\n'
+    def request(self, server, host, n=1, path='/filestreamingservice/files/x'):
+        payload = (f'GET {path} HTTP/1.1\r\nHost: {host}\r\n'
                    f'User-Agent: Microsoft-Delivery-Optimization/10.1\r\n\r\n').encode()
         for _ in range(n):
             self.f.analyze_packet(pkt(src_ip=PC, dst_ip=server, src_port=50001, dst_port=80,
@@ -191,7 +196,7 @@ class TestForensics(unittest.TestCase):
 
     def test_the_same_server_serving_anything_else_still_counts(self):
         self.request('199.232.210.172', 'msedge.b.tlu.dl.delivery.mp.microsoft.com', n=3)
-        self.request('199.232.210.172', 'shop.example.com', n=3)
+        self.request('199.232.210.172', 'shop.example.com', n=3, path='/cart')
         self.assertEqual(len(self.alerts_for()), 1)
 
     def test_update_hosts_match_on_a_dot_boundary(self):

@@ -246,8 +246,16 @@ class DnsResponseMonitor:
 
         entry = self._resolutions.get(name)
         if entry is None:
-            entry = {'addresses': {}, 'ttl': -1, 'first': now}
+            entry = {'addresses': {}, 'ttl': -1, 'first': now, 'via': set()}
             self._resolutions[name] = entry
+        # The CNAMEs the answer went through. Bounded: every name here came off
+        # the network.
+        via = entry.setdefault('via', set())
+        for target in answers:
+            if len(via) >= 16:
+                break
+            if target and not _looks_like_address(target):
+                via.add(target.lower().rstrip('.'))
         for addr in addresses:
             entry['addresses'][addr] = now
             self._addr_to_domains[addr].add(_registrable(name))
@@ -271,7 +279,7 @@ class DnsResponseMonitor:
         if name in self._reported_flux and now - self._reported_flux[name] < FLUX_REPORT_HOLD_SEC:
             return None
         try:
-            if self.cdn_check(name, list(live)):
+            if self.cdn_check(name, list(live), sorted(via)):
                 self.flux_cdn_exempted += 1
                 self._reported_flux[name] = now     # do not re-check every answer
                 return None
@@ -374,15 +382,22 @@ def _network_of(address):
     return '.'.join(address.split('.')[:2])
 
 
-def _default_cdn_check(name, addresses):
+def _default_cdn_check(name, addresses, via=()):
     """
-    Whether a name's address churn belongs to a CDN or cloud: the name is a
-    known first-party service, or most of its addresses sit in ranges a cloud
-    or CDN publishes. Fast-flux rotates through compromised home machines,
-    which are in neither.
+    Whether a name's address churn belongs to a CDN or cloud: the name, or a
+    CNAME its answer went through, is a known first-party service, or most of
+    its addresses sit in ranges a cloud or CDN publishes. Fast-flux rotates
+    through compromised home machines, which are in neither.
+
+    The CNAMEs matter for Akamai, which publishes no address list:
+    api.weather.gov is a CNAME to e353369.dscg.akamaiedge.net, and was HIGH
+    six times in a day. A CNAME cannot be used to borrow a CDN's name, either:
+    the resolver follows it and asks the CDN's own servers, so the addresses
+    at the end are the CDN's.
     """
     from src.net_detect import KNOWN_CLOUD_DOMAINS, NetworkEnvironment
-    if NetworkEnvironment._domain_in_suffix_set(name, KNOWN_CLOUD_DOMAINS):
+    if any(NetworkEnvironment._domain_in_suffix_set(n, KNOWN_CLOUD_DOMAINS)
+           for n in (name, *via)):
         return True
     if not addresses:
         return False

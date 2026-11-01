@@ -206,6 +206,8 @@ class NetSentinelApp:
         # Track which insecure services we've already alerted on (avoid spam)
         self._forensics_alerted_services = set()
         self._forensics_alerted_sensitive = set()
+        # (port, host name) -> when an insecure-service alert last named it
+        self._insecure_names_alerted = {}
 
         # High-water marks into the forensics result lists. _check_forensics_alerts runs
         # once per packet; rescanning every finding each time was O(findings) per packet
@@ -565,6 +567,36 @@ class NetSentinelApp:
         # Buffer for ML (always, even if IDS errored)
         self._packet_window.append(pkt_info)
 
+    def _insecure_service_named_today(self, svc, now=None):
+        """
+        Whether an insecure-service alert in the last day already named every
+        host this server answers for. A service behind a CDN gets a new address
+        every few hours, and each one was a new alert: Steam's client config and
+        ESET's LiveGrid were five each in a day. Records the names either way.
+        """
+        names = set()
+        try:
+            if self.ids_engine:
+                names |= set(self.ids_engine._get_domains_for_ip(svc['ip']) or ())
+            forensics = getattr(self, 'forensics', None)
+            if forensics:
+                names |= set(forensics._ip_to_domains.get(svc['ip'], ()))
+        except Exception:
+            return False
+        if not names:
+            return False
+        now = now or time.time()
+        seen = self._insecure_names_alerted
+        keys = {(svc['port'], name) for name in names}
+        covered = all(k in seen and now - seen[k] < 86400 for k in keys)
+        if not covered:
+            for k in keys:
+                seen[k] = now
+        if len(seen) > 4096:
+            for k in sorted(seen, key=seen.get)[:2048]:
+                del seen[k]
+        return covered
+
     def _check_forensics_alerts(self):
         """Generate alerts for new forensics findings (credentials, insecure services)."""
         from src.ids_engine import Alert
@@ -628,6 +660,8 @@ class NetSentinelApp:
             # Only alert after seeing some traffic (not a single SYN)
             if svc['packet_count'] >= 5:
                 self._forensics_alerted_services.add(key)
+                if self._insecure_service_named_today(svc):
+                    continue
                 from src.forensics import SECURE_EQUIVALENTS, PROTOCOL_EXPLOITATION, DEFAULT_EXPLOITATION
                 exploit_info = PROTOCOL_EXPLOITATION.get(svc['port'], DEFAULT_EXPLOITATION)
                 alert = Alert(

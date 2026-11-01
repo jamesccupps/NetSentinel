@@ -42,7 +42,7 @@ from src.ipcache import classify
 logger = logging.getLogger("NetSentinel.LAN")
 
 __all__ = ['LanThreatMonitor', 'is_randomized_mac', 'is_failover_mac',
-           'parse_dns_wire', 'vendor_for_mac']
+           'parse_dns_wire', 'parse_name_message', 'vendor_for_mac']
 
 STATE_FILE = 'lan_state.json'
 
@@ -55,6 +55,12 @@ STATE_FILE = 'lan_state.json'
 ARP_CONFIRM_SECONDS = 120
 # A change is contested only if the previous owner was heard this recently.
 ARP_CONTEST_SECONDS = 600
+
+# The name services Responder answers, by port.
+NAME_PORTS = {5355: 'LLMNR', 5353: 'mDNS', 137: 'NBT-NS'}
+# An answer counts as answering a lookup when the lookup was this recent.
+# Responder answers at once, and mDNS waits at most half a second (RFC 6762).
+NAME_ASKED_SECONDS = 5
 
 # ─── MAC helpers ─────────────────────────────────────────────────────────────
 
@@ -168,46 +174,82 @@ def _decode_netbios(label):
     return raw[:15].decode('ascii', 'replace').rstrip(' \x00')
 
 
-def parse_dns_wire(payload, netbios=False):
+def _wire_name(labels, netbios=False):
+    if netbios:
+        name = _decode_netbios(labels[0]) if labels else None
+        return name.lower() if name else ''
+    return b'.'.join(labels).decode('utf-8', 'replace').lower()
+
+
+def _target_name(buf, pos):
+    """A name inside record data, or '' if it does not parse."""
+    try:
+        return _wire_name(_read_name(buf, pos)[0])
+    except (ValueError, IndexError):
+        return ''
+
+
+def parse_name_message(payload, netbios=False):
     """
-    (is_response, [(name, address)]) for the address records in a DNS-format
-    message, or None if it does not parse. Names are lowercased; NetBIOS names
-    are decoded. Bounded and strict: every byte here is attacker-supplied.
+    A DNS-format message as the name-poisoning check needs it, or None if it
+    does not parse:
+      response   whether it is an answer
+      questions  the names asked for
+      answers    [(name, address)] for its address records
+      own        names the sender gives as its own: the targets of its service
+                 (SRV) records, and of reverse-lookup (PTR) records
+    Names are lowercased; NetBIOS names are decoded. Bounded and strict: every
+    byte here is attacker-supplied.
     """
     try:
         if len(payload) < 12:
             return None
         flags, qd, an, ns, ar = struct.unpack('>HHHHH', payload[2:12])
-        is_response = bool(flags & 0x8000)
+        msg = {'response': bool(flags & 0x8000), 'questions': [], 'answers': [], 'own': []}
         pos = 12
         for _ in range(min(qd, 16)):
-            _, pos = _read_name(payload, pos)
+            labels, pos = _read_name(payload, pos)
             pos += 4
-        answers = []
+            name = _wire_name(labels, netbios)
+            if name:
+                msg['questions'].append(name)
         for _ in range(min(an + ns + ar, 64)):
             labels, pos = _read_name(payload, pos)
             if pos + 10 > len(payload):
                 break
             rtype, _rclass, _ttl, rdlen = struct.unpack('>HHIH', payload[pos:pos + 10])
-            pos += 10
-            rdata = payload[pos:pos + rdlen]
-            pos += rdlen
+            start = pos + 10
+            rdata = payload[start:start + rdlen]
+            pos = start + rdlen
             if len(rdata) != rdlen:
                 break
             if netbios:
                 if rtype == 0x20 and labels and rdlen >= 6:
-                    name = _decode_netbios(labels[0])
+                    name = _wire_name(labels, netbios=True)
                     if name:
-                        answers.append((name.lower(), str(ipaddress.IPv4Address(rdata[2:6]))))
+                        msg['answers'].append((name, str(ipaddress.IPv4Address(rdata[2:6]))))
                 continue
-            name = b'.'.join(labels).decode('utf-8', 'replace').lower()
+            name = _wire_name(labels)
             if rtype == 1 and rdlen == 4:
-                answers.append((name, str(ipaddress.IPv4Address(rdata))))
+                msg['answers'].append((name, str(ipaddress.IPv4Address(rdata))))
             elif rtype == 28 and rdlen == 16:
-                answers.append((name, str(ipaddress.IPv6Address(rdata))))
-        return is_response, answers
+                msg['answers'].append((name, str(ipaddress.IPv6Address(rdata))))
+            elif rtype == 33 and rdlen > 6:
+                msg['own'].append(_target_name(payload, start + 6))
+            elif rtype == 12 and name.endswith(('.in-addr.arpa', '.ip6.arpa')):
+                msg['own'].append(_target_name(payload, start))
+        return msg
     except (ValueError, struct.error, IndexError):
         return None
+
+
+def parse_dns_wire(payload, netbios=False):
+    """
+    (is_response, [(name, address)]) for the address records in a DNS-format
+    message, or None if it does not parse.
+    """
+    msg = parse_name_message(payload, netbios)
+    return None if msg is None else (msg['response'], msg['answers'])
 
 
 def _short_name(name):
@@ -272,6 +314,7 @@ class LanThreatMonitor:
         # Name poisoning: responder -> {'names': {name: last}, 'ips': set}
         self._responders = OrderedDict()
         self._name_owners = {}            # name -> {responder ids}
+        self._asked = OrderedDict()       # name -> when someone last looked it up
         # Lateral movement: src -> {dst: last}
         self._fanout = {}
         # Uploads: src -> state
@@ -337,8 +380,9 @@ class LanThreatMonitor:
                 findings.extend(self._observe_dhcp(pkt, now))
             elif pkt.src_port == 547 and pkt.dst_port == 546:
                 findings.extend(self._observe_dhcpv6(pkt, now))
-            elif pkt.src_port in (5355, 5353, 137) and pkt._raw_payload:
-                findings.extend(self._observe_name_response(pkt, now))
+            elif pkt._raw_payload and (pkt.src_port in NAME_PORTS
+                                       or pkt.dst_port in NAME_PORTS):
+                findings.extend(self._observe_name_message(pkt, now))
         elif proto == 'ICMPv6' and pkt.icmp_type == 134:
             findings.extend(self._observe_router_advert(pkt, now))
 
@@ -622,29 +666,58 @@ class LanThreatMonitor:
 
     # ─── Name poisoning ─────────────────────────────────────────────────────
 
-    def _observe_name_response(self, pkt, now):
-        protocol = {5355: 'LLMNR', 5353: 'mDNS', 137: 'NBT-NS'}[pkt.src_port]
-        parsed = parse_dns_wire(pkt._raw_payload, netbios=(protocol == 'NBT-NS'))
-        if not parsed or not parsed[0] or not parsed[1]:
+    def _observe_name_message(self, pkt, now):
+        # A query goes to the service's port and an answer comes from it. Port
+        # numbers alone are not enough: this PC's ordinary DNS lookups can leave
+        # from 5353 or 5355, and their answers come back to it from port 53.
+        protocol = NAME_PORTS.get(pkt.src_port) or NAME_PORTS.get(pkt.dst_port)
+        msg = parse_name_message(pkt._raw_payload, netbios=(protocol == 'NBT-NS'))
+        if not msg:
             return []
+        if not msg['response']:
+            if pkt.dst_port in NAME_PORTS:
+                for name in msg['questions']:
+                    short = _short_name(name)
+                    if short:
+                        self._asked[short] = now
+                        self._asked.move_to_end(short)
+                while len(self._asked) > 4096:
+                    self._asked.popitem(last=False)
+            return []
+        if pkt.src_port not in NAME_PORTS or not msg['answers']:
+            return []
+        protocol = NAME_PORTS[pkt.src_port]
         self.stats['name_responses'] += 1
         # One identity per host: its MAC when the frame has one, so the answers it
         # sends over IPv4 and over IPv6 are one responder, not two.
         responder = _norm_mac(pkt.src_mac) or pkt.src_ip
         entry = self._responders.get(responder)
         if entry is None:
-            entry = self._responders[responder] = {'names': {}, 'ips': set(), 'protocols': set()}
+            entry = self._responders[responder] = {'names': {}, 'ips': set(),
+                                                   'protocols': set(), 'own': set()}
             while len(self._responders) > 1024:
                 self._responders.popitem(last=False)
         entry['ips'].add(pkt.src_ip)
         entry['protocols'].add(protocol)
-        for name, _address in parsed[1]:
+        own = entry['own']
+        for name in msg['own']:
+            short = _short_name(name)
+            if short and len(own) < 64:
+                own.add(short)
+        for name, _address in msg['answers']:
             short = _short_name(name)
             if not short or (protocol == 'mDNS' and _WEBRTC_NAME.fullmatch(short)):
                 continue
-            entry['names'][short] = now
             owners = self._name_owners.setdefault(short, set())
             owners.add(responder)
+            # Responder answers lookups. Home Assistant announcing its own names
+            # unasked (its hostname, its instance ID, its Matter name, an add-on)
+            # answered nothing, nor does a host answering for the names its own
+            # services point to.
+            asked = self._asked.get(short)
+            if asked is None or now - asked > NAME_ASKED_SECONDS or short in own:
+                continue
+            entry['names'][short] = now
         for stale in [n for n, t in entry['names'].items() if now - t > 600]:
             del entry['names'][stale]
         if len(self._name_owners) > 8192:
