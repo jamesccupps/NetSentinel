@@ -727,12 +727,14 @@ class _Run:
                 continue
             found += 1
             ev = obj.evidence
-            key = (ev.get('protocol'), ev.get('credential_type'), ev.get('value'), ev.get('source'))
+            # 'connection' since the capture's alert became the live one's.
+            source = ev.get('connection') or ev.get('source', '')
+            key = (ev.get('protocol'), ev.get('credential_type'), ev.get('value'), source)
             cred = self.creds.setdefault(key, {
                 'protocol': ev.get('protocol', ''),
                 'credential_type': ev.get('credential_type', ''),
                 'value': ev.get('value', ''),
-                'source': ev.get('source', ''),
+                'source': source,
                 'captures': [],
             })
             if item.name not in cred['captures']:

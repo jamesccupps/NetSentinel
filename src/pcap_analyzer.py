@@ -306,31 +306,12 @@ class PcapAnalyzer:
 
         # Generate alerts from forensics findings
         from src.ids_engine import Alert
+        from src.forensics import credential_alert
+        # The live alert, so a capture is rated as live monitoring rates it. Built
+        # here separately, every credential was a CRITICAL "Plaintext Credential",
+        # ESET's hashed update login included.
         for cred in forensics.credentials_found:
-            alert = Alert(
-                rule_id='FORENSICS-CREDENTIAL',
-                severity='CRITICAL',
-                title=f"Plaintext Credential Found ({cred['protocol']})",
-                description=(f"{cred['protocol']} {cred['credential_type']} "
-                             f"transmitted in plaintext"),
-                src_ip=cred.get('source_ip', ''),
-                dst_ip=cred.get('destination_ip', ''),
-                dst_port=cred.get('port', 0),
-                category="Credential Exposure",
-                evidence={
-                    'protocol': cred['protocol'],
-                    'credential_type': cred['credential_type'],
-                    'value': cred['value'],
-                    'source': f"{cred['source_ip']} → {cred['destination_ip']}:{cred['port']}",
-                    'extra': cred.get('extra', {}),
-                    'description': (f"A {cred['credential_type']} for {cred['protocol']} was "
-                        f"found in plaintext network traffic. Anyone on the same network "
-                        f"could have captured this credential."),
-                    'recommendation': ('Change this password immediately. Switch to the '
-                        'encrypted version of this protocol.'),
-                },
-            )
-            on_alert(alert)
+            on_alert(credential_alert(cred))
 
         for svc_finding in forensics.security_findings:
             kind = svc_finding.get('type', 'insecure_protocol')
