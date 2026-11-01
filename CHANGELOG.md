@@ -1,6 +1,6 @@
 # NetSentinel Changelog
 
-## Unreleased — A third day of real alerts
+## v1.9.2 — A third day of real alerts
 
 **2145 unit tests** plus 14 integration checks. A day of 1.9.1 raised 36 alerts,
 none CRITICAL. Three new devices on the network were real; the nine HIGH alerts
