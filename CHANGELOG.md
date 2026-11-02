@@ -1,6 +1,9 @@
 # NetSentinel Changelog
 
-## Unreleased
+## v1.12.0 — Your UniFi names, and no more false passwords
+
+**2266 unit tests** plus 14 integration checks. From 1.10.x or 1.11.0 this
+installs from the Update button.
 
 - **Device names from UniFi.** Opt-in and read only: with a UniFi console's address
   and an API key made in its Integrations settings (Settings → UniFi), NetSentinel
