@@ -249,6 +249,17 @@ DEFAULT_CONFIG = {
         "enabled": True,
         "auto_update": True,
     },
+    "unifi": {
+        # Names of the devices on this network, read from the owner's UniFi
+        # console (Network Integration API, read only; src/unifi.py). Off until
+        # the console's address and an API key made in UniFi are set.
+        "enabled": False,
+        "host": "",                     # The console on this network, e.g. 192.168.1.1
+        "site": "default",
+        "api_key": "",                  # A secret: Settings shows it masked, logs never
+        "cert_sha256": "",              # Pinned on first use; clear it to trust a new one
+        "refresh_minutes": 5,
+    },
     "migrations": {
         "applied": [],                  # STALE_DEFAULTS already handled
     },

@@ -103,6 +103,11 @@ class NetSentinelApp:
         self.vulns.start_updating()
         self._vulns_alerted = {}       # (ip, port, cves) -> last alert
 
+        # What the owner's UniFi console calls each device (opt-in, read only).
+        from src.unifi import UnifiInventory
+        self.unifi = UnifiInventory(self.config)
+        self.unifi.start()
+
         # Process Verifier: deep process investigation
         from src.process_verify import ProcessVerifier
         self.process_verifier = ProcessVerifier(self.config)
@@ -413,8 +418,19 @@ class NetSentinelApp:
                 k: t for k, t in self._alert_cooldowns.items() if t >= cutoff}
         return True
 
+    def _name_devices(self, alert):
+        """The UniFi console's names for the alert's hosts, when it knows them."""
+        unifi = getattr(self, 'unifi', None)
+        if unifi is None or not unifi.count:
+            return
+        for side in ('src', 'dst'):
+            name = unifi.name_for(ip=getattr(alert, f'{side}_ip', ''))
+            if name:
+                alert.evidence[f'{side}_name'] = name
+
     def _emit_alert(self, alert):
         """Deliver a finished alert to storage, the GUI and the correlator."""
+        self._name_devices(alert)
         self._capture_alert_evidence(alert)
         alert.stored = self.alert_manager.add_alert(alert)
         review = self.review

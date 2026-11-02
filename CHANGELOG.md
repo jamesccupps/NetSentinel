@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+- **Device names from UniFi.** Opt-in and read only: with a UniFi console's address
+  and an API key made in its Integrations settings (Settings → UniFi), NetSentinel
+  reads the console's client list every 5 minutes (`src/unifi.py`).
+  - The Devices page shows the name the owner gave each device.
+  - Alerts name both ends ("192.168.1.10 (Office 3D Printer)").
+  - The Threat data page says whether the console is connected.
+  - Only the sites and clients endpoints are read, with GET; the API's firewall
+    and ACL writes are never called.
+  - It talks only to a console at a private address, and pins the console's
+    certificate on first use.
+  - The key is masked in Settings and never logged.
+  - Review bundles drop the names, since they are often people's.
+
 - **A Windows Update download is not a password.** On 1.11.0's first afternoon,
   Delivery Optimization fetched a Visual Studio update over plain HTTP from a
   cache server, and two "[CONFIRMED] Plaintext Credential (HTTP Form)" alerts,

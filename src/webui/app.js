@@ -397,7 +397,11 @@ function evidenceView(ev) {
 function alertItem(a) {
   const key = a.id || `${a.timestamp}|${a.rule_id}|${a.title}`;
   const evidence = h('div', { class: 'evidence-wrap', hidden: !expanded.has(key) }, evidenceView(a.evidence));
-  const where = [a.src_ip, a.dst_ip ? `→ ${a.dst_ip}${a.dst_port ? ':' + a.dst_port : ''}` : null]
+  // With the UniFi console's names, when it knows the hosts.
+  const ev = a.evidence || {};
+  const named = (ip, name) => (name ? `${ip} (${name})` : ip);
+  const where = [a.src_ip ? named(a.src_ip, ev.src_name) : null,
+    a.dst_ip ? `→ ${named(a.dst_ip, ev.dst_name)}${a.dst_port ? ':' + a.dst_port : ''}` : null]
     .filter(Boolean).join(' ');
   return h('div', {
     class: `alert sev-${a.severity}${a.acknowledged ? ' acked' : ''}`,
@@ -560,7 +564,9 @@ function renderDevices() {
     });
   }
   const rows = shown.map((x) => h('tr', null,
-    h('td', { class: 'mono' }, x.ip), h('td', null, x.hostname || '—'), h('td', { class: 'mono' }, x.mac || '—'),
+    h('td', { class: 'mono' }, x.ip),
+    h('td', { title: x.name && x.hostname !== '—' ? `hostname ${x.hostname}` : null }, x.name || x.hostname || '—'),
+    h('td', { class: 'mono' }, x.mac || '—'),
     h('td', null, x.type), h('td', { class: 'num' }, x.confidence), h('td', { class: 'num' }, fmtNum(x.packets)),
     h('td', { class: 'mono' }, x.last_seen), h('td', { class: 'wrap' }, (x.services || []).join(', '))));
   const heads = DEVICE_COLUMNS.map((c) => h('th', {
@@ -583,7 +589,8 @@ const ipKey = (ip) => String(ip || '').includes(':') ? `z${ip}`
   : String(ip || '').split('.').map((n) => n.padStart(3, '0')).join('.');
 const DEVICE_COLUMNS = [
   { key: 'ip', label: 'IP', sort: (x) => ipKey(x.ip) },
-  { key: 'hostname', label: 'Hostname', sort: (x) => String(x.hostname || '~').toLowerCase() },
+  // The UniFi console's name when it is configured, else what the device announced.
+  { key: 'hostname', label: 'Name', sort: (x) => String(x.name || x.hostname || '~').toLowerCase() },
   { key: 'mac', label: 'MAC', sort: (x) => String(x.mac || '~') },
   { key: 'type', label: 'Type', sort: (x) => String(x.type || '') },
   { key: 'confidence', label: 'Confidence', num: true, sort: (x) => parseFloat(x.confidence) || 0 },

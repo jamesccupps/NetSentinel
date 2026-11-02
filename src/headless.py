@@ -719,7 +719,16 @@ class HeadlessServer:
         }, 'application/json'
 
     def _route_devices(self, params):
-        return self.app.device_learner.get_summary(), 'application/json'
+        summary = self.app.device_learner.get_summary()
+        # The UniFi console's names, when it is configured (src/unifi.py).
+        unifi = getattr(self.app, 'unifi', None)
+        if unifi is not None and unifi.count:
+            for device in summary.get('devices', []):
+                client = unifi.client_for(ip=device.get('ip'), mac=device.get('mac'))
+                if client:
+                    device['name'] = client['name']
+                    device['connection'] = client['connection']
+        return summary, 'application/json'
 
     def _route_metrics(self, params):
         """Prometheus text exposition, so this can be scraped like anything else."""

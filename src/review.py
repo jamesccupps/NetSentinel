@@ -144,7 +144,9 @@ class ReviewRecorder:
 
 # Evidence keys never written, whatever they hold.
 _DROP_KEYS = {'value', 'raw', 'value_raw', 'value_masked', 'raw_value', 'payload',
-              'packet_capture', 'packet_capture_note', 'cookies', 'headers'}
+              'packet_capture', 'packet_capture_note', 'cookies', 'headers',
+              # UniFi's device names ("Sam's phone"): people's names, local only.
+              'src_name', 'dst_name'}
 # Nor any key containing one of these.
 _FORBIDDEN_IN_KEY = ('cookie', 'password', 'passwd', 'secret', 'token', 'credential',
                      'authorization', 'session', 'api_key', 'apikey', 'private_key')

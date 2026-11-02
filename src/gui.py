@@ -2727,6 +2727,21 @@ class NetSentinelGUI:
                   cursor='hand2', command=self._show_threat_data
                   ).pack(anchor='w', pady=4)
 
+        unifi_card = Card(scroll_frame, title="UNIFI (applies at next start)")
+        unifi_card.pack(fill='x', padx=8, pady=(0, 8))
+        self._add_setting_toggle(
+            unifi_card, 'unifi.enabled',
+            "Name devices from my UniFi console (read only, on this network)", False)
+        self._add_setting_row(unifi_card, 'unifi.host', 'Console address (e.g. 192.168.1.1)', '')
+        self._add_setting_row(unifi_card, 'unifi.site', 'Site', 'default')
+        self._add_setting_secret(unifi_card, 'unifi.api_key', 'UniFi API key')
+        tk.Label(unifi_card, text=(
+            "Make the key in UniFi's Integrations settings. NetSentinel "
+            "only reads the client list with it, never changes anything, and sends it "
+            "only to this console."),
+            font=('Segoe UI', 8), fg=COLORS['text_dim'], bg=COLORS['bg_card'],
+            anchor='w', justify='left', wraplength=560).pack(fill='x')
+
         geo_card = Card(scroll_frame, title="GEOIP (applies at next start)")
         geo_card.pack(fill='x', padx=8, pady=(0, 8))
         self._add_setting_toggle(
