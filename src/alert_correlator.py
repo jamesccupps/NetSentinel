@@ -48,6 +48,18 @@ _ESCALATION_CHAINS = [
 MAX_ALERTS_PER_INCIDENT = 500
 
 
+def _span(seconds):
+    """'40 seconds', '3 minutes', '2 hours'; '' for under a second."""
+    seconds = int(seconds)
+    if seconds < 1:
+        return ''
+    for size, unit in ((86400, 'day'), (3600, 'hour'), (60, 'minute'), (1, 'second')):
+        if seconds >= size:
+            count = seconds // size
+            return f"{count} {unit}{'' if count == 1 else 's'}"
+    return ''
+
+
 class Incident:
     """A group of correlated alerts forming a single security incident."""
 
@@ -109,11 +121,14 @@ class Incident:
                 f"{' then '.join(cats)}. This pattern suggests a coordinated attack."
             )
         elif len(cats) == 1:
-            self.title = f"{cats[0]} ({n} alerts)"
-            self.narrative = (
-                f"{n} {cats[0]} alerts from {src_str} within "
-                f"{int(self.updated - self.created)}s."
-            )
+            # "1 alerts ... from within 0s" was how a lone alert read: say it
+            # plainly, and give the span only when there is one.
+            alerts = 'alert' if n == 1 else 'alerts'
+            self.title = f"{cats[0]} ({n} {alerts})"
+            source = f" from {src_str}" if src_str else ''
+            span = _span(self.updated - self.created) if n > 1 else ''
+            self.narrative = (f"{n} {cats[0]} {alerts}{source}"
+                              f"{' over ' + span if span else ''}.")
         else:
             self.title = f"Multi-vector incident ({n} alerts)"
             self.narrative = (

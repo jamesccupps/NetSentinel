@@ -152,6 +152,11 @@ class NetSentinelApp:
             raw_packet_callback=self._on_raw_packet,
         )
 
+        # The dashboard's charts: a day of traffic rates, sampled every 5 s.
+        from src.metrics_history import MetricsHistory
+        self.metrics_history = MetricsHistory(self._history_counters)
+        self.metrics_history.start()
+
         # IOC Scanner — also uses the verified gateway
         from src.ioc_scanner import IOCScanner
         self.ioc_scanner = IOCScanner(
@@ -1051,6 +1056,18 @@ class NetSentinelApp:
         except Exception as e:
             logger.debug("Forensics DB flush error: %s", e)
         logger.info("Monitoring stopped. Data saved.")
+
+    def _history_counters(self):
+        """The counters metrics_history turns into rates; None while stopped."""
+        engine = getattr(self, 'capture_engine', None)
+        if engine is None or not engine.is_running:
+            return None
+        stats = engine.stats
+        alerts = getattr(self, 'alert_manager', None)
+        return {'packets': stats.get('packets_captured', 0),
+                'bytes': stats.get('bytes_captured', 0),
+                'dropped': stats.get('packets_dropped', 0),
+                'alerts': alerts.stats.get('total', 0) if alerts is not None else 0}
 
     def get_dashboard_data(self):
         """Aggregate data for the GUI dashboard."""

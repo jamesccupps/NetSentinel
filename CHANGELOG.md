@@ -2,6 +2,27 @@
 
 ## Unreleased
 
+- **A better browser dashboard.** The charts drew only what the page had seen
+  since it opened, with no axes and no readout: a fresh page showed one line.
+  - NetSentinel now keeps a day of traffic, sampled every 5 seconds from the
+    capture counters (every packet, before the analysis cap). The charts pick
+    15 minutes, 1 hour, 6 hours or 24 hours, and are full the moment the page
+    opens.
+  - Both charts have time and value axes, and a now / average / peak line.
+    Pointing at one gives the time, the rate, and the peak within that bucket.
+    A stopped stretch shows as a gap, not a dive to zero.
+  - The six summary cards sit in one row, or three, or two on a phone. The
+    alert, flow and device cards open their pages.
+  - The Engine panel is grouped, with the drop counts explained.
+  - Alerts open to their evidence as labelled fields with the advice first,
+    instead of raw JSON, and say how long ago they fired.
+  - Devices sort by any column; addresses sort as numbers.
+  - The browser tab title counts open alerts.
+  - The tab bar no longer scrolls sideways at middling widths, and on a phone
+    the header scrolls away.
+  - Incidents read "1 alert", and give the span only when there is one: they
+    said "1 alerts ... within 0s".
+
 - **HTTPS was nearly invisible on installs from before September, and analysis
   stopped at 500 packets a second.** A saved `config.json` keeps every value it
   was first written with, so two fixed defaults never reached existing installs:

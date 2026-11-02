@@ -105,13 +105,21 @@ next free port), and **Open in Browser** in its top bar opens it. The detection
 engine never needed a display, so it can also run as a sensor with no window at
 all — on a Raspberry Pi hanging off a SPAN port, in a container, or on a server —
 with `python main.py --headless` (or `NetSentinel.exe --headless`), and be read
-in a browser or over HTTP:
+in a browser or over HTTP.
+
+The overview's traffic and bandwidth charts cover the last 15 minutes to 24
+hours, kept by NetSentinel itself, so they are full the moment the page opens.
+Point at either one for the time, the average and the peak. Alerts open to their
+evidence as labelled fields with the advice first, devices sort by any column,
+and the browser tab shows how many alerts are open.
 
 | Endpoint | Returns |
 |---|---|
 | `GET /` | the dashboard |
 | `GET /status.txt` | human-readable status summary |
 | `GET /api/overview` | what the dashboard's overview shows |
+| `GET /api/history?minutes=` | traffic rates for the charts, up to a day |
+| `GET /api/sources` | every threat data source and whether it is in use |
 | `GET /health` | liveness, for a supervisor or container probe |
 | `GET /api/status` | capture, IDS, ML and alert counters |
 | `GET /api/alerts` | recent alerts (`?limit=`, `?severity=`) |

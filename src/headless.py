@@ -295,6 +295,7 @@ class HeadlessServer:
             '/api/audit': self._route_audit,
             '/api/scan/ignored': self._route_scan_ignored,
             '/api/sources': self._route_sources,
+            '/api/history': self._route_history,
         }
         self.post_routes = {
             '/api/scan/new': self._post_scan_new,
@@ -484,6 +485,14 @@ class HeadlessServer:
 
     def _post_scan_cancel(self, params, body, length):
         return self._scan_sessions().cancel(_str_param(params, 'id')), 200
+
+    def _route_history(self, params):
+        """Traffic rates for the charts: ?minutes= up to a day (src/metrics_history.py)."""
+        history = getattr(self.app, 'metrics_history', None)
+        minutes = _int_param(params, 'minutes', 60, 24 * 60)
+        if history is None:
+            return {'interval': 5, 'bucket_sec': 5, 'points': [], 'fields': []}, 'application/json'
+        return history.series(minutes), 'application/json'
 
     def _route_sources(self, params):
         """Every threat data source and whether it is in use (src/data_sources.py)."""

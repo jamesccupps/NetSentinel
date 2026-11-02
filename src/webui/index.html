@@ -32,9 +32,21 @@
 <main>
   <section class="page" id="page-overview">
     <div class="cards" id="cards"></div>
+    <div class="chart-bar">
+      <span class="chart-bar-title">Traffic over the last</span>
+      <div class="chips" id="ranges" role="group" aria-label="Time range"></div>
+    </div>
     <div class="grid two">
-      <div class="panel"><h2>Traffic <small>packets / second</small></h2><canvas id="chart-pps"></canvas></div>
-      <div class="panel"><h2>Bandwidth <small>KB / second</small></h2><canvas id="chart-bw"></canvas></div>
+      <div class="panel">
+        <h2>Traffic <small>packets a second</small></h2>
+        <p class="chart-summary" id="pps-summary"></p>
+        <div class="chart-wrap"><canvas id="chart-pps" aria-label="Packets a second over time"></canvas></div>
+      </div>
+      <div class="panel">
+        <h2>Bandwidth <small>bytes a second</small></h2>
+        <p class="chart-summary" id="bw-summary"></p>
+        <div class="chart-wrap"><canvas id="chart-bw" aria-label="Bytes a second over time"></canvas></div>
+      </div>
     </div>
     <div class="grid three">
       <div class="panel"><h2>Protocols</h2><div id="protocols" class="bars"></div></div>
@@ -102,6 +114,7 @@
         downloaded whole and checked on this machine: nothing about your traffic is sent
         out. Bundled data changes only with a release. A key, and which sources are on, are
         set in the desktop app: Settings → Threat data.</p>
+      <div class="chips" id="source-summary"></div>
     </div>
     <div class="panel flush"><div class="table-wrap"><table id="source-table"></table></div></div>
   </section>

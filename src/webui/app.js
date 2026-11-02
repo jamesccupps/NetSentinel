@@ -86,55 +86,246 @@ function download(name, text, type) {
 
 // ─── Charts ──────────────────────────────────────────────────────────────
 
-class LineChart {
-  constructor(canvas, colour) {
+function fmtRate(v) {
+  v = Number(v || 0);
+  if (v >= 1e6) return `${(v / 1e6).toFixed(1)}M`;
+  if (v >= 1e4) return `${Math.round(v / 1e3)}k`;
+  if (v >= 1e3) return `${(v / 1e3).toFixed(1)}k`;
+  return v >= 10 ? String(Math.round(v)) : v.toFixed(1).replace(/\.0$/, '');
+}
+const fmtPps = (v) => `${fmtRate(v)} pkt/s`;
+const fmtBps = (v) => `${fmtBytes(v)}/s`;
+const fmtClock = (t, seconds) => new Date(t * 1000).toLocaleTimeString([],
+  seconds ? { hour: '2-digit', minute: '2-digit', second: '2-digit' } : { hour: '2-digit', minute: '2-digit' });
+
+// An axis step of 1, 2 or 5 times a power of ten, for about `ticks` lines.
+function niceStep(max, ticks) {
+  const raw = Math.max(max, 1e-9) / ticks;
+  const power = 10 ** Math.floor(Math.log10(raw));
+  const unit = raw / power;
+  return (unit <= 1 ? 1 : unit <= 2 ? 2 : unit <= 5 ? 5 : 10) * power;
+}
+const TIME_STEPS = [60, 120, 300, 600, 900, 1800, 3600, 7200, 10800, 21600];
+
+// A time series on a time axis: the average per bucket as a filled line, the
+// peak as a faint line above it, and a readout under the pointer. The line
+// breaks where samples are missing (monitoring stopped) rather than diving to 0.
+class TimeChart {
+  constructor(canvas, { colour, format, axis, base }) {
     this.canvas = canvas;
     this.colour = colour;
-    this.points = [];
-    this.max = 150;
+    this.format = format;       // full value for the readout
+    this.axis = axis;           // short value for the axis
+    this.base = base;           // 1024 for bytes: steps of 256 KB, not 244.1
+    this.points = [];           // {t, v, peak}
+    this.from = 0; this.to = 0; this.bucket = 5;
+    this.hover = null;
+    this.tip = h('div', { class: 'chart-tip', hidden: true });
+    canvas.after(this.tip);
+    const move = (e) => this.pointAt(e);
+    canvas.addEventListener('pointermove', move);
+    canvas.addEventListener('pointerdown', move);
+    canvas.addEventListener('pointerleave', () => { this.hover = null; this.tip.hidden = true; this.draw(); });
   }
-  push(v) {
-    this.points.push(Number(v) || 0);
-    if (this.points.length > this.max) this.points.shift();
+
+  set(points, from, to, bucket) {
+    Object.assign(this, { points, from, to, bucket });
+    if (this.hover != null && this.hover >= points.length) this.hover = null;
     this.draw();
+    if (this.hover != null) this.showTip();
   }
+
+  frame() {
+    const w = this.canvas.clientWidth, ht = this.canvas.clientHeight;
+    return { w, ht, left: 56, right: w - 10, top: 10, bottom: ht - 24 };
+  }
+
+  x(t, f) { return f.left + (f.right - f.left) * (t - this.from) / Math.max(1, this.to - this.from); }
+
   draw() {
     const c = this.canvas, dpr = window.devicePixelRatio || 1;
-    const w = c.clientWidth, ht = c.clientHeight;
-    if (!w || !ht) return;
-    if (c.width !== Math.round(w * dpr)) { c.width = Math.round(w * dpr); c.height = Math.round(ht * dpr); }
+    const f = this.frame();
+    if (!f.w || !f.ht) return;
+    if (c.width !== Math.round(f.w * dpr) || c.height !== Math.round(f.ht * dpr)) {
+      c.width = Math.round(f.w * dpr); c.height = Math.round(f.ht * dpr);
+    }
     const g = c.getContext('2d');
     g.setTransform(dpr, 0, 0, dpr, 0, 0);
-    g.clearRect(0, 0, w, ht);
-    const top = Math.max(1, ...this.points) * 1.15;
-    const pad = 4, x = (i) => (w - 50) * i / (this.max - 1), y = (v) => ht - pad - (ht - 2 * pad) * v / top;
-    g.strokeStyle = '#30363d'; g.lineWidth = 1; g.setLineDash([3, 4]);
-    for (let i = 1; i <= 3; i++) { const yy = Math.round(ht * i / 4) + .5; g.beginPath(); g.moveTo(0, yy); g.lineTo(w, yy); g.stroke(); }
-    g.setLineDash([]);
-    if (this.points.length < 2) return;
-    const off = this.max - this.points.length;
-    g.beginPath();
-    this.points.forEach((v, i) => (i ? g.lineTo : g.moveTo).call(g, x(i + off), y(v)));
-    g.strokeStyle = this.colour; g.lineWidth = 2; g.stroke();
-    g.lineTo(x(this.max - 1), ht); g.lineTo(x(off), ht); g.closePath();
-    const grad = g.createLinearGradient(0, 0, 0, ht);
-    grad.addColorStop(0, this.colour + '55'); grad.addColorStop(1, this.colour + '00');
-    g.fillStyle = grad; g.fill();
-    const last = this.points[this.points.length - 1];
-    g.fillStyle = this.colour; g.font = '600 13px Segoe UI, system-ui, sans-serif'; g.textAlign = 'right';
-    g.fillText(last >= 100 ? Math.round(last).toLocaleString() : last.toFixed(1), w - 4, Math.max(16, y(last) - 6));
+    g.clearRect(0, 0, f.w, f.ht);
+    g.font = '11px "Segoe UI", system-ui, sans-serif';
+
+    const peakMax = Math.max(0, ...this.points.map((p) => p.peak));
+    const scale = this.base && peakMax >= this.base
+      ? this.base ** Math.floor(Math.log(peakMax) / Math.log(this.base)) : 1;
+    const step = niceStep((peakMax || 1) / scale, 4) * scale;
+    const top = Math.max(step, Math.ceil(peakMax * 1.08 / step) * step);
+    const y = (v) => f.bottom - (f.bottom - f.top) * v / top;
+
+    // Value axis: lines and labels.
+    g.textAlign = 'right'; g.textBaseline = 'middle';
+    for (let v = 0; v <= top + step / 2; v += step) {
+      const yy = Math.round(y(v)) + .5;
+      g.strokeStyle = v === 0 ? '#3d444d' : '#262c35'; g.lineWidth = 1;
+      g.beginPath(); g.moveTo(f.left, yy); g.lineTo(f.right, yy); g.stroke();
+      g.fillStyle = '#7d8590'; g.fillText(this.axis(v), f.left - 8, yy);
+    }
+
+    // Time axis: the smallest round step that leaves room for each label.
+    const span = Math.max(1, this.to - this.from);
+    const room = Math.max(2, Math.floor((f.right - f.left) / 78));
+    const tstep = TIME_STEPS.find((s) => span / s <= room) || 21600;
+    const offset = new Date().getTimezoneOffset() * 60;   // label on local round times
+    g.textAlign = 'center'; g.textBaseline = 'top';
+    for (let t = Math.ceil((this.from - offset) / tstep) * tstep + offset; t <= this.to; t += tstep) {
+      const xx = Math.round(this.x(t, f)) + .5;
+      if (xx < f.left + 16 || xx > f.right - 16) continue;
+      g.strokeStyle = '#1e242c';
+      g.beginPath(); g.moveTo(xx, f.top); g.lineTo(xx, f.bottom); g.stroke();
+      g.fillStyle = '#7d8590'; g.fillText(fmtClock(t), xx, f.bottom + 7);
+    }
+
+    if (!this.points.length) {
+      g.fillStyle = '#7d8590'; g.textAlign = 'center'; g.textBaseline = 'middle';
+      g.font = '13px "Segoe UI", system-ui, sans-serif';
+      g.fillText('No traffic recorded in this range yet', (f.left + f.right) / 2, (f.top + f.bottom) / 2);
+      return;
+    }
+
+    // Runs of points with no gap longer than a few buckets between them.
+    const runs = [];
+    let run = [];
+    for (const p of this.points) {
+      if (run.length && p.t - run[run.length - 1].t > Math.max(3 * this.bucket, 20)) { runs.push(run); run = []; }
+      run.push(p);
+    }
+    runs.push(run);
+
+    const path = (pts, key) => {
+      g.beginPath();
+      pts.forEach((p, i) => (i ? g.lineTo : g.moveTo).call(g, this.x(p.t, f), y(p[key])));
+    };
+    const grad = g.createLinearGradient(0, f.top, 0, f.bottom);
+    grad.addColorStop(0, this.colour + '50'); grad.addColorStop(1, this.colour + '05');
+    for (const pts of runs) {
+      if (this.bucket > 5) {
+        path(pts, 'peak');
+        g.strokeStyle = this.colour + '66'; g.lineWidth = 1; g.stroke();
+      }
+      path(pts, 'v');
+      if (pts.length > 1) {
+        g.lineTo(this.x(pts[pts.length - 1].t, f), f.bottom);
+        g.lineTo(this.x(pts[0].t, f), f.bottom);
+        g.closePath(); g.fillStyle = grad; g.fill();
+        path(pts, 'v');
+      }
+      g.strokeStyle = this.colour; g.lineWidth = 1.75; g.lineJoin = 'round'; g.stroke();
+      if (pts.length === 1) {
+        g.fillStyle = this.colour;
+        g.beginPath(); g.arc(this.x(pts[0].t, f), y(pts[0].v), 2.5, 0, 2 * Math.PI); g.fill();
+      }
+    }
+
+    if (this.hover != null && this.points[this.hover]) {
+      const p = this.points[this.hover], xx = Math.round(this.x(p.t, f)) + .5;
+      g.strokeStyle = '#8b949e'; g.setLineDash([3, 3]);
+      g.beginPath(); g.moveTo(xx, f.top); g.lineTo(xx, f.bottom); g.stroke();
+      g.setLineDash([]);
+      g.fillStyle = '#0d1117'; g.strokeStyle = this.colour; g.lineWidth = 2;
+      g.beginPath(); g.arc(xx, y(p.v), 4, 0, 2 * Math.PI); g.fill(); g.stroke();
+    }
+  }
+
+  pointAt(e) {
+    if (!this.points.length) return;
+    const rect = this.canvas.getBoundingClientRect(), f = this.frame();
+    const px = e.clientX - rect.left;
+    const t = this.from + (px - f.left) / Math.max(1, f.right - f.left) * (this.to - this.from);
+    let lo = 0, hi = this.points.length - 1;
+    while (lo < hi) { const mid = (lo + hi) >> 1; if (this.points[mid].t < t) lo = mid + 1; else hi = mid; }
+    if (lo > 0 && Math.abs(this.points[lo - 1].t - t) < Math.abs(this.points[lo].t - t)) lo--;
+    this.hover = lo;
+    this.draw();
+    this.showTip();
+  }
+
+  showTip() {
+    const p = this.points[this.hover];
+    if (!p) { this.tip.hidden = true; return; }
+    const f = this.frame();
+    const when = this.bucket > 5
+      ? `${fmtClock(p.t - this.bucket + 5, true)} – ${fmtClock(p.t, true)}` : fmtClock(p.t, true);
+    // replaceChildren writes a null as the text "null"; h() skips it.
+    this.tip.replaceChildren(...[
+      h('div', { class: 'when' }, when),
+      h('div', { class: 'val' }, h('span', { class: 'swatch', style: { background: this.colour } }),
+        this.bucket > 5 ? 'average ' : '', h('b', null, this.format(p.v))),
+      this.bucket > 5 ? h('div', { class: 'peak' }, `peak ${this.format(p.peak)}`) : null,
+    ].filter(Boolean));
+    this.tip.hidden = false;
+    const x = this.x(p.t, f);
+    const width = this.tip.offsetWidth;
+    this.tip.style.left = `${Math.min(Math.max(x - width / 2, 0), f.w - width)}px`;
   }
 }
 
 const charts = {};
+const RANGES = [[15, '15 min'], [60, '1 hour'], [360, '6 hours'], [1440, '24 hours']];
+const chartView = { minutes: 60, fetched: 0 };
+try {
+  const saved = Number(localStorage.getItem('ns-range'));
+  if (RANGES.some(([m]) => m === saved)) chartView.minutes = saved;
+} catch (e) { /* storage blocked: the default range */ }
+
+function renderRanges() {
+  $('ranges').replaceChildren(...RANGES.map(([m, label]) => h('button', {
+    type: 'button', class: `chip${chartView.minutes === m ? ' on' : ''}`,
+    onclick: () => {
+      chartView.minutes = m;
+      try { localStorage.setItem('ns-range', String(m)); } catch (e) { /* private mode */ }
+      renderRanges();
+      refreshHistory(true);
+    },
+  }, label)));
+}
+
+function summary(points, format) {
+  if (!points.length) return '';
+  const avg = points.reduce((s, p) => s + p.v, 0) / points.length;
+  const peak = Math.max(...points.map((p) => p.peak));
+  return `now ${format(points[points.length - 1].v)}  ·  average ${format(avg)}  ·  peak ${format(peak)}`;
+}
+
+async function refreshHistory(force) {
+  // Every few seconds is plenty: the server samples every 5.
+  if (!force && Date.now() - chartView.fetched < 4500) return;
+  chartView.fetched = Date.now();
+  const d = await api(`/api/history?minutes=${chartView.minutes}`);
+  const i = Object.fromEntries((d.fields || []).map((k, n) => [k, n]));
+  const series = (avg, peak) => (d.points || []).map((p) => ({ t: p[i.t], v: p[i[avg]], peak: p[i[peak]] }));
+  const pps = series('pps', 'pps_peak'), bps = series('bps', 'bps_peak');
+  charts.pps.set(pps, d.from, d.to, d.bucket_sec);
+  charts.bw.set(bps, d.from, d.to, d.bucket_sec);
+  $('pps-summary').textContent = summary(pps, fmtPps);
+  $('bw-summary').textContent = summary(bps, fmtBps);
+}
 
 // ─── Shared pieces ───────────────────────────────────────────────────────
 
-function card(key, value, sub, colour) {
-  return h('div', { class: 'card' },
+function card(key, value, sub, colour, link) {
+  return h(link ? 'a' : 'div', { class: `card${link ? ' link' : ''}`, href: link || null },
     h('div', { class: 'k' }, key),
     h('div', { class: 'v', style: colour ? { color: colour } : null }, value),
     sub ? h('div', { class: 's' }, sub) : null);
+}
+
+// "5 min ago", for a timestamp in seconds.
+function ago(ts) {
+  const s = Math.max(0, Date.now() / 1000 - Number(ts || 0));
+  if (!ts) return '';
+  if (s < 60) return 'just now';
+  if (s < 3600) return `${Math.floor(s / 60)} min ago`;
+  if (s < 86400) return `${Math.floor(s / 3600)} h ago`;
+  return `${Math.floor(s / 86400)} d ago`;
 }
 
 function bars(container, rows, format) {
@@ -179,15 +370,39 @@ function verdictButtons(a) {
   ];
 }
 
+// "dst_ip" → "Dst IP", "cves" → "CVEs": evidence keys as labels.
+const ACRONYMS = { ip: 'IP', ips: 'IPs', cve: 'CVE', cves: 'CVEs', sni: 'SNI', ja3: 'JA3', ja4: 'JA4',
+  tls: 'TLS', dns: 'DNS', http: 'HTTP', url: 'URL', mac: 'MAC', ttl: 'TTL', ml: 'ML', id: 'ID', pid: 'PID' };
+function label(key) {
+  const words = String(key).split('_').map((w) => ACRONYMS[w.toLowerCase()] || w);
+  const first = words[0] || '';
+  words[0] = first === first.toLowerCase() ? first.charAt(0).toUpperCase() + first.slice(1) : first;
+  return words.join(' ');
+}
+
+// Evidence as labelled fields, the advice first; nested values as indented JSON.
+const EVIDENCE_FIRST = ['recommendation', 'how_to_fix', 'how_this_is_exploited', 'is_this_malicious'];
+function evidenceView(ev) {
+  const keys = Object.keys(ev || {});
+  const order = [...EVIDENCE_FIRST.filter((k) => k in ev), ...keys.filter((k) => !EVIDENCE_FIRST.includes(k))];
+  return h('dl', { class: 'evidence' }, order.flatMap((k) => {
+    const v = ev[k];
+    if (v == null || v === '' || (Array.isArray(v) && !v.length)) return [];
+    const text = typeof v === 'object' ? JSON.stringify(v, null, 2) : String(v);
+    return [h('dt', null, label(k)),
+      h('dd', { class: typeof v === 'object' ? 'json' : null }, text)];
+  }));
+}
+
 function alertItem(a) {
   const key = a.id || `${a.timestamp}|${a.rule_id}|${a.title}`;
-  const evidence = h('pre', { hidden: !expanded.has(key) }, JSON.stringify(a.evidence || {}, null, 2));
+  const evidence = h('div', { class: 'evidence-wrap', hidden: !expanded.has(key) }, evidenceView(a.evidence));
   const where = [a.src_ip, a.dst_ip ? `→ ${a.dst_ip}${a.dst_port ? ':' + a.dst_port : ''}` : null]
     .filter(Boolean).join(' ');
   return h('div', {
     class: `alert sev-${a.severity}${a.acknowledged ? ' acked' : ''}`,
     onclick: (e) => {
-      if (e.target === evidence) return;
+      if (evidence.contains(e.target) || window.getSelection().toString()) return;
       evidence.hidden = !evidence.hidden;
       if (evidence.hidden) expanded.delete(key); else expanded.add(key);
     },
@@ -195,9 +410,8 @@ function alertItem(a) {
   h('div', { class: 'head' },
     h('span', { class: `badge ${a.severity}` }, a.severity),
     h('span', { class: 'title' }, a.title),
-    h('span', { class: 'time' }, a.time_str || ''),
-    verdictButtons(a),
-    ackButton(a)),
+    h('span', { class: 'time', title: a.time_str || '' }, ago(a.timestamp) || a.time_str || ''),
+    h('span', { class: 'actions' }, verdictButtons(a), ackButton(a))),
   a.description ? h('div', { class: 'desc' }, a.description) : null,
   h('div', { class: 'meta' }, [where, a.rule_id, a.category].filter(Boolean).join('  ·  ')),
   evidence);
@@ -228,19 +442,18 @@ async function refreshOverview() {
   renderControls(o);
 
   const sev = o.alerts.by_severity || {};
+  const open = o.alerts.unacknowledged;
+  document.title = open ? `(${open}) NetSentinel` : 'NetSentinel';
   $('cards').replaceChildren(
-    card('Packets captured', fmtNum(o.capture.packets_captured), `${fmtNum(Math.round(o.capture.packets_per_sec))} per second`),
-    card('Bandwidth', `${fmtBytes(o.capture.bytes_per_sec)}/s`, `${fmtBytes(o.capture.bytes_captured)} total`),
-    card('Active flows', fmtNum(o.capture.flows_active), `${fmtNum(o.capture.packets_dropped)} packets dropped`),
-    card('Alerts', fmtNum(o.alerts.total), `${sev.CRITICAL || 0} critical · ${sev.HIGH || 0} high · ${o.alerts.unacknowledged} open`,
-      (sev.CRITICAL || sev.HIGH) ? COLOURS.red : null),
+    card('Traffic', fmtPps(o.capture.packets_per_sec), `${fmtNum(o.capture.packets_captured)} packets since start`),
+    card('Bandwidth', fmtBps(o.capture.bytes_per_sec), `${fmtBytes(o.capture.bytes_captured)} since start`),
+    card('Open alerts', fmtNum(open), `${sev.CRITICAL || 0} critical · ${sev.HIGH || 0} high · ${fmtNum(o.alerts.total)} in all`,
+      (sev.CRITICAL || sev.HIGH) && open ? COLOURS.red : open ? COLOURS.yellow : null, '#alerts'),
     card('Threat level', o.threat.label, `anomaly score ${o.threat.score.toFixed(2)}`, COLOURS[o.threat.colour]),
-    card('Devices', fmtNum(o.devices.total), `${fmtNum(o.devices.active_last_hour)} active in the last hour`));
+    card('Active flows', fmtNum(o.capture.flows_active), `${fmtNum(o.incidents_active)} open incidents`, null, '#incidents'),
+    card('Devices', fmtNum(o.devices.total), `${fmtNum(o.devices.active_last_hour)} active in the last hour`, null, '#devices'));
 
-  if (o.monitoring) {
-    charts.pps.push(o.capture.packets_per_sec);
-    charts.bw.push(o.capture.bytes_per_sec / 1024);
-  }
+  refreshHistory().catch(() => {});
   bars($('protocols'), o.protocols.map((p) => ({ name: p.name, value: p.count, fraction: p.fraction })),
     (r) => `${(r.fraction * 100).toFixed(1)}%`);
   bars($('talkers'), o.top_talkers.map((t) => ({
@@ -250,29 +463,33 @@ async function refreshOverview() {
   $('geoip-credit').textContent = o.geoip_attribution || '';
   const res = o.resources || {};
   const rate = Number(o.capture.sample_rate || 1);
+  const cap = o.capture;
   const facts = [
-    ['Version', o.update ? `${o.version}; ${o.update.version} is out (Update, in the desktop app)`
-      : o.version],
-    ['Monitoring', o.monitoring ? 'Yes' : 'No'],
+    'NetSentinel',
+    ['Version', o.update ? `${o.version} · ${o.update.version} is out` : o.version,
+      o.update ? 'Install it from the Update button in the desktop app.' : null],
+    ['Monitoring', o.monitoring ? `Yes, for ${fmtDuration(o.uptime_sec)}` : 'No'],
     ['Review mode', o.review && o.review.enabled ? 'Recording' : 'Off'],
-    ['Suppressed by your verdicts', fmtNum(o.suppressed_alerts)],
-    ['Uptime', o.monitoring ? fmtDuration(o.uptime_sec) : '—'],
-    ['Alerts per minute', fmtNum(o.alerts.per_minute)],
-    ['Open incidents', fmtNum(o.incidents_active)],
-    ['ML model', o.ml.is_trained ? 'Trained' : 'Learning the baseline'],
-    ['Baseline samples', fmtNum(o.ml.baseline_samples)],
+    ['ML model', o.ml.is_trained ? 'Trained' : 'Learning',
+      `${fmtNum(o.ml.baseline_samples)} baseline samples`],
+    ['Alerts a minute', fmtNum(o.alerts.per_minute)],
+    ['Silenced by verdicts', fmtNum(o.suppressed_alerts),
+      'Alerts not raised again because you marked them false positives.'],
+    'Analysis',
+    ['Analysing', rate > 1 ? `1 in ${rate} packets (busy)` : 'Every packet'],
+    ['Bulk not inspected', fmtNum(cap.packets_shed),
+      `Past ${fmtNum(cap.max_pps)} packets a second, the middle of a download is counted to its flow but not read.`],
+    ['Dropped', fmtNum(cap.packets_dropped),
+      `${fmtNum(cap.packets_dropped_cap)} past twice the cap, ${fmtNum(cap.packets_dropped_queue)} with the queue full.`],
+    ['Skipped by sampling', fmtNum(cap.packets_sampled_out)],
+    'This process',
     ['CPU', res.available ? `${res.cpu_percent}%${res.low_priority ? ' (low priority)' : ''}` : '—'],
     ['Memory', res.available ? fmtBytes(res.rss_bytes) : '—'],
     ['Threads', res.available ? fmtNum(res.threads) : '—'],
-    ['Packets dropped', o.capture.packets_dropped
-      ? `${fmtNum(o.capture.packets_dropped)} (${fmtNum(o.capture.packets_dropped_cap)} over twice the cap, `
-        + `${fmtNum(o.capture.packets_dropped_queue)} queue full)` : '0'],
-    ['Bulk data not inspected', o.capture.packets_shed
-      ? `${fmtNum(o.capture.packets_shed)} (over ${fmtNum(o.capture.max_pps)} a second; counted, not read)` : '0'],
-    ['Analysing', rate > 1 ? `1 in ${rate} packets (busy)` : 'Every packet'],
-    ['Skipped by sampling', fmtNum(o.capture.packets_sampled_out)],
   ];
-  $('engine').replaceChildren(...facts.flatMap(([k, v]) => [h('dt', null, k), h('dd', null, v)]));
+  $('engine').replaceChildren(...facts.flatMap((f) => typeof f === 'string'
+    ? [h('div', { class: 'group' }, f)]
+    : [h('dt', null, f[0]), h('dd', { title: f[2] || null }, f[1])]));
 }
 
 async function refreshRecentAlerts() {
@@ -313,7 +530,7 @@ function renderAlerts() {
 
 // ─── Devices ─────────────────────────────────────────────────────────────
 
-const deviceView = { type: 'ALL', search: '', data: null };
+const deviceView = { type: 'ALL', search: '', data: null, sort: { key: 'packets', dir: -1 } };
 
 async function refreshDevices() {
   deviceView.data = await api('/api/devices');
@@ -331,18 +548,49 @@ function renderDevices() {
       onclick: () => { deviceView.type = t; renderDevices(); },
     }, t, h('span', { class: 'n' }, n))));
   const q = deviceView.search.toLowerCase();
-  const rows = (d.devices || []).filter((x) =>
+  const { key, dir } = deviceView.sort;
+  const column = DEVICE_COLUMNS.find((c) => c.key === key);
+  const shown = (d.devices || []).filter((x) =>
     (deviceView.type === 'ALL' || x.type === deviceView.type) &&
-    (!q || [x.ip, x.hostname, x.mac].some((f) => String(f || '').toLowerCase().includes(q))))
-    .map((x) => h('tr', null,
-      h('td', { class: 'mono' }, x.ip), h('td', null, x.hostname), h('td', { class: 'mono' }, x.mac || '—'),
-      h('td', null, x.type), h('td', null, x.confidence), h('td', null, fmtNum(x.packets)),
-      h('td', { class: 'mono' }, x.last_seen), h('td', { class: 'wrap' }, (x.services || []).join(', '))));
+    (!q || [x.ip, x.hostname, x.mac].some((f) => String(f || '').toLowerCase().includes(q))));
+  if (column) {
+    shown.sort((a, b) => {
+      const va = column.sort(a), vb = column.sort(b);
+      return (va < vb ? -1 : va > vb ? 1 : 0) * dir;
+    });
+  }
+  const rows = shown.map((x) => h('tr', null,
+    h('td', { class: 'mono' }, x.ip), h('td', null, x.hostname || '—'), h('td', { class: 'mono' }, x.mac || '—'),
+    h('td', null, x.type), h('td', { class: 'num' }, x.confidence), h('td', { class: 'num' }, fmtNum(x.packets)),
+    h('td', { class: 'mono' }, x.last_seen), h('td', { class: 'wrap' }, (x.services || []).join(', '))));
+  const heads = DEVICE_COLUMNS.map((c) => h('th', {
+    class: `${c.sort ? 'sortable' : ''}${c.key === key ? ' sorted' : ''}${c.num ? ' num' : ''}`,
+    'aria-sort': c.key === key ? (dir > 0 ? 'ascending' : 'descending') : null,
+    onclick: c.sort ? () => {
+      deviceView.sort = { key: c.key, dir: c.key === key ? -dir : (c.num ? -1 : 1) };
+      renderDevices();
+    } : null,
+  }, c.label, c.key === key ? h('span', { class: 'arrow' }, dir > 0 ? ' ▲' : ' ▼') : null));
   $('device-table').replaceWith(Object.assign(
-    table(['IP', 'Hostname', 'MAC', 'Type', 'Confidence', 'Packets', 'Last seen', 'Services'],
-      rows.length ? rows : [h('tr', null, h('td', { colspan: 8, class: 'empty' }, 'No devices yet. They appear as monitoring sees them.'))]),
+    h('table', null, h('thead', null, h('tr', null, heads)), h('tbody', null,
+      rows.length ? rows : [h('tr', null, h('td', { colspan: 8, class: 'empty' },
+        'No devices yet. They appear as monitoring sees them.'))])),
     { id: 'device-table' }));
 }
+
+// Sorting keys: addresses by number, so 192.168.1.10 comes after .9.
+const ipKey = (ip) => String(ip || '').includes(':') ? `z${ip}`
+  : String(ip || '').split('.').map((n) => n.padStart(3, '0')).join('.');
+const DEVICE_COLUMNS = [
+  { key: 'ip', label: 'IP', sort: (x) => ipKey(x.ip) },
+  { key: 'hostname', label: 'Hostname', sort: (x) => String(x.hostname || '~').toLowerCase() },
+  { key: 'mac', label: 'MAC', sort: (x) => String(x.mac || '~') },
+  { key: 'type', label: 'Type', sort: (x) => String(x.type || '') },
+  { key: 'confidence', label: 'Confidence', num: true, sort: (x) => parseFloat(x.confidence) || 0 },
+  { key: 'packets', label: 'Packets', num: true, sort: (x) => Number(x.packets) || 0 },
+  { key: 'last_seen', label: 'Last seen', sort: (x) => String(x.last_seen || '') },
+  { key: 'services', label: 'Services' },
+];
 
 // ─── Incidents ───────────────────────────────────────────────────────────
 
@@ -382,11 +630,15 @@ async function refreshSources() {
     h('td', null, s.description || s.name),
     h('td', null, h('span', { class: `badge ${SOURCE_COLOURS[s.state] || 'private'}` },
       SOURCE_STATES[s.state] || s.state)),
-    h('td', { class: 'mono' }, fmtUpdated(s.updated)),
-    h('td', null, s.entries ? fmtNum(s.entries) : ''),
+    h('td', { class: 'mono nowrap' }, fmtUpdated(s.updated)),
+    h('td', { class: 'num' }, s.entries ? fmtNum(s.entries) : ''),
     h('td', { class: 'wrap' }, s.note || '')));
   $('source-table').replaceWith(Object.assign(
     table(['Source', 'State', 'Updated', 'Entries', 'Note'], rows), { id: 'source-table' }));
+  const counts = {};
+  for (const s of data.sources) counts[s.state] = (counts[s.state] || 0) + 1;
+  $('source-summary').replaceChildren(...Object.keys(SOURCE_STATES).filter((k) => counts[k])
+    .map((k) => h('span', { class: 'chip static' }, SOURCE_STATES[k], h('span', { class: 'n' }, counts[k]))));
 }
 
 // ─── Scan files ──────────────────────────────────────────────────────────
@@ -910,8 +1162,9 @@ function show() {
 }
 
 document.addEventListener('DOMContentLoaded', () => {
-  charts.pps = new LineChart($('chart-pps'), '#58a6ff');
-  charts.bw = new LineChart($('chart-bw'), '#39d2c0');
+  charts.pps = new TimeChart($('chart-pps'), { colour: '#58a6ff', format: fmtPps, axis: fmtRate });
+  charts.bw = new TimeChart($('chart-bw'), { colour: '#39d2c0', format: fmtBps, axis: fmtBytes, base: 1024 });
+  renderRanges();
   window.addEventListener('resize', () => { charts.pps.draw(); charts.bw.draw(); });
   $('alert-search').addEventListener('input', (e) => { alertView.search = e.target.value; renderAlerts(); });
   $('device-search').addEventListener('input', (e) => { deviceView.search = e.target.value; renderDevices(); });
