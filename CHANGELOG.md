@@ -1,9 +1,11 @@
 # NetSentinel Changelog
 
-## Unreleased
+## v1.10.1 — A fourth day of real alerts
 
-A fourth day of real alerts: 13 in 18.6 hours of 1.10.0. The CRITICAL and the
-HIGH were false, and a real token in plain HTTP raised nothing.
+**2195 unit tests** plus 14 integration checks. The first release 1.10.0 can
+install itself, from the Update button. A day of 1.10.0 raised 13 alerts: the
+CRITICAL and the HIGH were false, and a real token in plain HTTP raised
+nothing. Each fix has a test that fails on 1.10.0.
 
 - **Credentials in plain HTTP on any port.** They were looked for only on a
   list of HTTP ports. Home Assistant's API on 8123 took a long-lived Bearer
