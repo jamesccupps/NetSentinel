@@ -71,8 +71,8 @@ DEFAULT_CONFIG = {
         "pcap_buffer_packets": 150000,  # Ring buffer size for PCAP export (~225 MB at 1500B avg)
         "pcap_max_file_mb": 100,        # Max PCAP recording file size before rotation
         "pcap_max_files": 20,           # Recordings kept on disk before the oldest are pruned
-        "pcap_max_alert_files": 50,     # Per-alert captures kept before the oldest are pruned
-        "pcap_on_alert": True,          # Save the traffic behind serious alerts
+        "alert_min_free_mb": 1024,      # Alert captures are kept for good; below this free, new ones are skipped
+        "pcap_on_alert": True,         # Save the traffic behind serious alerts
         "pcap_on_alert_severity": "CRITICAL",  # Minimum severity that triggers a save
         "pcap_on_alert_seconds": 60,    # Seconds of buffered traffic to save
         "pcap_link_type": 1,            # libpcap DLT: 1=Ethernet, 101=raw IP, 0=loopback
@@ -190,8 +190,7 @@ DEFAULT_CONFIG = {
         # on for one run. See src/review.py.
         "enabled": False,
         "directory": "",                # Default: ~/.netsentinel/review
-        "snippet_seconds": 60,          # Traffic saved before each alert
-        "snippet_budget_mb": 500,       # Alert captures kept; referenced ones last
+        "snippet_seconds": 60,          # Traffic saved before each alert, kept for good
         "capture_budget_mb": 2048,      # Rolling full capture
         "capture_max_hours": 24,
         "pseudonymise_lan": False,      # Bundles replace LAN addresses with labels

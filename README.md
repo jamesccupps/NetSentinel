@@ -34,7 +34,7 @@ TLS stack stands out even when everything it sends is encrypted.
 
 **Baseline Whitelist** — During the initial learning period *only*, records every domain, IP, port, and periodic pattern as "normal for this network." Once that window closes, learning stops — so nothing an attacker does later can whitelist itself. No hardcoded whitelists.
 
-**PCAP Export** — Ring buffer of raw packets with on-demand "save last 5 minutes" export and continuous recording with auto-rotation. Serious alerts automatically save the traffic that triggered them, narrowed to the hosts involved, so every CRITICAL finding opens in Wireshark.
+**PCAP Export** — Ring buffer of raw packets with on-demand "save last 5 minutes" export and continuous recording with auto-rotation. Serious alerts automatically save the traffic that triggered them, narrowed to the hosts involved, so every CRITICAL finding opens in Wireshark. Those captures are kept for good, in their own folder.
 
 **Browser dashboard** — NetSentinel serves a dashboard at `http://127.0.0.1:8737/` while it runs: live traffic and bandwidth charts, protocol and top-talker breakdowns, alerts with severity filters and evidence, devices, incidents, file scanning, the network audit, and what NetSentinel itself costs in CPU and memory. On this computer it can also start and stop monitoring, acknowledge alerts and record verdicts; those controls need the token the page carries and are refused unless the dashboard is bound to localhost. **Open in Browser** in the desktop app opens it; `--headless` runs the same dashboard with no window, as a server.
 
@@ -193,6 +193,7 @@ Configuration lives in `~/.netsentinel/config.json` (created on first run with d
 | `capture` | `pcap_on_alert` | true | Save the traffic behind serious alerts |
 | `capture` | `pcap_on_alert_severity` | CRITICAL | Minimum severity that triggers a save |
 | `capture` | `pcap_on_alert_seconds` | 60 | Seconds of buffered traffic to save |
+| `capture` | `alert_min_free_mb` | 1024 | Alert captures are never deleted; below this much free disk, new ones are skipped |
 
 Every key in `config.json` is read by the code. If you set something, it takes effect.
 
@@ -223,7 +224,10 @@ All runtime data is stored locally in `~/.netsentinel/`:
 | `data/incidents.json` | Correlated incident history |
 | `data/feature_history/` | Daily CSV feature vectors for ML training |
 | `models/` | Trained Isolation Forest + scaler (pickle) |
-| `captures/` | Exported PCAP files |
+| `captures/` | Exported PCAP files and recordings |
+| `captures/alerts/` | The traffic behind each alert, kept for good |
+| `review/snippets/` | The same, in review mode, kept for good |
+| `review/capture/` | Review mode's rolling full capture (24 hours, 2 GB) |
 | `logs/` | Application logs |
 
 ## Credential storage

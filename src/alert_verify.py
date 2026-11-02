@@ -1023,6 +1023,13 @@ class AlertVerifier:
             return {'verdict': AlertVerdict.LIKELY_FALSE_POSITIVE, 'confidence': 0.8,
                     'reasoning': [f"{protocol}: a hashed login an updater sends by design"],
                     'summary': 'Update service login, hashed, by design'}
+        # A vendor's own upload key (forensics.VENDOR_TOKEN_SERVICES): nothing of
+        # the owner's is exposed, and confirming it made AMD's telemetry CRITICAL.
+        if '(Vendor Telemetry)' in protocol:
+            return {'verdict': AlertVerdict.LIKELY_FALSE_POSITIVE, 'confidence': 0.8,
+                    'reasoning': [f"{protocol}: the vendor's own key, sent by design, "
+                                  "not a login of yours"],
+                    'summary': 'Vendor telemetry key, by design'}
         if 'digest' in cred_type.lower() or 'hash' in cred_type.lower():
             return {'verdict': AlertVerdict.LIKELY_THREAT, 'confidence': 0.7,
                     'reasoning': [f"Hashed {protocol} {cred_type} captured from network traffic",

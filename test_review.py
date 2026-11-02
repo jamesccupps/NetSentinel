@@ -309,18 +309,6 @@ class TestRecorder(unittest.TestCase):
         self.assertEqual(line['snippet'], 'alert_1.pcap')
         self.assertEqual(line['review_id'], review_id(alert))
 
-    def test_over_budget_the_snippets_alerts_still_point_at_are_kept(self):
-        self.recorder.snippet_budget = 2500
-        s1, s2, s3 = (self.recorder.snippet(an_alert()) for _ in range(3))
-        s4 = self.recorder.snippet(an_alert(), referenced=lambda: {s1})
-        self.assertTrue(os.path.exists(s1))
-        self.assertFalse(os.path.exists(s2))
-        self.assertTrue(os.path.exists(s3) and os.path.exists(s4))
-
-        blocked = an_alert()
-        self.assertIsNone(self.recorder.snippet(blocked, referenced=lambda: {s1, s3, s4}))
-        self.assertIn('budget', blocked.evidence['packet_capture_note'])
-
     def test_a_half_written_last_line_is_skipped(self):
         self.recorder.record(an_alert())
         with open(self.recorder.jsonl_path, 'a', encoding='utf-8') as f:

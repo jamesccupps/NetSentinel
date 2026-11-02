@@ -1,5 +1,51 @@
 # NetSentinel Changelog
 
+## Unreleased
+
+A fourth day of real alerts: 13 in 18.6 hours of 1.10.0. The CRITICAL and the
+HIGH were false, and a real token in plain HTTP raised nothing.
+
+- **Credentials in plain HTTP on any port.** They were looked for only on a
+  list of HTTP ports. Home Assistant's API on 8123 took a long-lived Bearer
+  token from a program on this PC in clear, with no alert. A request line on
+  any port is now read as HTTP.
+- **One credential alert a day**, per token, host and server. A program that
+  sends its token on every request was a CRITICAL every 30-second cooldown.
+- **AMD's telemetry key is LOW.** AMD Software's User Experience Program
+  uploads over plain HTTP with its own key in the `Authorization` header, and
+  it was "[CONFIRMED] Plaintext Credential, change this password immediately".
+  The key is AMD's: the alert now says there is nothing to change, and how to
+  turn the program off. The header is read to the end of its line; it used to
+  run on into the next header's name, which went to the vault with the key. An
+  empty `X-Api-Key` header no longer takes the next line as its key. Vendors
+  are matched on a dot boundary, where `preset.com` used to count as ESET.
+- **BACnet is known by its framing, and its services are read right.**
+  - An SSDP search whose random source port was 47808 was "BACnet" HIGH.
+    Anything on that port that isn't BACnet/IP (type 0x81, with its own
+    length) is now nothing.
+  - A confirmed request's invoke ID was read as its service. Any request
+    numbered 15, 16 or 20 was a CRITICAL "BACnet WRITE" or "RESET", and real
+    ones with other numbers were missed.
+  - A global Who-Is, the commonest discovery, was one byte short of what the
+    parser wanted, so it was never seen.
+  - Forwarded broadcasts, routed packets and segmented requests are walked
+    right, and network-layer messages are skipped.
+  - The confirmed service names for 6, 7, 10 and 11 were wrong.
+- **Alert captures are kept for good.** The traffic saved behind an alert was
+  pruned: outside review mode, all but the newest 50 were deleted, and review
+  mode cut its snippets to 500 MB, oldest first. So an alert from last week
+  could come up for review with its traffic gone. Now nothing deletes them. They
+  are small, a few hundred KB each.
+  - Outside review mode they go in `captures/alerts/`, apart from the recordings
+    that rotate. Review mode keeps them in `review/snippets/`, as before; only
+    its rolling full capture keeps to a budget.
+  - When the disk is nearly full, below `capture.alert_min_free_mb` (1 GB), a
+    new capture is skipped instead, and the alert says why.
+  - A repeat of an alert within its cooldown now points at the first one's
+    capture in both modes. It used to get nothing outside review mode.
+  - The Captures tab lists them too.
+  - `capture.pcap_max_alert_files` and `review.snippet_budget_mb` are gone.
+
 ## v1.10.0 — NetSentinel updates itself
 
 **2169 unit tests** plus 14 integration checks. Earlier versions have no

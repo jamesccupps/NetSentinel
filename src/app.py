@@ -208,6 +208,8 @@ class NetSentinelApp:
         self._forensics_alerted_sensitive = set()
         # (port, host name) -> when an insecure-service alert last named it
         self._insecure_names_alerted = {}
+        # (protocol, type, source, destination, port, masked value) -> last alert
+        self._credentials_alerted = {}
 
         # High-water marks into the forensics result lists. _check_forensics_alerts runs
         # once per packet; rescanning every finding each time was O(findings) per packet
@@ -276,10 +278,11 @@ class NetSentinelApp:
 
         now = time.time()
         # One capture per rule+source per cooldown, so an alert storm cannot fill
-        # the disk with near-identical files.
+        # the disk with near-identical files. The later alerts point at the same
+        # one, which is safe because alert captures are never deleted.
         key = f"{alert.rule_id}:{alert.src_ip}"
         if now - self._pcap_alert_cooldowns.get(key, 0) < self._pcap_alert_cooldown:
-            shared = self._pcap_alert_last.get(key) if review is not None else None
+            shared = self._pcap_alert_last.get(key)
             if shared:
                 alert.evidence['packet_capture'] = shared
             return
@@ -293,13 +296,12 @@ class NetSentinelApp:
 
         try:
             if review is not None:
-                path = review.snippet(alert, referenced=self._referenced_captures)
-                if path:
-                    self._pcap_alert_last[key] = path
+                path = review.snippet(alert)
             else:
                 path = self.pcap_writer.export_for_alert(
                     alert, seconds=self._pcap_on_alert_seconds)
             if path:
+                self._pcap_alert_last[key] = path
                 alert.evidence['packet_capture'] = path
                 alert.evidence['packet_capture_note'] = (
                     'Traffic around this alert was saved. Open it in Wireshark to '
@@ -398,10 +400,6 @@ class NetSentinelApp:
             self._alert_cooldowns = {
                 k: t for k, t in self._alert_cooldowns.items() if t >= cutoff}
         return True
-
-    def _referenced_captures(self):
-        return {a.evidence.get('packet_capture')
-                for a in self.alert_manager.get_alerts(limit=self.alert_manager.max_stored)}
 
     def _emit_alert(self, alert):
         """Deliver a finished alert to storage, the GUI and the correlator."""
@@ -597,6 +595,25 @@ class NetSentinelApp:
                 del seen[k]
         return covered
 
+    def _credential_alerted_today(self, cred, now=None):
+        """
+        Whether this credential, from this host to this server, was alerted on in
+        the last day. A program that sends one token on every request was one
+        CRITICAL per 30-second cooldown: once is the news. A different token, or
+        the same one somewhere else, is a new alert. Records it either way.
+        """
+        now = now or time.time()
+        key = tuple(str(cred.get(k, '')) for k in (
+            'protocol', 'credential_type', 'source_ip', 'destination_ip', 'port', 'value'))
+        seen = self._credentials_alerted
+        if now - seen.get(key, 0) < 86400:
+            return True
+        seen[key] = now
+        if len(seen) > 4096:
+            for k in sorted(seen, key=seen.get)[:2048]:
+                del seen[k]
+        return False
+
     def _check_forensics_alerts(self):
         """Generate alerts for new forensics findings (credentials, insecure services)."""
         from src.ids_engine import Alert
@@ -610,7 +627,8 @@ class NetSentinelApp:
         else:
             new_creds = ()
         for cred in new_creds:
-            self._alert_gateway(credential_alert(cred))
+            if not self._credential_alerted_today(cred):
+                self._alert_gateway(credential_alert(cred))
 
         # Check for new insecure services. Small and bounded by (ip, port) pairs on
         # the LAN, so a full pass is fine — but skip it entirely when nothing is new.

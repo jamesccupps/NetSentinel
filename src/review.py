@@ -8,7 +8,7 @@ written.
 
 While review mode is on (``--review DIR``, or the Settings toggle):
 - every alert gets a snippet of the traffic around it, whatever its severity,
-  cut before verification can lower that severity;
+  cut before verification can lower that severity, and kept for good;
 - a rolling full capture is kept within a disk budget;
 - alerts.jsonl gets one line per alert, written when its verdict is final.
 
@@ -90,16 +90,12 @@ class ReviewRecorder:
             os.makedirs(d, exist_ok=True)
         self.pcap_writer = pcap_writer
         self.snippet_seconds = config.get('review', 'snippet_seconds', default=60)
-        self.snippet_budget = int(config.get(
-            'review', 'snippet_budget_mb', default=500)) * 1024 * 1024
         self.capture_budget = int(config.get(
             'review', 'capture_budget_mb', default=2048)) * 1024 * 1024
         self.capture_max_age = float(config.get(
             'review', 'capture_max_hours', default=24)) * 3600
         self._lock = threading.Lock()
         self._owns_recording = False
-        self._snippet_bytes = _dir_bytes(self.snippet_dir)
-        self.skipped_snippets = 0
 
     def start(self):
         """Begin the rolling capture, unless the user is already recording."""
@@ -115,46 +111,18 @@ class ReviewRecorder:
             self.pcap_writer.stop_recording()
         self._owns_recording = False
 
-    def snippet(self, alert, referenced=None):
+    def snippet(self, alert):
         """
-        Save the traffic around an alert into the snippet folder.
+        Save the traffic around an alert into the snippet folder, for good.
 
-        Over budget, the oldest snippets no stored alert still points at go first.
-        If every one is still referenced, this one is skipped rather than break a
-        reference, and the alert says so.
+        Snippets were once pruned to a budget, oldest first, so an alert from last
+        week could come up for review with its traffic gone. They are small (a few
+        hundred KB) and the reason review mode exists, so they stay; the rolling
+        capture is what keeps to a budget. pcap_writer skips a snippet only when
+        the disk is nearly full.
         """
-        with self._lock:
-            if self._snippet_bytes >= self.snippet_budget:
-                self._prune(referenced() if referenced else set())
-            if self._snippet_bytes >= self.snippet_budget:
-                self.skipped_snippets += 1
-                alert.evidence['packet_capture_note'] = (
-                    'No traffic saved: the review snippet budget is full of '
-                    'captures that other alerts still point at.')
-                return None
-        path = self.pcap_writer.export_for_alert(
+        return self.pcap_writer.export_for_alert(
             alert, seconds=self.snippet_seconds, directory=self.snippet_dir)
-        if path:
-            with self._lock:
-                try:
-                    self._snippet_bytes += os.path.getsize(path)
-                except OSError:
-                    pass
-        return path
-
-    def _prune(self, referenced):
-        referenced = {os.path.abspath(p) for p in referenced if p}
-        files = _files_oldest_first(self.snippet_dir, '.pcap')
-        for path, size in files:
-            if self._snippet_bytes < self.snippet_budget:
-                break
-            if path in referenced:
-                continue
-            try:
-                os.remove(path)
-                self._snippet_bytes -= size
-            except OSError:
-                pass
 
     def record(self, alert):
         """One line in alerts.jsonl. Called once the alert's verdict is final."""
@@ -170,27 +138,6 @@ class ReviewRecorder:
                     f.write(line + '\n')
             except OSError as e:
                 logger.error("Could not record alert for review: %s", e)
-
-
-def _dir_bytes(directory):
-    return sum(size for _, size in _files_oldest_first(directory, ''))
-
-
-def _files_oldest_first(directory, suffix):
-    out = []
-    try:
-        for name in os.listdir(directory):
-            if not name.endswith(suffix):
-                continue
-            path = os.path.join(directory, name)
-            try:
-                st = os.stat(path)
-            except OSError:
-                continue
-            out.append((st.st_mtime, os.path.abspath(path), st.st_size))
-    except OSError:
-        return []
-    return [(p, s) for _, p, s in sorted(out)]
 
 
 # ─── Redaction ───────────────────────────────────────────────────────────────

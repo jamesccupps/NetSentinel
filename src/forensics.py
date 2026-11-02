@@ -114,8 +114,10 @@ BACNET_UNCONFIRMED_SERVICES = {
 }
 
 BACNET_CONFIRMED_SERVICES = {
-    6: 'CreateObject',
-    7: 'DeleteObject',
+    6: 'AtomicReadFile',
+    7: 'AtomicWriteFile',
+    10: 'CreateObject',
+    11: 'DeleteObject',
     12: 'ReadProperty',
     14: 'ReadPropertyMultiple',
     15: 'WriteProperty — CONTROL COMMAND',
@@ -123,6 +125,51 @@ BACNET_CONFIRMED_SERVICES = {
     17: 'DeviceCommunicationControl',
     20: 'ReinitializeDevice — DEVICE RESET',
 }
+
+
+def bacnet_request(payload):
+    """
+    (APDU type, service choice, APDU offset) for a BACnet/IP request, or None
+    for anything else: an acknowledgement, a network-layer message, or too short.
+    The caller has checked the BVLC header.
+
+    Per ASHRAE 135 clauses 6.2 and 20.1. The old reading took a confirmed
+    request's invoke ID for its service, so any request numbered 15, 16 or 20
+    was a CRITICAL "BACnet WRITE" or "RESET"; wanted a byte past the end of a
+    global Who-Is, the commonest discovery there is; and skipped neither a
+    forwarded broadcast's origin nor a routed packet's addresses.
+    """
+    if payload[1] not in (0x04, 0x09, 0x0a, 0x0b):   # BVLC functions with an NPDU
+        return None
+    i = 10 if payload[1] == 0x04 else 4      # Forwarded-NPDU carries its origin
+    if len(payload) < i + 2 or payload[i] != 0x01:   # NPDU version 1
+        return None
+    control = payload[i + 1]
+    i += 2
+    if control & 0x80:                       # network-layer message: no APDU
+        return None
+    if control & 0x20:                       # DNET, DLEN, DADR
+        if len(payload) < i + 3:
+            return None
+        i += 3 + payload[i + 2]
+    if control & 0x08:                       # SNET, SLEN, SADR
+        if len(payload) < i + 3:
+            return None
+        i += 3 + payload[i + 2]
+    if control & 0x20:                       # hop count
+        i += 1
+    if len(payload) <= i:
+        return None
+    apdu_type = payload[i] >> 4
+    if apdu_type == 1:                       # type, service
+        choice = i + 1
+    elif apdu_type == 0:                     # type, max segs/APDU, invoke ID,
+        choice = i + (5 if payload[i] & 0x08 else 3)   # [sequence, window], service
+    else:
+        return None
+    if len(payload) <= choice:
+        return None
+    return apdu_type, payload[choice], i
 
 
 def is_private_address(ip):
@@ -254,11 +301,26 @@ HTTP_POST_CRED_RE = re.compile(
 HTTP_COOKIE_RE = re.compile(rb'Cookie:\s*(.+?)(?:\r?\n)', re.IGNORECASE)
 HTTP_SET_COOKIE_RE = re.compile(rb'Set-Cookie:\s*(.+?)(?:\r?\n)', re.IGNORECASE)
 
-# HTTP Authorization headers (Bearer tokens, API keys)
-HTTP_AUTH_RE = re.compile(rb'Authorization:\s*(\S+\s+\S+)', re.IGNORECASE)
+# HTTP Authorization headers (Bearer tokens, API keys). The value ends at the
+# line: "\s" ran across the line break, so a bare key with no scheme (AMD's
+# telemetry upload) came out as the key plus the next header's name.
+HTTP_AUTH_RE = re.compile(rb'Authorization:[ \t]*([^\r\n]+)', re.IGNORECASE)
 HTTP_API_KEY_RE = re.compile(
-    rb'(?:x-api-key|api-key|apikey|x-auth-token|x-access-token):\s*(\S+)',
+    rb'(?:x-api-key|api-key|apikey|x-auth-token|x-access-token):[ \t]*([^\s]+)',
     re.IGNORECASE
+)
+
+# Vendor services that put their own key in the Authorization header over
+# plain HTTP, by design: the key is the vendor's, not the owner's, so there is
+# nothing to change. AMD's User Experience Program upload was "CRITICAL, change
+# this password immediately".
+VENDOR_TOKEN_SERVICES = (
+    (('eset.com',), 'Update Service',
+     'Nothing to change: the key is ESET\'s, sent to its update servers by design.'),
+    (('amd-auep.com',), 'Vendor Telemetry',
+     'Nothing to change: the key is AMD\'s, for its User Experience Program '
+     'upload. Turn that program off in AMD Software\'s settings if you would '
+     'rather it not send.'),
 )
 
 # HTTP Digest Auth (used by many routers, cameras, HVAC controllers)
@@ -843,7 +905,7 @@ def credential_alert(cred):
             'extra': cred.get('extra', {}),
             'description': (f"A {cred['credential_type']} for {cred['protocol']} "
                             f"was found in network traffic{desc_suffix}"),
-            'recommendation': (
+            'recommendation': cred.get('recommendation') or (
                 'Switch to the encrypted version of this protocol.' if is_digest else
                 'Change this password immediately. Switch to the encrypted version '
                 'of this protocol.'),
@@ -1223,8 +1285,12 @@ class NetworkForensics:
                                       raw_value=password)
 
         # ─── HTTP Credentials ─────────────────────────────────
+        # By port, and by a request line on any other port: Home Assistant's API
+        # on 8123 took a long-lived Bearer token in plain HTTP, unseen, because
+        # 8123 was not on the list. Readable at all means it is not encrypted.
         HTTP_PORTS = {80, 3000, 4200, 5000, 8000, 8008, 8080, 8081, 8888, 9090}
-        if port in HTTP_PORTS or sport in HTTP_PORTS:
+        if (port in HTTP_PORTS or sport in HTTP_PORTS
+                or (port and HTTP_REQUEST_RE.match(payload))):
             # Track HTTP method for session context
             req_match = HTTP_REQUEST_RE.search(payload)
             if req_match:
@@ -1306,23 +1372,27 @@ class NetworkForensics:
                         extra={'host': host, 'realm': realm, 'uri': uri},
                         raw_value=raw_digest)
 
-            # Bearer / API tokens — skip known update service auth headers
+            # Bearer / API tokens; Basic and Digest are read above
             match = HTTP_AUTH_RE.search(payload)
-            if match and b'Basic' not in match.group(1) and b'Digest' not in match.group(1):
-                token = match.group(1).decode('utf-8', errors='replace')
-                # Check if this is a known update service token
+            words = match.group(1).split() if match else []
+            if words and words[0].lower() not in (b'basic', b'digest'):
+                token = match.group(1).strip().decode('utf-8', errors='replace')
                 host_for_token = ''
                 hm = HTTP_HOST_RE.search(payload)
                 if hm:
                     host_for_token = hm.group(1).decode('utf-8', errors='replace').lower()
-                KNOWN_TOKEN_SERVICES = {'update.eset.com', 'eset.com'}
-                if any(svc in host_for_token for svc in KNOWN_TOKEN_SERVICES):
-                    self._add_credential('HTTP Auth Token (Update Service)', 'token',
+                vendor = next((v for v in VENDOR_TOKEN_SERVICES
+                               if host_matches(host_for_token, v[0])), None)
+                if vendor:
+                    self._add_credential(f'HTTP Auth Token ({vendor[1]})', 'token',
                         self._mask(token, show=8) + f' via {host_for_token}', src, dst, port, ts,
-                        raw_value=token, risk='LOW')
+                        extra={'host': host_for_token, 'note': vendor[2]},
+                        raw_value=token, risk='LOW', recommendation=vendor[2])
                 else:
                     self._add_credential('HTTP Auth Token', 'token',
-                        self._mask(token, show=8), src, dst, port, ts, raw_value=token)
+                        self._mask(token, show=8), src, dst, port, ts,
+                        extra={'host': host_for_token} if host_for_token else None,
+                        raw_value=token)
 
             # API key headers
             match = HTTP_API_KEY_RE.search(payload)
@@ -1555,90 +1625,65 @@ class NetworkForensics:
                     0x0b: 'Original-Broadcast-NPDU',
                 }
 
-                if bvlc_type == 0x81:  # BACnet/IP
+                # BACnet/IP is type 0x81 with its own length in bytes 2-3. Both,
+                # because one port is no proof: an SSDP search whose random
+                # source port was 47808 was "BACnet" HIGH.
+                bvlc_len = int.from_bytes(payload[2:4], 'big')
+                if bvlc_type == 0x81 and bvlc_len == len(payload):
                     bvlc_name = BVLC_FUNCTIONS.get(bvlc_function, f'Function 0x{bvlc_function:02x}')
+                    request = bacnet_request(payload)
+                    if request:
+                        apdu_type, service, apdu_start = request
+                        apdu_name = BACNET_APDU_TYPES.get(apdu_type, f'Type {apdu_type}')
+                        services = (BACNET_UNCONFIRMED_SERVICES if apdu_type == 1
+                                    else BACNET_CONFIRMED_SERVICES)
+                        svc_name = services.get(service, f'Service {service}')
+                        is_unconfirmed = apdu_type == 1
 
-                    # Parse NPDU (Network Protocol Data Unit) after BVLC header
-                    bvlc_len = int.from_bytes(payload[2:4], 'big') if len(payload) >= 4 else 0
-                    npdu_start = 4  # After BVLC header
+                        # Discovery — someone scanning for BACnet devices
+                        if is_unconfirmed and service == 8:  # Who-Is
+                            self._add_timeline_event(ts, 'bacnet',
+                                f"BACnet Who-Is discovery: {src} scanning for devices")
+                            self._add_sensitive_data('BACnet Discovery',
+                                f'BACnet device discovery scan from {src}',
+                                src, dst, port, ts, risk='MEDIUM')
 
-                    # Look for APDU (Application Protocol Data Unit)
-                    if len(payload) > npdu_start + 2:
-                        npdu_version = payload[npdu_start]
-                        npdu_control = payload[npdu_start + 1]
+                        elif is_unconfirmed and service == 0:  # I-Am response
+                            self._add_timeline_event(ts, 'bacnet',
+                                f"BACnet I-Am: device at {src} responded to discovery")
+                            self._add_credential('BACnet', 'device_identity',
+                                f"BACnet device at {src} responding to discovery",
+                                src, dst, port, ts,
+                                raw_value=f"BACnet device at {src}, BVLC: {bvlc_name}")
 
-                        # Skip NPDU routing info to find APDU
-                        apdu_start = npdu_start + 2
-                        if npdu_control & 0x20:  # DNET present
-                            apdu_start += 4  # Skip DNET + DLEN + hop count
-                        if npdu_control & 0x08:  # SNET present
-                            apdu_start += 3  # Skip SNET + SLEN
+                        # Write commands — someone controlling the building
+                        elif not is_unconfirmed and service in (15, 16):
+                            self._add_sensitive_data('BACnet WRITE',
+                                f'BACnet write command: {svc_name} — '
+                                f'building equipment being controlled by {src}',
+                                src, dst, port, ts, risk='CRITICAL')
+                            self._add_credential('BACnet', 'control_command',
+                                f'{svc_name} from {src}',
+                                src, dst, port, ts,
+                                raw_value=f'{svc_name}, payload: {payload[apdu_start:apdu_start+50].hex()}')
 
-                        if len(payload) > apdu_start:
-                            apdu_type = (payload[apdu_start] >> 4) & 0x0F
+                        # Device reset — very dangerous
+                        elif not is_unconfirmed and service == 20:
+                            self._add_sensitive_data('BACnet RESET',
+                                f'BACnet ReinitializeDevice command from {src} — '
+                                f'attempting to reset building automation device!',
+                                src, dst, port, ts, risk='CRITICAL')
 
-                            apdu_name = BACNET_APDU_TYPES.get(apdu_type, f'Type {apdu_type}')
+                        # Read property — monitoring/surveillance
+                        elif not is_unconfirmed and service in (12, 14):
+                            self._add_timeline_event(ts, 'bacnet',
+                                f"BACnet ReadProperty: {src} reading from {dst}")
 
-                            # Check for specific BACnet services
-                            if apdu_type in (0, 1) and len(payload) > apdu_start + 2:
-                                # Get service choice
-                                if apdu_type == 1:  # Unconfirmed
-                                    service = payload[apdu_start + 1]
-                                else:  # Confirmed
-                                    service = payload[apdu_start + 2] if len(payload) > apdu_start + 2 else 0
-
-                                services = (BACNET_UNCONFIRMED_SERVICES if apdu_type == 1
-                                            else BACNET_CONFIRMED_SERVICES)
-                                svc_name = services.get(service, f'Service {service}')
-                                is_unconfirmed = apdu_type == 1
-
-                                # Discovery — someone scanning for BACnet devices
-                                if is_unconfirmed and service == 8:  # Who-Is
-                                    self._add_timeline_event(ts, 'bacnet',
-                                        f"BACnet Who-Is discovery: {src} scanning for devices")
-                                    self._add_sensitive_data('BACnet Discovery',
-                                        f'BACnet device discovery scan from {src}',
-                                        src, dst, port, ts, risk='MEDIUM')
-
-                                elif is_unconfirmed and service == 0:  # I-Am response
-                                    self._add_timeline_event(ts, 'bacnet',
-                                        f"BACnet I-Am: device at {src} responded to discovery")
-                                    self._add_credential('BACnet', 'device_identity',
-                                        f"BACnet device at {src} responding to discovery",
-                                        src, dst, port, ts,
-                                        raw_value=f"BACnet device at {src}, BVLC: {bvlc_name}")
-
-                                # Write commands — someone controlling the building
-                                elif not is_unconfirmed and service in (15, 16):
-                                    self._add_sensitive_data('BACnet WRITE',
-                                        f'BACnet write command: {svc_name} — '
-                                        f'building equipment being controlled by {src}',
-                                        src, dst, port, ts, risk='CRITICAL')
-                                    self._add_credential('BACnet', 'control_command',
-                                        f'{svc_name} from {src}',
-                                        src, dst, port, ts,
-                                        raw_value=f'{svc_name}, payload: {payload[apdu_start:apdu_start+50].hex()}')
-
-                                # Device reset — very dangerous
-                                elif not is_unconfirmed and service == 20:
-                                    self._add_sensitive_data('BACnet RESET',
-                                        f'BACnet ReinitializeDevice command from {src} — '
-                                        f'attempting to reset building automation device!',
-                                        src, dst, port, ts, risk='CRITICAL')
-
-                                # Read property — monitoring/surveillance
-                                elif not is_unconfirmed and service in (12, 14):
-                                    self._add_timeline_event(ts, 'bacnet',
-                                        f"BACnet ReadProperty: {src} reading from {dst}")
-
-                                else:
-                                    self._add_timeline_event(ts, 'bacnet',
-                                        f"BACnet {apdu_name}: {svc_name} — {src} → {dst}")
-                else:
-                    # Non-standard BACnet packet
-                    self._add_sensitive_data('BACnet',
-                        'BACnet/IP traffic detected — building automation protocol, no encryption',
-                        src, dst, port, ts, risk='HIGH')
+                        else:
+                            self._add_timeline_event(ts, 'bacnet',
+                                f"BACnet {apdu_name}: {svc_name} — {src} → {dst}")
+                # Anything else on the port is not BACnet. It used to be "BACnet/IP
+                # traffic detected", HIGH, which real BACnet (0x81) never reached.
 
         # ─── Parking System Protocol Detection ─────────
         # Cleartext XML commands on UDP 31769 (parking controller overlay)
@@ -2479,7 +2524,8 @@ class NetworkForensics:
         })
 
     def _add_credential(self, protocol, cred_type, value, src, dst, port, ts,
-                         extra=None, raw_length=0, raw_value=None, risk='CRITICAL'):
+                         extra=None, raw_length=0, raw_value=None, risk='CRITICAL',
+                         recommendation=None):
         """Record a found credential. value=masked for display, raw_value=full for storage."""
         finding = {
             'timestamp': ts,
@@ -2492,6 +2538,7 @@ class NetworkForensics:
             'port': port,
             'risk': risk,
             'extra': extra or {},
+            'recommendation': recommendation,
         }
         self.credentials_found.append(finding)
         self._add_timeline_event(ts, 'credential',

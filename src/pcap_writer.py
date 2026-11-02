@@ -13,6 +13,7 @@ Features:
 
 import os
 import re
+import shutil
 import struct
 import time
 import logging
@@ -72,6 +73,19 @@ def _frame_involves(frame, endpoints):
         return False
 
 
+def _has_room(directory, floor_mb):
+    """Whether the disk holding this directory (or its nearest existing parent)
+    has at least floor_mb free. Unknown counts as room: a failed check must not
+    cost an alert its capture."""
+    path = os.path.abspath(directory)
+    while not os.path.exists(path) and os.path.dirname(path) != path:
+        path = os.path.dirname(path)
+    try:
+        return shutil.disk_usage(path).free >= floor_mb * 1024 * 1024
+    except (OSError, ValueError):
+        return True
+
+
 class PcapWriter:
     """
     Captures and exports packets to PCAP format.
@@ -86,6 +100,9 @@ class PcapWriter:
             output_dir = os.path.join(APP_DIR, "captures")
         self.output_dir = output_dir
         os.makedirs(self.output_dir, exist_ok=True)
+        # Alert captures are kept for good, so they live apart from the
+        # recordings that rotate and prune.
+        self.alert_dir = os.path.join(self.output_dir, 'alerts')
 
         # Ring buffer: stores (timestamp, raw_bytes) tuples
         # Configurable via capture.pcap_buffer_packets (default 150000)
@@ -191,9 +208,20 @@ class PcapWriter:
         is usually still in memory at the moment it fires — this just writes it out
         before it ages away. Returns the path, or None if there was nothing to save.
 
-        With a directory (review mode), the file goes there and its caller prunes
-        it; otherwise the newest pcap_max_alert_files are kept.
+        The file goes in the directory given (review mode's snippets), or the
+        alerts folder. Nothing deletes alert captures: an alert is only worth
+        reviewing with its traffic, however old it is. When the disk is nearly
+        full, the capture is skipped instead, and the alert says so.
         """
+        directory = directory or self.alert_dir
+        floor_mb = self.config.get('capture', 'alert_min_free_mb', default=1024)
+        if not _has_room(directory, floor_mb):
+            if hasattr(alert, 'evidence'):
+                alert.evidence['packet_capture_note'] = (
+                    f'No traffic saved: less than {floor_mb} MB is free on the disk '
+                    'that holds alert captures. They are never deleted to make room.')
+            return None
+
         cutoff = time.time() - seconds
         endpoints = {ip for ip in (getattr(alert, 'src_ip', ''),
                                    getattr(alert, 'dst_ip', '')) if ip}
@@ -221,34 +249,20 @@ class PcapWriter:
         safe_rule = re.sub(r'[^A-Za-z0-9_.-]', '_', str(getattr(alert, 'rule_id', 'alert')))
         filename = (f"alert_{safe_rule}_{getattr(alert, 'id', 0)}_"
                     f"{datetime.now():%Y%m%d_%H%M%S}.pcap")
-        filepath = os.path.join(directory or self.output_dir, filename)
+        filepath = os.path.join(directory, filename)
 
         try:
+            os.makedirs(directory, exist_ok=True)
             with open(filepath, 'wb') as f:
                 self._write_pcap_header(f)
                 for ts, raw in packets:
                     self._write_packet_record(f, ts, raw)
             logger.info("Saved %d packets for %s to %s",
                         len(packets), safe_rule, filepath)
-            if directory is None:
-                self._prune_alert_captures()
             return filepath
         except OSError as e:
             logger.error("Could not save alert capture: %s", e)
             return None
-
-    def _prune_alert_captures(self):
-        """Cap how many per-alert captures accumulate on disk."""
-        keep = self.config.get('capture', 'pcap_max_alert_files', default=50)
-        try:
-            files = [os.path.join(self.output_dir, f)
-                     for f in os.listdir(self.output_dir)
-                     if f.startswith('alert_') and f.endswith('.pcap')]
-            files.sort(key=os.path.getmtime, reverse=True)
-            for path in files[keep:]:
-                os.remove(path)
-        except OSError as e:
-            logger.debug("Alert capture pruning error: %s", e)
 
     def start_recording(self, filename=None, directory=None, budget_bytes=None,
                         max_age_sec=None):
@@ -436,30 +450,32 @@ class PcapWriter:
         }
 
     def get_capture_files(self):
-        """List all PCAP files in the output directory."""
-        files = []
-        try:
-            entries = sorted(os.listdir(self.output_dir), reverse=True)
-        except OSError as e:
-            logger.debug("Could not list captures: %s", e)
-            return files
-        for f in entries:
-            if not f.endswith('.pcap'):
-                continue
-            path = os.path.join(self.output_dir, f)
+        """List the PCAP files in the output and alerts directories, newest first."""
+        found = []
+        for directory, prefix in ((self.output_dir, ''), (self.alert_dir, 'alerts/')):
             try:
-                # Rotation/pruning can delete a file between listdir and stat.
-                files.append({
-                    'filename': f,
-                    'path': path,
-                    'size_mb': round(os.path.getsize(path) / (1024 * 1024), 2),
-                    'modified': datetime.fromtimestamp(
-                        os.path.getmtime(path)
-                    ).strftime('%Y-%m-%d %H:%M:%S'),
-                })
-            except OSError:
+                entries = os.listdir(directory)
+            except OSError as e:
+                if directory == self.output_dir:
+                    logger.debug("Could not list captures: %s", e)
                 continue
-        return files
+            for f in entries:
+                if not f.endswith('.pcap'):
+                    continue
+                path = os.path.join(directory, f)
+                try:
+                    # Rotation/pruning can delete a file between listdir and stat.
+                    found.append((os.path.getmtime(path), prefix + f, path,
+                                  os.path.getsize(path)))
+                except OSError:
+                    continue
+        found.sort(reverse=True)
+        return [{
+            'filename': name,
+            'path': path,
+            'size_mb': round(size / (1024 * 1024), 2),
+            'modified': datetime.fromtimestamp(mtime).strftime('%Y-%m-%d %H:%M:%S'),
+        } for mtime, name, path, size in found]
 
     def cleanup(self):
         """Close any open files."""

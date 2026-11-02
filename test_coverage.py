@@ -513,20 +513,7 @@ class TestPcapOnAlert(unittest.TestCase):
         path = self.writer.export_for_alert(alert)
         self.assertIsNotNone(path)
         self.assertEqual(os.path.dirname(os.path.abspath(path)),
-                         os.path.abspath(self.tmp))
-
-    def test_old_alert_captures_are_pruned(self):
-        c = cfg()
-        c.set('capture', 'pcap_max_alert_files', 3)
-        from src.pcap_writer import PcapWriter
-        writer = PcapWriter(c, output_dir=self.tmp)
-        self.writer = writer
-        self._fill()
-        for i in range(8):
-            writer.export_for_alert(
-                Alert(f'RULE{i}', Severity.CRITICAL, 'x', 'd', src_ip='203.0.113.9'))
-        saved = [f for f in os.listdir(self.tmp) if f.startswith('alert_')]
-        self.assertLessEqual(len(saved), 3)
+                         os.path.abspath(os.path.join(self.tmp, 'alerts')))
 
 
 class TestFrameEndpointMatching(unittest.TestCase):
