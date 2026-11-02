@@ -1,0 +1,181 @@
+"""
+The gateway's traffic log, received over syslog.
+=================================================
+A UniFi gateway without a drive will not export its traffic log, but it will
+send it to a syslog server as it happens. These cover the receiver: what it
+accepts, how it reads the formats, what it keeps per device, and the files it
+stores and prunes. One test sends a real datagram over loopback; nothing else
+touches a socket. Addresses and names are made up, but for one Google address
+where an internet one is needed (Python counts documentation ranges as private).
+"""
+
+import json
+import os
+import shutil
+import socket
+import sys
+import tempfile
+import time
+import unittest
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+import _test_support  # noqa: E402,F401
+
+from src.syslog_receiver import MAX_PER_SECOND, SyslogReceiver, parse  # noqa: E402
+
+GATEWAY = '192.168.1.1'
+T0 = 1_790_000_000.0
+
+CEF = ('<14>1 2026-11-02T15:00:00Z UDM-Pro CEF - - - CEF:0|Ubiquiti|UniFi Network|10.6.109|'
+       '201|Allowed Connection|1|src=192.168.1.40 spt=51515 dst=203.0.113.9 dpt=443 proto=TCP '
+       'UNIFIclientAlias=Living Room Speaker UNIFIclientMac=02:00:00:00:00:40 '
+       'UNIFIdomain=api.example-speaker.com act=allow')
+IPTABLES = ('<4>Nov  2 15:00:01 UDM-Pro kernel: [IOT_WAN-D-2147483647] IN=br12 OUT=eth8 '
+            'MAC=02:00:00:00:00:41 SRC=192.168.1.41 DST=198.51.100.7 LEN=60 PROTO=TCP '
+            'SPT=40000 DPT=443 WINDOW=64240 SYN')
+
+
+class Settings:
+    def __init__(self, **values):
+        self.values = {('syslog', 'enabled'): True, ('syslog', 'bind'): '127.0.0.1',
+                       ('syslog', 'port'): 0, ('syslog', 'allowed_senders'): GATEWAY}
+        self.values.update({('syslog', k): v for k, v in values.items()})
+
+    def get(self, *keys, default=None):
+        return self.values.get(keys, default)
+
+
+class _Case(unittest.TestCase):
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix='ns_syslog_')
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+
+    def receiver(self, names=None, **settings):
+        r = SyslogReceiver(Settings(**settings), data_dir=self.tmp, clock=lambda: T0, names=names)
+        self.addCleanup(r.stop)
+        return r
+
+
+class TestFormats(unittest.TestCase):
+
+    def test_cef_from_unifi(self):
+        r = parse(CEF)
+        self.assertEqual((r['src'], r['dst'], r['dport'], r['proto']),
+                         ('192.168.1.40', '203.0.113.9', '443', 'TCP'))
+        self.assertEqual((r['client'], r['domain'], r['action']),
+                         ('Living Room Speaker', 'api.example-speaker.com', 'allow'))
+        self.assertEqual(r['event'], 'Allowed Connection')
+
+    def test_an_iptables_line_and_its_rule(self):
+        r = parse(IPTABLES)
+        self.assertEqual((r['src'], r['dst'], r['dport'], r['rule']),
+                         ('192.168.1.41', '198.51.100.7', '443', 'IOT_WAN-D-2147483647'))
+        self.assertEqual(r['action'], 'block')
+
+    def test_something_unknown_is_kept_trimmed(self):
+        r = parse('<13>Nov  2 15:00:02 UDM-Pro hostapd: ' + 'x' * 2000)
+        self.assertNotIn('src', r)
+        self.assertEqual(len(r['raw']), 400)
+
+
+class TestWhatIsAccepted(_Case):
+
+    def test_a_sender_not_allowed_is_dropped_unread(self):
+        r = self.receiver()
+        self.assertIsNone(r.handle(CEF.encode(), '192.168.1.66'))
+        self.assertEqual((r.dropped_sender, r.received), (1, 0))
+        self.assertEqual(r.days(), [])
+
+    def test_a_flood_is_capped_per_second(self):
+        r = self.receiver()
+        for _ in range(MAX_PER_SECOND + 10):
+            r.handle(b'<14>hello', GATEWAY, now=T0)
+        self.assertEqual(r.dropped_rate, 10)
+
+    def test_without_an_address_or_a_sender_it_does_not_listen(self):
+        for settings in ({'bind': ''}, {'allowed_senders': ''}, {'enabled': False}):
+            r = self.receiver(**settings)
+            self.assertFalse(r.start())
+            self.assertIsNone(r._sock)
+
+    def test_a_real_datagram_over_loopback(self):
+        r = self.receiver(allowed_senders='127.0.0.1')
+        self.assertTrue(r.start())
+        port = r._sock.getsockname()[1]
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.sendto(CEF.encode(), ('127.0.0.1', port))
+        deadline = time.time() + 5
+        while not r.received and time.time() < deadline:
+            time.sleep(0.02)
+        self.assertEqual(r.received, 1)
+
+
+class TestPerDevice(_Case):
+
+    def test_destinations_are_counted_per_device_with_the_consoles_name(self):
+        r = self.receiver(names=lambda ip: 'Speaker (UniFi)' if ip == '192.168.1.40' else None)
+        for _ in range(3):
+            r.handle(CEF.encode(), GATEWAY)
+        r.handle(IPTABLES.encode(), GATEWAY)
+        devices = {d['ip']: d for d in r.devices()}
+        speaker = devices['192.168.1.40']
+        self.assertEqual(speaker['name'], 'Speaker (UniFi)')
+        self.assertEqual(speaker['top'][0]['to'], 'api.example-speaker.com:443')
+        self.assertEqual(speaker['top'][0]['allowed'], 3)
+        self.assertEqual(devices['192.168.1.41']['blocked'], 1)
+
+    def test_an_inbound_connection_is_not_a_device_reaching_out(self):
+        r = self.receiver()
+        r.handle(b'<4>SRC=142.250.68.195 DST=192.168.1.41 PROTO=TCP SPT=443 DPT=40000', GATEWAY)
+        self.assertEqual(r.devices(), [])
+
+
+class TestStorage(_Case):
+
+    def test_each_day_is_a_file_of_json_lines(self):
+        r = self.receiver()
+        r.handle(CEF.encode(), GATEWAY)
+        [day] = r.days()
+        with open(r.day_path(day), encoding='utf-8') as f:
+            record = json.loads(f.readline())
+        self.assertEqual((record['src'], record['sender']), ('192.168.1.40', GATEWAY))
+
+    def test_old_days_go_and_then_the_oldest_until_it_fits(self):
+        r = self.receiver(keep_days=10, max_mb=1)
+        for day, size in (('2026-01-01', 10), ('2026-09-01', 700_000), ('2026-09-02', 700_000),
+                          ('2026-09-03', 10)):
+            with open(r.day_path(day), 'w', encoding='utf-8') as f:
+                f.write('x' * size)
+        r.prune(now=time.mktime((2026, 9, 3, 12, 0, 0, 0, 0, -1)))
+        self.assertEqual(r.days(), ['2026-09-02', '2026-09-03'])
+
+    def test_a_day_must_look_like_a_date(self):
+        with self.assertRaises(ValueError):
+            self.receiver().day_path('../../config')
+
+
+from test_headless import _ApiTestCase  # noqa: E402
+
+
+class TestDashboard(_ApiTestCase):
+
+    def test_devices_and_export(self):
+        tmp = tempfile.mkdtemp(prefix='ns_syslog_api_')
+        self.addCleanup(shutil.rmtree, tmp, True)
+        r = SyslogReceiver(Settings(), data_dir=tmp)
+        r.handle(CEF.encode(), GATEWAY)
+        self.app.syslog = r
+        data = self.get_json('/api/unifi-logs/devices')
+        self.assertEqual(data['devices'][0]['ip'], '192.168.1.40')
+        day = data['days'][0]
+        status, headers, body = self.get(f'/api/unifi-logs/export?day={day}')
+        self.assertIn('ndjson', headers['Content-Type'])
+        self.assertEqual(json.loads(body.splitlines()[0])['dst'], '203.0.113.9')
+        code, _ = self.request('/api/unifi-logs/export?day=2020-01-01')
+        self.assertEqual(code, 404)
+
+
+if __name__ == '__main__':
+    unittest.main()

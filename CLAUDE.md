@@ -99,6 +99,10 @@ The signing key's private half never goes in the repo, a prompt or a log;
   page carries and are refused unless the server is bound to loopback; loopback
   binds refuse foreign Host headers. Keep it that way. (Owner's decision,
   2026-10-29; it replaced "cannot change monitoring".)
+- The syslog receiver (`src/syslog_receiver.py`) is the only thing listening off
+  loopback: off until `syslog.enabled`, on the configured address only, it
+  accepts only `syslog.allowed_senders`, never answers, and treats every message
+  as untrusted text.
 - The network audit is the only active probing. It is off until `audit.enabled`,
   runs only when asked, only on private networks of /16 or smaller on a local
   interface, and never tries a credential.

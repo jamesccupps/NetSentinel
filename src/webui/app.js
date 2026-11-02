@@ -618,6 +618,28 @@ async function refreshIncidents() {
   if (!data.incidents.length) list.append(h('div', { class: 'empty' }, 'No correlated incidents.'));
 }
 
+// ─── Device traffic (the gateway's log over syslog) ────────────────────
+
+async function refreshTraffic() {
+  const d = await api('/api/unifi-logs/devices');
+  const s = d.status || {};
+  $('traffic-status').textContent = d.enabled ? (s.note || '') : 'Off. Turn it on in the desktop app.';
+  $('traffic-days').replaceChildren(...(d.days || []).slice(-14).reverse().map((day) => h('a', {
+    class: 'chip', href: `/api/unifi-logs/export?day=${encodeURIComponent(day)}`,
+    download: `unifi-log-${day}.jsonl`, title: 'Download this day as JSON lines',
+  }, `Export ${day}`)));
+  const list = $('traffic-list');
+  list.replaceChildren(...(d.devices || []).map((dev) => h('div', { class: 'alert' },
+    h('div', { class: 'head' },
+      h('span', { class: 'title' }, dev.name ? `${dev.name}  ·  ${dev.ip}` : dev.ip),
+      h('span', { class: 'time' }, `${fmtNum(dev.destinations)} destinations${dev.blocked ? ` · ${fmtNum(dev.blocked)} blocked` : ''}`)),
+    table(['Destination', 'Allowed', 'Blocked', 'Last'], dev.top.map((t) => h('tr', null,
+      h('td', { class: 'mono wrap' }, t.to), h('td', { class: 'num' }, fmtNum(t.allowed)),
+      h('td', { class: 'num' }, t.blocked ? fmtNum(t.blocked) : ''),
+      h('td', { class: 'nowrap' }, ago(t.last))))))));
+  if (!(d.devices || []).length) list.append(h('div', { class: 'empty' }, 'Nothing received yet.'));
+}
+
 // ─── Threat data ─────────────────────────────────────────────────────────
 
 const SOURCE_STATES = { ok: 'In use', bundled: 'Bundled', stale: 'Too old', 'needs key': 'Needs key',
@@ -1145,6 +1167,7 @@ const PAGES = {
   scan: { refresh: refreshIgnored, every: 10000 },
   audit: { refresh: refreshAudit, every: 2000 },
   sources: { refresh: refreshSources, every: 30000 },
+  traffic: { refresh: refreshTraffic, every: 10000 },
 };
 let current = null, timer = null;
 

@@ -296,6 +296,8 @@ class HeadlessServer:
             '/api/scan/ignored': self._route_scan_ignored,
             '/api/sources': self._route_sources,
             '/api/history': self._route_history,
+            '/api/unifi-logs/devices': self._route_syslog_devices,
+            '/api/unifi-logs/export': self._route_syslog_export,
         }
         self.post_routes = {
             '/api/scan/new': self._post_scan_new,
@@ -485,6 +487,23 @@ class HeadlessServer:
 
     def _post_scan_cancel(self, params, body, length):
         return self._scan_sessions().cancel(_str_param(params, 'id')), 200
+
+    def _route_syslog_devices(self, params):
+        """What each device talked to, from the gateway's log (src/syslog_receiver.py)."""
+        receiver = getattr(self.app, 'syslog', None)
+        if receiver is None:
+            return {'enabled': False, 'devices': [], 'days': []}, 'application/json'
+        return {'enabled': receiver.enabled, 'status': receiver.status(),
+                'days': receiver.days(), 'devices': receiver.devices()}, 'application/json'
+
+    def _route_syslog_export(self, params):
+        """One stored day of the gateway's log, as JSON lines: ?day=YYYY-MM-DD."""
+        receiver = getattr(self.app, 'syslog', None)
+        day = _str_param(params, 'day') or ''
+        if receiver is None or day not in receiver.days():
+            raise RequestRefused('No log stored for that day.', 404)
+        with open(receiver.day_path(day), encoding='utf-8', errors='replace') as f:
+            return f.read(), 'application/x-ndjson; charset=utf-8'
 
     def _route_history(self, params):
         """Traffic rates for the charts: ?minutes= up to a day (src/metrics_history.py)."""

@@ -2742,6 +2742,22 @@ class NetSentinelGUI:
             font=('Segoe UI', 8), fg=COLORS['text_dim'], bg=COLORS['bg_card'],
             anchor='w', justify='left', wraplength=560).pack(fill='x')
 
+        syslog_card = Card(scroll_frame, title="UNIFI TRAFFIC LOG OVER SYSLOG (applies at next start)")
+        syslog_card.pack(fill='x', padx=8, pady=(0, 8))
+        self._add_setting_toggle(
+            syslog_card, 'syslog.enabled',
+            "Receive my gateway's traffic log, keep it by day, and show what each device talks to",
+            False)
+        self._add_setting_row(syslog_card, 'syslog.bind', "This PC's LAN address", '')
+        self._add_setting_row(syslog_card, 'syslog.port', 'Port (UDP)', '5514')
+        self._add_setting_row(syslog_card, 'syslog.allowed_senders', "Gateway's address", '')
+        self._add_setting_row(syslog_card, 'syslog.keep_days', 'Days kept', '30')
+        tk.Label(syslog_card, text=(
+            "In UniFi, send the traffic log (SIEM / remote syslog) to this PC's address and "
+            "port. Only the gateway's address is accepted, and nothing is ever sent back."),
+            font=('Segoe UI', 8), fg=COLORS['text_dim'], bg=COLORS['bg_card'],
+            anchor='w', justify='left', wraplength=560).pack(fill='x')
+
         geo_card = Card(scroll_frame, title="GEOIP (applies at next start)")
         geo_card.pack(fill='x', padx=8, pady=(0, 8))
         self._add_setting_toggle(

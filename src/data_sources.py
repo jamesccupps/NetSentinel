@@ -35,12 +35,13 @@ def collect(app):
             rows.extend(vulns.status())
         except Exception as e:
             logger.debug("Vulnerability data status unavailable: %s", e)
-    unifi = getattr(app, 'unifi', None)
-    if unifi is not None:
-        try:
-            rows.append(unifi.status())
-        except Exception as e:
-            logger.debug("UniFi status unavailable: %s", e)
+    for name in ('unifi', 'syslog'):
+        part = getattr(app, name, None)
+        if part is not None:
+            try:
+                rows.append(part.status())
+            except Exception as e:
+                logger.debug("%s status unavailable: %s", name, e)
     rows.append(_geoip(app))
     rows.append(_hash_lists())
     rows.extend(_bundled())

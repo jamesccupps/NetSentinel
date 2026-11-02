@@ -260,6 +260,17 @@ DEFAULT_CONFIG = {
         "cert_sha256": "",              # Pinned on first use; clear it to trust a new one
         "refresh_minutes": 5,
     },
+    "syslog": {
+        # Receive a UniFi gateway's traffic log over syslog, store it by day and
+        # show what each device talks to (src/syslog_receiver.py). Off until the
+        # address to listen on and the gateway allowed to send are set.
+        "enabled": False,
+        "bind": "",                     # This PC's LAN address, e.g. 192.168.1.20
+        "port": 5514,
+        "allowed_senders": "",          # The gateway's address(es), comma-separated; others dropped
+        "keep_days": 30,
+        "max_mb": 500,
+    },
     "migrations": {
         "applied": [],                  # STALE_DEFAULTS already handled
     },

@@ -108,6 +108,11 @@ class NetSentinelApp:
         self.unifi = UnifiInventory(self.config)
         self.unifi.start()
 
+        # The gateway's own traffic log, sent here over syslog (opt-in).
+        from src.syslog_receiver import SyslogReceiver
+        self.syslog = SyslogReceiver(self.config, names=lambda ip: self.unifi.name_for(ip=ip))
+        self.syslog.start()
+
         # Process Verifier: deep process investigation
         from src.process_verify import ProcessVerifier
         self.process_verifier = ProcessVerifier(self.config)

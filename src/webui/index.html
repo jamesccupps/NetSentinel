@@ -23,6 +23,7 @@
     <a href="#incidents" data-page="incidents">Incidents</a>
     <a href="#scan" data-page="scan">Scan Files</a>
     <a href="#audit" data-page="audit">Audit</a>
+    <a href="#traffic" data-page="traffic">Device traffic</a>
     <a href="#sources" data-page="sources">Threat data</a>
   </nav>
   <div class="status" id="status"><span class="dot"></span><span class="label">Connecting…</span></div>
@@ -105,6 +106,19 @@
       </div>
     </div>
     <div id="audit-report"></div>
+  </section>
+
+  <section class="page" id="page-traffic" hidden>
+    <div class="panel">
+      <h2>Device traffic</h2>
+      <p class="hint">What each device on your network reaches out to, from your gateway's own
+        traffic log sent here over syslog. Use it to see which devices need the internet, and for
+        what. Turn it on in the desktop app (Settings, UniFi traffic log over syslog), then point
+        your gateway's syslog at this PC.</p>
+      <p id="traffic-status" class="hint"></p>
+      <div class="chips" id="traffic-days"></div>
+    </div>
+    <div id="traffic-list" class="alert-list"></div>
   </section>
 
   <section class="page" id="page-sources" hidden>

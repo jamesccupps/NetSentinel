@@ -1,5 +1,18 @@
 # NetSentinel Changelog
 
+## Unreleased
+
+- **Your gateway's traffic log, kept here.** A UniFi gateway without a drive keeps its
+  traffic log briefly and will not export it, but it can send it over syslog as it
+  happens. NetSentinel can now receive it (Settings: UniFi traffic log over syslog,
+  off by default; `src/syslog_receiver.py`).
+  - It listens only on the address and UDP port you set, and accepts only the
+    gateway's address. It never answers.
+  - It reads CEF (UniFi's SIEM output), iptables-style and key=value lines, and stores
+    each day as JSON lines under `data/unifi_logs/`, within 30 days and 500 MB.
+  - The new **Device traffic** page lists what each device reached and how often,
+    allowed or blocked, by its UniFi name, and exports any stored day.
+
 ## v1.12.0 — Your UniFi names, and no more false passwords
 
 **2266 unit tests** plus 14 integration checks. From 1.10.x or 1.11.0 this
