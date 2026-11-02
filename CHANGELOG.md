@@ -1,6 +1,10 @@
 # NetSentinel Changelog
 
-## Unreleased
+## v1.11.0 — Threat data you can see, CVE checks, and HTTPS back in view
+
+**2247 unit tests** plus 14 integration checks. From 1.10.x this installs from
+the Update button. After it, put a free abuse.ch key in Settings → Threat data
+to turn on URLhaus, ThreatFox and MalwareBazaar.
 
 - **A better browser dashboard.** The charts drew only what the page had seen
   since it opened, with no axes and no readout: a fresh page showed one line.
