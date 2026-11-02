@@ -69,3 +69,7 @@ netmon/data/
 
 # Claude Code local state (agent worktrees, settings)
 .claude/
+
+# Owner-specific notes and audits: names, MACs and addresses of his own network
+local-notes/
+unifi-audit-*.md
