@@ -294,6 +294,7 @@ class HeadlessServer:
             '/api/metrics': self._route_metrics,
             '/api/audit': self._route_audit,
             '/api/scan/ignored': self._route_scan_ignored,
+            '/api/sources': self._route_sources,
         }
         self.post_routes = {
             '/api/scan/new': self._post_scan_new,
@@ -420,7 +421,9 @@ class HeadlessServer:
             'uptime_sec': int(time.time() - start) if start and data.get('is_monitoring') else 0,
             'capture': {k: cap.get(k, 0) for k in (
                 'packets_captured', 'bytes_captured', 'packets_per_sec', 'bytes_per_sec',
-                'flows_active', 'packets_dropped', 'sample_rate', 'packets_sampled_out')},
+                'flows_active', 'packets_dropped', 'packets_dropped_cap',
+                'packets_dropped_queue', 'packets_shed', 'sample_rate',
+                'packets_sampled_out', 'max_pps')},
             'resources': data.get('resources') or {'available': False},
             'review': data.get('review') or {'enabled': False},
             'suppressed_alerts': data.get('suppressed_alerts', 0),
@@ -481,6 +484,11 @@ class HeadlessServer:
 
     def _post_scan_cancel(self, params, body, length):
         return self._scan_sessions().cancel(_str_param(params, 'id')), 200
+
+    def _route_sources(self, params):
+        """Every threat data source and whether it is in use (src/data_sources.py)."""
+        from src import data_sources
+        return {'sources': data_sources.collect(self.app)}, 'application/json'
 
     def _route_scan_ignored(self, params):
         return {'ignored': self._scan_sessions().ignored()}, 'application/json'

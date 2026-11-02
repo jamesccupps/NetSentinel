@@ -1,5 +1,59 @@
 # NetSentinel Changelog
 
+## Unreleased
+
+- **HTTPS was nearly invisible on installs from before September, and analysis
+  stopped at 500 packets a second.** A saved `config.json` keeps every value it
+  was first written with, so two fixed defaults never reached existing installs:
+  - The capture filter dropped every established HTTPS packet. Only the opening
+    SYN of each connection was seen, so the TLS hello, with its server name and
+    JA3/JA4, never was. Fixed in the defaults on 2026-09-24.
+  - `max_pps` stayed at the old 500: 6% of packets went unanalysed with the CPU
+    at 1%.
+
+  Both are now replaced once, at start, while they still hold the old default
+  exactly (`config.STALE_DEFAULTS`, recorded in `migrations.applied`), so a
+  value set on purpose stays.
+- **Over the cap, bulk data goes first.** It used to be whichever packets came
+  next, so a fast download took the lookups and handshakes of everything else
+  with it. Now a full data segment that told extraction nothing (no handshake,
+  server name, request or certificate) is counted to its flow but not
+  inspected. Everything else gets up to twice the cap. The dashboard shows why
+  packets went unanalysed: over twice the cap, a full queue, or bulk not
+  inspected.
+- **Threat data page.** The dashboard's new Threat data tab, and Settings →
+  Threat data → Threat data status, list every source with its state, last
+  update and size, and why it is not in use when it isn't. URLhaus had gone
+  unused since April, first for want of a key, then as too old to trust, with
+  nothing to say so.
+- **The abuse.ch key has a Settings field** (masked, saved as text). abuse.ch
+  closed its last keyless downloads on 2026-10-22. With the free key:
+  - URLhaus comes back.
+  - **ThreatFox** adds C2 addresses, matched on their listed port only, plus
+    domains, URLs and file hashes.
+  - **MalwareBazaar's** hash lists (last 48 hours every 6 hours, all weekly) go
+    to the folder file scans read.
+- **New feeds:**
+  - **Spamhaus DROP** (hijacked and criminal networks; credit and list date
+    shown).
+  - **CINS Army** (attacking hosts).
+  - **The Tor Project's relay list.** A connection to a running relay is now
+    IOC-TOR whatever its port, where it used to be a guess from port numbers.
+- **Listed networks are found by bisection,** about 8 µs a lookup with 1,800
+  networks, where every lookup used to scan them all.
+- **Known exploited vulnerabilities.** CISA's KEV catalog and NVD's affected
+  versions for it are downloaded daily. A LAN server whose `Server` header or
+  SSH, FTP or mail greeting names a version in a listed range raises VULN-KEV:
+  MEDIUM, or HIGH when ransomware is known to use the CVE. The network audit
+  reports AUDIT-KEV for the same thing. Alerts say when a distribution's build
+  may carry the fix, and internet servers are left alone. Settings → Threat
+  data turns it off (`vulns.enabled`).
+- **HTTP on a port no list names is called unencrypted HTTP:** LOW on the LAN,
+  MEDIUM to the internet. Home Assistant's 8123 was never named.
+- **netmon** read a segmented BACnet request's service from the wrong byte.
+- **Not added:** FoxIO's JA4DB. It went behind an enterprise sign-up in 2026,
+  with terms that forbid copying it.
+
 ## v1.10.1 — A fourth day of real alerts
 
 **2195 unit tests** plus 14 integration checks. The first release 1.10.0 can

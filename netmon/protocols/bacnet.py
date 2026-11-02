@@ -408,11 +408,10 @@ def _parse_apdu(reader, message):
     message.apdu_type = APDU_TYPES.get(apdu_type, f'apdu-{apdu_type}')
 
     if apdu_type == 0:                                  # Confirmed-Request
-        if first & 0x08:                                # segmented
-            if reader.u8() is None:                     # max segments/APDU
-                message.truncated = True
-                return
-        if reader.u8() is None:                         # max APDU accepted
+        # Max segments and max APDU share one octet (ASHRAE 135 clause 20.1.2),
+        # segmented or not. Reading a second one for a segmented request took
+        # the invoke ID for it, and the sequence number for the service.
+        if reader.u8() is None:                         # max segments / max APDU
             message.truncated = True
             return
         message.invoke_id = reader.u8()

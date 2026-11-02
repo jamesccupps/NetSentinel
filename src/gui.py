@@ -2650,6 +2650,7 @@ class NetSentinelGUI:
         ids_card.pack(fill='x', padx=8, pady=8)
 
         self._setting_widgets = {}
+        self._secret_widgets = {}
         ids_settings = [
             ('ids.port_scan_threshold', 'Port Scan Threshold (ports)', '15'),
             ('ids.port_scan_window_sec', 'Port Scan Window (sec)', '60'),
@@ -2707,6 +2708,24 @@ class NetSentinelGUI:
                               'Folder (blank: ~/.netsentinel/review)', '')
         self._add_setting_row(review_card, 'review.capture_budget_mb',
                               'Rolling capture budget (MB)', '2048')
+
+        intel_card = Card(scroll_frame, title="THREAT DATA (applies at next start)")
+        intel_card.pack(fill='x', padx=8, pady=(0, 8))
+        self._add_setting_secret(
+            intel_card, 'threat_intel.abuse_ch_auth_key', 'abuse.ch Auth-Key')
+        tk.Label(intel_card, text=(
+            "Free from auth.abuse.ch. Turns on URLhaus, ThreatFox and MalwareBazaar's "
+            "hash list. It is sent only to abuse.ch, with each download."),
+            font=('Segoe UI', 8), fg=COLORS['text_dim'], bg=COLORS['bg_card'],
+            anchor='w', justify='left', wraplength=560).pack(fill='x')
+        self._add_setting_toggle(
+            intel_card, 'vulns.enabled',
+            "Check devices' software against CISA's known exploited vulnerabilities "
+            "(downloads the list daily)", True)
+        tk.Button(intel_card, text="Threat data status", font=('Segoe UI', 9),
+                  bg=COLORS['bg_input'], fg=COLORS['text'], relief='flat', padx=12,
+                  cursor='hand2', command=self._show_threat_data
+                  ).pack(anchor='w', pady=4)
 
         geo_card = Card(scroll_frame, title="GEOIP (applies at next start)")
         geo_card.pack(fill='x', padx=8, pady=(0, 8))
@@ -2771,6 +2790,41 @@ class NetSentinelGUI:
         entry.pack(side='left', padx=8)
         self._setting_widgets[key] = entry
 
+    def _add_setting_secret(self, parent, key, label):
+        """A key, shown as dots and saved as text: the number cast in
+        _save_settings would turn an all-digit key into an int."""
+        row = tk.Frame(parent, bg=COLORS['bg_card'])
+        row.pack(fill='x', pady=3)
+        tk.Label(row, text=label, font=('Segoe UI', 9),
+                 fg=COLORS['text_dim'], bg=COLORS['bg_card'],
+                 width=30, anchor='w').pack(side='left')
+        entry = tk.Entry(row, bg=COLORS['bg_input'], fg=COLORS['text'],
+                         font=('Consolas', 9), relief='flat', show='•',
+                         insertbackground=COLORS['accent'], width=40)
+        entry.insert(0, str(self.app.config.get(*key.split('.'), default='') or ''))
+        entry.pack(side='left', padx=8)
+        self._secret_widgets[key] = entry
+
+    def _show_threat_data(self):
+        """Each source: in use or not, and why not (src/data_sources.py)."""
+        from src import data_sources
+        win = tk.Toplevel(self.root)
+        win.title("Threat data")
+        win.geometry("820x460")
+        win.configure(bg=COLORS['bg_dark'])
+        tree = ttk.Treeview(win, columns=('source', 'state', 'updated', 'entries', 'note'),
+                            show='headings')
+        for col, title, width in (('source', 'Source', 230), ('state', 'State', 80),
+                                  ('updated', 'Updated', 120), ('entries', 'Entries', 80),
+                                  ('note', 'Note', 300)):
+            tree.heading(col, text=title)
+            tree.column(col, width=width, anchor='w')
+        tree.pack(fill='both', expand=True, padx=8, pady=8)
+        for row in data_sources.collect(self.app):
+            tree.insert('', 'end', values=(
+                row['description'], row['state'], data_sources.when(row.get('updated')),
+                f"{row['entries']:,}" if row.get('entries') else '', row.get('note', '')))
+
     def _add_setting_toggle(self, parent, key, label, default):
         # A checkbox, because a text box saved "False" as a string, which is true.
         var = tk.BooleanVar(value=bool(self.app.config.get(*key.split('.'), default=default)))
@@ -2798,6 +2852,8 @@ class NetSentinelGUI:
             except ValueError:
                 pass
             self.app.config.set(*parts, val)
+        for key, entry in self._secret_widgets.items():
+            self.app.config.set(*key.split('.'), entry.get().strip())
 
         # Save blacklist
         bl_text = self._blacklist_text.get('1.0', 'end').strip()

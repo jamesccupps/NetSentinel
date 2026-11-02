@@ -9,7 +9,10 @@ and what is left. Keep it current during long work (the owner asked for that).
   a Tk desktop GUI, a browser dashboard served at `http://127.0.0.1:8737/`, and a
   headless mode (`--headless`). Packet capture via Scapy + Npcap, signature IDS
   (`src/ids_engine.py`, `rules/`), LAN detections (`src/lan_threats.py`), ML anomaly
-  detection, threat feeds (`src/threat_intel.py`, `src/cloud_ranges.py`), opt-in
+  detection, threat feeds (`src/threat_intel.py`, `src/cloud_ranges.py`; every
+  source's state for the Threat data page in `src/data_sources.py`), known
+  exploited vulnerabilities matched to device banners (`src/vulns.py`, CISA KEV
+  with NVD's version ranges), opt-in
   GeoIP (`src/geoip.py`), forensics, PCAP analysis, and file/folder/archive scanning
   for leaked secrets, scripts and indicators (`src/file_scan.py`, `src/batch_scan.py`,
   `src/archives.py`, `src/script_rules.py`, `src/scan_ignore.py`).
@@ -71,6 +74,8 @@ The signing key's private half never goes in the repo, a prompt or a log;
 - Commit messages: a plain subject, then a body that says what was wrong and why
   the change is right. Comments explain why, not what; match the file you are in.
 - Every fix gets a test that would have caught it. Run the full suite before pushing.
+- Changing a default in `DEFAULT_CONFIG`? Every saved `config.json` keeps the old
+  one: add it to `config.STALE_DEFAULTS` if existing installs should get the new.
 - Anything that came off the network or out of a scanned file is untrusted:
   the dashboard puts it on the page with `textContent`, never `innerHTML`.
 
@@ -100,7 +105,9 @@ The signing key's private half never goes in the repo, a prompt or a log;
 - Review bundles leave the machine: by default no payloads, pcaps, query strings,
   cookies, credentials or tokens, and every file passes the secret audit.
 - Threat data is downloaded and checked locally; nothing about the owner's
-  traffic or files is sent out for lookups. The update check
+  traffic or files is sent out for lookups. That includes KEV and NVD: whole
+  downloads, matched here. The abuse.ch Auth-Key rides in the download URL, so
+  a keyed feed's URL never goes in a log line or an error message. The update check
   (`updates.check`) sends GitHub only NetSentinel's version, and an update is
   installed only when the owner clicks, after its signature verifies. (Owner's
   decision, 2026-11-01.)

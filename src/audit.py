@@ -1258,6 +1258,18 @@ def _finding(fid, severity, host, port, title, why, fix, evidence=None):
     }
 
 
+def _vuln_catalog():
+    """The known exploited vulnerability data, if downloaded (src/vulns.py). The
+    audit only reads it: matching sends nothing anywhere."""
+    try:
+        from src import vulns
+        catalog = vulns.get_catalog()
+        return catalog if catalog.ready else None
+    except Exception as e:
+        logger.debug("Vulnerability data unavailable: %s", e)
+        return None
+
+
 def _host_findings(host, warn_days):
     out = []
     services = {s['port']: s for s in host['services']}
@@ -1292,10 +1304,27 @@ def _host_findings(host, warn_days):
                 'AUDIT-SMB', 'LOW', host, port, 'SMB file sharing is open',
                 why + ' If this host is not a file server, nothing should reach it over SMB.',
                 fix, {'smb_ports': smb_ports, 'role': role}))
+    catalog = _vuln_catalog()
     for port in sorted(open_ports):
         svc = services[port]
         http = svc.get('http') or {}
         tls = svc.get('tls') or {}
+        announced = ' '.join(filter(None, (svc.get('banner'), http.get('server'))))
+        matches = catalog.match(announced) if catalog is not None else []
+        if matches:
+            from src import vulns
+            first = matches[0]
+            out.append(_finding(
+                'AUDIT-KEV', 'HIGH' if any(m['ransomware'] for m in matches) else 'MEDIUM',
+                host, port,
+                f"{first['product']} {first['version']} has known exploited vulnerabilities",
+                (f"The version this service announces is in the range NVD lists for "
+                 f"{vulns.describe(matches)}. CISA lists them as exploited in the wild. "
+                 + vulns.caveat(matches)),
+                (f"Update {first['product']}, or the device's firmware. "
+                 f"{first['required_action']}").strip(),
+                {'announced': announced[:200], 'cves': [m['cve'] for m in matches[:20]],
+                 'source': vulns.NVD_NOTICE}))
         if http and not tls and _looks_admin(http) and not http.get('redirect_https'):
             basic = http.get('auth') == 'basic'
             _, fix80 = _advice(80)

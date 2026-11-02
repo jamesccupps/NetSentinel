@@ -1057,6 +1057,12 @@ class NetworkForensics:
 
         # IPs that have active TLS/HTTPS sessions
         self._tls_ips = set()  # {ip} — IPs we've seen on port 443
+        # (ip, port) sent an HTTP request on a port INSECURE_PROTOCOLS lacks
+        self._odd_http_servers = set()
+        # What LAN servers say they run (headers, greetings), once per server,
+        # for the app to check against known exploited vulnerabilities.
+        self.software_seen = deque(maxlen=256)
+        self._greeted = set()
 
         # DNS resolution map: IP → domains
         self._ip_to_domains = defaultdict(set)  # {ip: {domain1, domain2}}
@@ -1109,7 +1115,8 @@ class NetworkForensics:
 
     def _bound_context(self):
         """The session-context maps grow per address; clear them past a cap."""
-        for store in (self._tls_ips, self._cdn_ips, self._ip_to_domains,
+        for store in (self._tls_ips, self._odd_http_servers, self._greeted,
+                      self._cdn_ips, self._ip_to_domains,
                       self._dual_port_ips, self._http_methods, self._http_has_form_fields,
                       self._mdns_responders, self._llmnr_responders):
             if len(store) > MAX_CONTEXT_IPS:
@@ -1213,22 +1220,48 @@ class NetworkForensics:
         self._seen_on[key] = ts
         return False
 
+    def _odd_port_http(self, pkt_info, port):
+        """
+        The service entry for HTTP on a port INSECURE_PROTOCOLS does not name,
+        once a request line has been sent to it; else None. Home Assistant's 8123
+        is plain HTTP and was never called so. LOW on the LAN, where devices
+        serve their pages on all sorts of ports; MEDIUM to the internet.
+        """
+        if not port or port in INSECURE_PROTOCOLS or pkt_info.protocol != 'TCP':
+            return None
+        key = (pkt_info.dst_ip, port)
+        if key not in self._odd_http_servers:
+            payload = pkt_info._raw_payload
+            if not (payload and HTTP_REQUEST_RE.match(payload)):
+                return None
+            self._odd_http_servers.add(key)
+        internal = is_private_address(pkt_info.dst_ip)
+        return {'name': 'HTTP', 'risk': 'LOW' if internal else 'MEDIUM',
+                'desc': (f'Unencrypted HTTP on port {port}: pages, logins and tokens '
+                         'sent to it can be read on the way'),
+                'advice_port': 80}
+
     def _check_insecure_protocol(self, pkt_info):
         """Flag insecure protocol usage."""
         port, _ = service_ports(pkt_info)
-        if (port in INSECURE_PROTOCOLS and pkt_info.payload_size > 0
-                and runs_over(port, pkt_info.protocol)):
+        service = (INSECURE_PROTOCOLS[port] if port in INSECURE_PROTOCOLS
+                   and runs_over(port, pkt_info.protocol) else None)
+        if service is None and pkt_info.payload_size > 0:
+            service = self._odd_port_http(pkt_info, port)
+        if service is not None and pkt_info.payload_size > 0:
             self.unencrypted_packets += 1
             key = (pkt_info.dst_ip, port)
             if key not in self.insecure_services:
-                service = INSECURE_PROTOCOLS[port]
+                advice_port = service.get('advice_port', port)
                 self.insecure_services[key] = {
                     'ip': pkt_info.dst_ip,
                     'port': port,
+                    'advice_port': advice_port,
                     'service': service['name'],
                     'risk': service['risk'],
                     'description': service['desc'],
-                    'secure_alternative': SECURE_EQUIVALENTS.get(port, 'Use encrypted version'),
+                    'secure_alternative': SECURE_EQUIVALENTS.get(advice_port,
+                                                                 'Use encrypted version'),
                     'first_seen': pkt_info.timestamp,
                     'packet_count': 0,
                     'bytes': 0,
@@ -1269,6 +1302,17 @@ class NetworkForensics:
         src = pkt_info.src_ip
         dst = pkt_info.dst_ip
         port, sport = service_ports(pkt_info)
+
+        # A LAN server's greeting names its software: SSH says it first, and FTP
+        # and mail servers open with a 220 line. Kept once per server. A client
+        # sends "SSH-" too, so for SSH the sender must be known to be the server.
+        greeting = payload[:4]
+        if (sport and pkt_info.protocol == 'TCP' and greeting in (b'SSH-', b'220 ', b'220-')
+                and (greeting != b'SSH-' or getattr(pkt_info, 'server_port', 0) == sport)
+                and (src, sport) not in self._greeted and is_private_address(src)):
+            self._greeted.add((src, sport))
+            line = payload.split(b'\n', 1)[0][:200].decode('utf-8', errors='replace').strip()
+            self.software_seen.append({'ip': src, 'port': sport, 'timestamp': ts, 'text': line})
 
         # ─── FTP Credentials ─────────────────────────────────
         if port == 21 or sport == 21:
@@ -2479,6 +2523,8 @@ class NetworkForensics:
             return
 
         self._http_servers[server_key] = findings
+        self.software_seen.append({'ip': src, 'port': sport, 'timestamp': ts,
+                                   'text': ' '.join(str(v) for v in findings.values())})
 
         # Check for particularly dangerous disclosures
         risk = 'LOW'

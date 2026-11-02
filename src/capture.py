@@ -89,6 +89,27 @@ def parse_http_request(payload):
     return method, host, path
 
 
+# DNS and mDNS: small, and the lookups name what comes next.
+_NAME_PORTS = frozenset({53, 5353, 5355})
+
+
+def _sheddable(info):
+    """
+    Whether a packet is the one to skip when analysis is over its cap: a full
+    data segment that told extraction nothing. Handshakes, lookups, requests,
+    server names and certificates are what the rules read; the middle of a
+    download is not.
+    """
+    if info.protocol not in ('TCP', 'UDP') or info.payload_size < 512:
+        return False
+    if info.protocol == 'TCP' and any(f in (info.flags or '') for f in 'SFR'):
+        return False
+    if info.src_port in _NAME_PORTS or info.dst_port in _NAME_PORTS:
+        return False
+    return not (info.tls_sni or info.tls_ja3 or info.http_method or info.app_protocol
+                or info.dns_query or info._tls_certs)
+
+
 def _looks_like_stratum(payload):
     """Plaintext Stratum (mining pool JSON-RPC): cheap enough for the packet path."""
     if not payload or payload[:1] != b'{':
@@ -115,7 +136,7 @@ class PacketInfo:
         'dns_rcode', 'dns_ttl', 'dns_answers', 'dns_qtype',
         'arp_op', 'arp_hwsrc', 'icmp_type',
         'http_method', 'http_host', 'http_path', 'app_protocol',
-        'sample_weight', 'server_port',
+        'sample_weight', 'server_port', 'account_only',
         '_raw_payload', '_tls_certs',
     ]
 
@@ -167,6 +188,8 @@ class PacketInfo:
         # TCP only: the port of the end that accepted the connection, 0 if unknown
         # (see TcpRoles). Rules that name a service by its port go by this one.
         self.server_port = 0
+        # Bulk data past the analysis cap: counted to its flow, not inspected.
+        self.account_only = False
         self._raw_payload = None
         self._tls_certs = ()       # DER certificates from a TLS <= 1.2 server flight
 
@@ -476,7 +499,10 @@ class CaptureEngine:
         # Queue-based processing: capture thread enqueues, worker dequeues
         import queue
         self._packet_queue = queue.Queue(maxsize=2000)
-        self._dropped_packets = 0
+        self._dropped_packets = 0       # not analysed at all: the two below
+        self._dropped_cap = 0           # over twice max_pps
+        self._dropped_queue = 0         # the queue was full
+        self._shed_packets = 0          # bulk data over max_pps: counted, not inspected
 
         # Sampling: under load, only process 1 in N packets for IDS
         # (stats always count everything)
@@ -502,6 +528,12 @@ class CaptureEngine:
             'top_talkers': defaultdict(int),
             'dns_queries': deque(maxlen=1000),
             'packets_dropped': 0,
+            # Why: over twice the analysis cap, or a full queue. One number
+            # could not say which, and the cap was the cause.
+            'packets_dropped_cap': 0,
+            'packets_dropped_queue': 0,
+            # Bulk data over the cap, counted to its flow and not inspected.
+            'packets_shed': 0,
             # Packets adaptive sampling kept from the rules. Counted apart from
             # drops: they were captured and tracked, just not inspected.
             'packets_sampled_out': 0,
@@ -520,7 +552,8 @@ class CaptureEngine:
 
         # Hard PPS cap: never enqueue more than this many packets per second
         # Prevents CPU saturation during heavy traffic (browsing, streaming)
-        self._max_pps = config.get('capture', 'max_pps', default=500)
+        self._max_pps = config.get('capture', 'max_pps', default=2000)
+        self.stats['max_pps'] = self._max_pps
         self._pps_window_count = 0
         self._pps_window_start = 0
 
@@ -839,14 +872,23 @@ class CaptureEngine:
                 self._pps_window_count = 0
             self._pps_window_count += 1
 
+            # Over the cap, bulk data goes first. It used to be whatever came
+            # next: a download over 500 a second took the lookups and handshakes
+            # of everything else with it. A bulk segment is still counted to its
+            # flow, just not inspected; anything else gets up to twice the cap.
             if self._pps_window_count > self._max_pps:
-                self._dropped_packets += 1
-                return  # Skip this packet entirely — stats already counted
+                if _sheddable(pkt_info):
+                    pkt_info.account_only = True
+                elif self._pps_window_count > 2 * self._max_pps:
+                    self._dropped_cap += 1
+                    self._dropped_packets += 1
+                    return
 
             # If queue is full, drop the packet (better than blocking capture)
             try:
                 self._packet_queue.put_nowait(pkt_info)
             except Exception:
+                self._dropped_queue += 1
                 self._dropped_packets += 1
 
         except Exception as e:
@@ -895,6 +937,9 @@ class CaptureEngine:
                     self._sample_rate = 1  # Process all
                 self.stats['sample_rate'] = self._sample_rate
                 self.stats['packets_dropped'] = self._dropped_packets
+                self.stats['packets_dropped_cap'] = self._dropped_cap
+                self.stats['packets_dropped_queue'] = self._dropped_queue
+                self.stats['packets_shed'] = self._shed_packets
                 self.stats['packets_sampled_out'] = self._sampled_out
 
                 for pkt_info in batch:
@@ -916,6 +961,10 @@ class CaptureEngine:
                                 if key in self.flows:
                                     self.flows[key].add_packet(pkt_info)
                             self.stats['flows_active'] = len(self.flows)
+
+                        if getattr(pkt_info, 'account_only', False):
+                            self._shed_packets += 1
+                            continue
 
                         # IDS / ML callback (sampling under load). A skipped packet
                         # is counted, and the one that goes through carries the
@@ -1190,8 +1239,10 @@ class CaptureEngine:
                       self._cleanup_thread, self._procmap_thread):
                 if t is not None and t.is_alive() and t is not threading.current_thread():
                     t.join(timeout=5)
-            logger.info("Capture engine stopped. Dropped packets: %d, sampled out: %d",
-                        self._dropped_packets, self._sampled_out)
+            logger.info("Capture engine stopped. Dropped packets: %d (%d over twice the cap, "
+                        "%d queue full); bulk not inspected: %d; sampled out: %d",
+                        self._dropped_packets, self._dropped_cap, self._dropped_queue,
+                        self._shed_packets, self._sampled_out)
 
     def get_flows_snapshot(self):
         """Return a snapshot of current flows for analysis."""

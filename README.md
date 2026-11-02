@@ -46,6 +46,21 @@ TLS stack stands out even when everything it sends is encrypted.
 
 **GeoIP** — optional country and network operator for destinations, looked up on this machine. IP Geolocation by [DB-IP](https://db-ip.com), CC BY 4.0.
 
+**Threat data** — the lists NetSentinel matches against are downloaded whole and checked on this machine; nothing about your traffic is sent out. The dashboard's **Threat data** page (and Settings → Threat data → **Threat data status**) shows each one: in use or not, when it last updated, how many entries, and why not when it isn't.
+
+| Source | What it lists | Updated |
+|---|---|---|
+| abuse.ch Feodo Tracker, SSL Blacklist | Botnet C2 servers, hosts with malicious certificates | 6–12 h |
+| abuse.ch URLhaus, ThreatFox, MalwareBazaar | Malware URLs; C2 addresses (with their port), domains and URLs; malware file hashes for file scans. **Need a free [abuse.ch Auth-Key](https://auth.abuse.ch/)** (Settings → Threat data), for not-for-profit use | 6 h; full hash list weekly |
+| Emerging Threats, DShield, blocklist.de, CINS Army | Hosts seen attacking or compromised | 4–12 h |
+| [Spamhaus DROP](https://www.spamhaus.org/blocklists/do-not-route-or-peer/) | Hijacked and criminal networks. Data: The Spamhaus Project | daily |
+| Tor Project relay list | Running Tor relays, so a Tor connection is known for what it is | 6 h |
+| WhoisDS | Newly registered domains | daily |
+| [CISA KEV](https://www.cisa.gov/known-exploited-vulnerabilities-catalog) with NVD's version ranges | Vulnerabilities known to be exploited, matched against what devices here say they run | daily |
+| Bundled with each release | Cloud and CDN ranges, mining pools, IDS rules | with releases |
+
+**Known exploited vulnerabilities** — when a device on your network announces its software (a web server's `Server` header, an SSH, FTP or mail server's greeting), in traffic or to the network audit, its version is checked against CISA's list of vulnerabilities being exploited, using NVD's affected-version ranges. A match is a reason to check, not proof: a banner can hide its version, and Linux distributions patch old version numbers in place, which the alert points out. Internet servers are left alone. This product uses the NVD API but is not endorsed or certified by the NVD.
+
 **Scan files for leaks** — drop any files, folders or zips on the dashboard's **Scan Files** page, or use **Scan Files / Zips** and **Scan Folder** in the desktop app's File Analyzer tab. Logs, configs, documents (Word, Excel, PDF), exports and packet captures all work. Archives (zip, 7z, tar, gzip and the like, nested), Windows event logs and Office macros are opened too. You get every IP address, domain, URL, email, MAC address, host name and UNC path in them, which files held each one, any the threat feeds know as bad, every password, key, token or card number that looks leaked, masked, with file and line, suspicious scripts such as encoded PowerShell, and files whose SHA-256 is on your known-bad lists. Anything can be put on an ignore list. Packet captures also get the full traffic analysis. Command line: `python -m src.batch_scan PATH... [--skip GLOB] [--json]`.
 
 ## Quick Start
@@ -194,6 +209,12 @@ Configuration lives in `~/.netsentinel/config.json` (created on first run with d
 | `capture` | `pcap_on_alert_severity` | CRITICAL | Minimum severity that triggers a save |
 | `capture` | `pcap_on_alert_seconds` | 60 | Seconds of buffered traffic to save |
 | `capture` | `alert_min_free_mb` | 1024 | Alert captures are never deleted; below this much free disk, new ones are skipped |
+| `threat_intel` | `abuse_ch_auth_key` | `""` | Free key from auth.abuse.ch: URLhaus, ThreatFox, MalwareBazaar |
+| `vulns` | `enabled` | true | Check devices' software against known exploited vulnerabilities |
+
+An old default that a saved `config.json` kept is replaced once, at start, when a
+later version changed it: the capture filter that hid HTTPS until September 2026,
+and the 500 packets a second analysis cap. A value you set yourself stays.
 
 Every key in `config.json` is read by the code. If you set something, it takes effect.
 
@@ -253,9 +274,14 @@ Data files are created `0700`/`0600` where the platform supports it. See
 
 Worth knowing before you rely on a detector:
 
-- **`capture.max_pps` caps processing at 2000 packets per second.** Raise it if you
-  need full visibility on a busy link; the pipeline measures ~72 µs/packet, so 2000
-  pps is roughly 15% of one core.
+- **`capture.max_pps` caps processing at 2000 packets per second.** Past it, the
+  middle of a download is counted to its flow but not inspected ("Bulk data not
+  inspected" on the dashboard), and everything else gets up to twice the cap before
+  any is dropped. Raise it if you need full visibility on a busy link; the pipeline
+  measures ~72 µs/packet, so 2000 pps is roughly 15% of one core.
+- **JA4 fingerprints are not matched against a list.** FoxIO's JA4DB went behind an
+  enterprise sign-up in 2026, with terms that forbid copying it; `ids.blocked_ja4`
+  takes your own.
 - **A desktop sees mostly its own traffic.** Lateral movement, rogue DHCP and the
   like between other machines are only visible with a mirror (SPAN) port.
 - **TLS payload stays opaque.** NetSentinel reads the handshake, not the content.
@@ -325,6 +351,8 @@ NetSentinel/
 │   ├── baseline_whitelist.py # Learns normal traffic patterns automatically
 │   ├── pcap_writer.py        # Ring buffer + PCAP export + continuous recording
 │   ├── threat_intel.py       # Threat feed downloader and matcher
+│   ├── vulns.py              # CISA KEV + NVD ranges, matched to device banners
+│   ├── data_sources.py       # Every threat data source and its state
 │   ├── ioc_scanner.py        # Indicators of compromise (process, port, behavior)
 │   ├── net_detect.py         # Network environment auto-detection
 │   ├── process_verify.py     # Deep process investigation (signatures, hashes)

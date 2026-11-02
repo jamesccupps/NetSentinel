@@ -372,6 +372,32 @@ class IOCScanner:
                 },
             })
 
+        # A connection to a running relay's OR port is Tor, whatever the port:
+        # relays listen on 443 and 9001 alike. Only from the relay list, and only
+        # where the relay is the server.
+        is_tor_relay = getattr(self.threat_intel, 'is_tor_relay', None)
+        if (pkt_info.protocol == 'TCP' and is_tor_relay is not None
+                and server in (0, pkt_info.dst_port)
+                and is_tor_relay(pkt_info.dst_ip, pkt_info.dst_port)
+                and self._hold(f"IOC-TOR:{pkt_info.src_ip}:{pkt_info.dst_ip}", now)):
+            findings.append({
+                'rule_id': 'IOC-TOR',
+                'severity': 'HIGH',
+                'title': 'Connection to the Tor Network',
+                'description': (f'{pkt_info.src_ip} connected to a Tor relay at '
+                                f'{pkt_info.dst_ip}:{pkt_info.dst_port}'),
+                'evidence': {
+                    'destination': f'{pkt_info.dst_ip}:{pkt_info.dst_port}',
+                    'relay': 'on the Tor Project\'s list of running relays (Onionoo)',
+                    'process': pkt_info.process_name or 'Unknown',
+                    'description': 'This is Tor itself, not a guess from a port: the '
+                        'address is a running relay. Tor Browser does this, and so '
+                        'does malware hiding its command server.',
+                    'recommendation': 'If you or someone here uses Tor Browser, this is '
+                        'expected. If not, find the process making the connection.',
+                },
+            })
+
         # ─── DGA Detection (high-entropy domains) ────────────
         # Queries only: a response repeats the name, which counted it twice.
         if pkt_info.dns_query and getattr(pkt_info, 'dns_rcode', -1) < 0:

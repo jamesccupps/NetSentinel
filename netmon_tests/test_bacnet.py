@@ -112,6 +112,15 @@ class TestServiceNamespaces(unittest.TestCase):
         self.assertEqual(message.service, 'confirmed-200')
         self.assertFalse(message.is_write)
 
+    def test_a_segmented_request_reads_its_service_after_sequence_and_window(self):
+        """A second max-APDU byte was read for segmented requests, so the
+        invoke ID went for it and the sequence number (0) became AcknowledgeAlarm."""
+        apdu = bytes([0x08, 0x05, 9, 0x00, 0x04, 16])   # SEG; invoke 9; seq 0; window 4
+        message = parse(bvlc(0x0A, npdu() + apdu + object_id(2, 7)))
+        self.assertEqual(message.invoke_id, 9)
+        self.assertEqual(message.service, 'WritePropertyMultiple')
+        self.assertTrue(message.is_write)
+
 
 # ─── Commands ────────────────────────────────────────────────────────────────
 

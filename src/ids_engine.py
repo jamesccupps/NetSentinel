@@ -652,6 +652,11 @@ class IDSEngine:
                     (pkt_info.dst_ip, pkt_info.dst_port, pkt_info.src_ip, pkt_info.src_port))
             for ip_field, ip_port, peer_ip, peer_port in ends:
                 result = self._cached_ti_check('ip', ip_field)
+                # A C2 listed with its port (ThreatFox's ip:port) is that service:
+                # the same address on another port is a hosting provider's next
+                # tenant, or the provider itself.
+                if result and result.get('ports') and ip_port not in result['ports']:
+                    result = None
                 if result:
                     # Which end is the server: the lower port, when there are ports.
                     if ip_port and peer_port:

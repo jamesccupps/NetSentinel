@@ -242,6 +242,29 @@ DEFAULT_CONFIG = {
         # Format: {"name": "...", "ip": "...", "mac": "...", "type": "...", "expected_ports": [...]}
         "devices": [],
     },
+    "vulns": {
+        # CISA's Known Exploited Vulnerabilities, with NVD's affected versions,
+        # downloaded daily and matched here against the software devices on this
+        # network announce (src/vulns.py). Nothing about them is sent out.
+        "enabled": True,
+        "auto_update": True,
+    },
+    "migrations": {
+        "applied": [],                  # STALE_DEFAULTS already handled
+    },
+}
+
+# Defaults a saved config froze in place. save() writes every value, so a
+# default changed in a later version never reached an install that had saved
+# once: the capture filter that hid HTTPS was fixed in September, and the
+# owner's 1.10.1 still ran it, with analysis capped at the old 500 packets a
+# second. Each is replaced once, only while it still holds that old default,
+# and recorded in migrations.applied so a value set on purpose later stays.
+STALE_DEFAULTS = {
+    'capture-bpf-filter-2026-09': (
+        'capture', 'bpf_filter',
+        'not (port 443 and tcp[tcpflags] & tcp-ack != 0 and tcp[tcpflags] & tcp-syn == 0)'),
+    'capture-max-pps-1.5': ('capture', 'max_pps', 500),
 }
 
 
@@ -267,14 +290,35 @@ class Config:
                     saved = json.load(f)
                 self._data = self._deep_merge(DEFAULT_CONFIG, saved)
                 logger.info("Configuration loaded from %s", CONFIG_FILE)
+                if self._migrate():
+                    self.save()
             except Exception as e:
                 logger.error("Failed to load config: %s. Using defaults.", e)
                 self._data = copy.deepcopy(DEFAULT_CONFIG)
         else:
             self._data = copy.deepcopy(DEFAULT_CONFIG)
+            # A new install has today's defaults: nothing old to replace, and a
+            # value chosen later must not be taken for an old default.
+            self._data['migrations']['applied'] = sorted(STALE_DEFAULTS)
             self.save()
             logger.info("Default configuration created at %s", CONFIG_FILE)
         return self
+
+    def _migrate(self):
+        """Replace old defaults a saved config froze (STALE_DEFAULTS), once each.
+        True if anything was recorded."""
+        applied = set(self.get('migrations', 'applied', default=None) or ())
+        self._data.setdefault('migrations', {})
+        pending = [m for m in sorted(STALE_DEFAULTS) if m not in applied]
+        for name in pending:
+            section, key, old = STALE_DEFAULTS[name]
+            if self._data.get(section, {}).get(key) == old:
+                self._data[section][key] = copy.deepcopy(DEFAULT_CONFIG[section][key])
+                logger.warning("Replaced the old default %s.%s with today's (%s).",
+                               section, key, name)
+            applied.add(name)
+        self._data['migrations']['applied'] = sorted(applied)
+        return bool(pending)
 
     def save(self):
         """Persist current config to disk (atomically; contains the VirusTotal key)."""

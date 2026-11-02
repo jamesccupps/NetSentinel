@@ -264,7 +264,11 @@ async function refreshOverview() {
     ['CPU', res.available ? `${res.cpu_percent}%${res.low_priority ? ' (low priority)' : ''}` : '—'],
     ['Memory', res.available ? fmtBytes(res.rss_bytes) : '—'],
     ['Threads', res.available ? fmtNum(res.threads) : '—'],
-    ['Packets dropped', fmtNum(o.capture.packets_dropped)],
+    ['Packets dropped', o.capture.packets_dropped
+      ? `${fmtNum(o.capture.packets_dropped)} (${fmtNum(o.capture.packets_dropped_cap)} over twice the cap, `
+        + `${fmtNum(o.capture.packets_dropped_queue)} queue full)` : '0'],
+    ['Bulk data not inspected', o.capture.packets_shed
+      ? `${fmtNum(o.capture.packets_shed)} (over ${fmtNum(o.capture.max_pps)} a second; counted, not read)` : '0'],
     ['Analysing', rate > 1 ? `1 in ${rate} packets (busy)` : 'Every packet'],
     ['Skipped by sampling', fmtNum(o.capture.packets_sampled_out)],
   ];
@@ -357,6 +361,32 @@ async function refreshIncidents() {
         (i.source_ips || []).slice(0, 5).join(', '),
         (i.categories || []).join(', ')].filter(Boolean).join('  ·  ')))));
   if (!data.incidents.length) list.append(h('div', { class: 'empty' }, 'No correlated incidents.'));
+}
+
+// ─── Threat data ─────────────────────────────────────────────────────────
+
+const SOURCE_STATES = { ok: 'In use', bundled: 'Bundled', stale: 'Too old', 'needs key': 'Needs key',
+  off: 'Off', failed: 'Failed', waiting: 'Waiting' };
+const SOURCE_COLOURS = { ok: 'LOW', bundled: 'LOW', stale: 'HIGH', 'needs key': 'MEDIUM',
+  off: 'private', failed: 'HIGH', waiting: 'MEDIUM' };
+
+function fmtUpdated(u) {
+  if (!u) return '';
+  if (typeof u === 'number') return new Date(u * 1000).toLocaleString();
+  return String(u);
+}
+
+async function refreshSources() {
+  const data = await api('/api/sources');
+  const rows = data.sources.map((s) => h('tr', null,
+    h('td', null, s.description || s.name),
+    h('td', null, h('span', { class: `badge ${SOURCE_COLOURS[s.state] || 'private'}` },
+      SOURCE_STATES[s.state] || s.state)),
+    h('td', { class: 'mono' }, fmtUpdated(s.updated)),
+    h('td', null, s.entries ? fmtNum(s.entries) : ''),
+    h('td', { class: 'wrap' }, s.note || '')));
+  $('source-table').replaceWith(Object.assign(
+    table(['Source', 'State', 'Updated', 'Entries', 'Note'], rows), { id: 'source-table' }));
 }
 
 // ─── Scan files ──────────────────────────────────────────────────────────
@@ -855,6 +885,7 @@ const PAGES = {
   incidents: { refresh: refreshIncidents, every: 10000 },
   scan: { refresh: refreshIgnored, every: 10000 },
   audit: { refresh: refreshAudit, every: 2000 },
+  sources: { refresh: refreshSources, every: 30000 },
 };
 let current = null, timer = null;
 

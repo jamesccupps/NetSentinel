@@ -23,6 +23,7 @@
     <a href="#incidents" data-page="incidents">Incidents</a>
     <a href="#scan" data-page="scan">Scan Files</a>
     <a href="#audit" data-page="audit">Audit</a>
+    <a href="#sources" data-page="sources">Threat data</a>
   </nav>
   <div class="status" id="status"><span class="dot"></span><span class="label">Connecting…</span></div>
   <button type="button" id="monitor-toggle" hidden>Start</button>
@@ -92,6 +93,17 @@
       </div>
     </div>
     <div id="audit-report"></div>
+  </section>
+
+  <section class="page" id="page-sources" hidden>
+    <div class="panel">
+      <h2>Threat data</h2>
+      <p class="hint">What NetSentinel matches your traffic and files against. Lists are
+        downloaded whole and checked on this machine: nothing about your traffic is sent
+        out. Bundled data changes only with a release. A key, and which sources are on, are
+        set in the desktop app: Settings → Threat data.</p>
+    </div>
+    <div class="panel flush"><div class="table-wrap"><table id="source-table"></table></div></div>
   </section>
 
   <section class="page" id="page-scan" hidden>

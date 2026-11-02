@@ -75,6 +75,7 @@ def reset_config(**overrides):
     cfg = Config().load()
     cfg.set('threat_intel', 'auto_update', False)
     cfg.set('updates', 'check', False)
+    cfg.set('vulns', 'auto_update', False)
     for section_key, value in overrides.items():
         section, key = section_key.split('.', 1)
         cfg.set(section, key, value)

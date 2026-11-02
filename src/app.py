@@ -96,6 +96,13 @@ class NetSentinelApp:
         from src.threat_intel import ThreatIntelEngine
         self.threat_intel = ThreatIntelEngine(self.config)
 
+        # Known exploited vulnerabilities, matched against what LAN servers say
+        # they run. Downloaded daily in the background (src/vulns.py).
+        from src import vulns
+        self.vulns = vulns.get_catalog(self.config)
+        self.vulns.start_updating()
+        self._vulns_alerted = {}       # (ip, port, cves) -> last alert
+
         # Process Verifier: deep process investigation
         from src.process_verify import ProcessVerifier
         self.process_verifier = ProcessVerifier(self.config)
@@ -614,10 +621,66 @@ class NetSentinelApp:
                 del seen[k]
         return False
 
+    def _check_software_seen(self, now=None):
+        """
+        A VULN-KEV alert for each LAN server whose announced software and version
+        fall in a range NVD lists for a vulnerability CISA says is exploited.
+        Once a day per server and set of CVEs.
+        """
+        forensics = getattr(self, 'forensics', None)
+        catalog = getattr(self, 'vulns', None)
+        if not getattr(forensics, 'software_seen', None):
+            return
+        from src import vulns
+        from src.ids_engine import Alert
+        while forensics.software_seen:
+            seen = forensics.software_seen.popleft()
+            if catalog is None or not catalog.ready:
+                continue
+            matches = catalog.match(seen['text'])
+            if not matches:
+                continue
+            now = now or time.time()
+            key = (seen['ip'], seen['port'], tuple(sorted(m['cve'] for m in matches)))
+            if now - self._vulns_alerted.get(key, 0) < 86400:
+                continue
+            self._vulns_alerted[key] = now
+            if len(self._vulns_alerted) > 2048:
+                cutoff = now - 86400
+                self._vulns_alerted = {k: t for k, t in self._vulns_alerted.items()
+                                       if t >= cutoff}
+            first = matches[0]
+            label = f"{first['product']} {first['version']}"
+            self._alert_gateway(Alert(
+                rule_id='VULN-KEV',
+                severity='HIGH' if any(m['ransomware'] for m in matches) else 'MEDIUM',
+                title=f"Known exploited vulnerability: {label}",
+                description=(f"{seen['ip']}:{seen['port']} says it runs {label}, a version "
+                             f"NVD lists for {vulns.describe(matches, 3)}. CISA lists "
+                             f"{'it' if len(matches) == 1 else 'these'} as exploited."),
+                dst_ip=seen['ip'], dst_port=seen['port'],
+                category='Vulnerability',
+                evidence={
+                    'software': label,
+                    'announced': seen['text'][:200],
+                    'server': f"{seen['ip']}:{seen['port']}",
+                    'cves': [{k: m[k] for k in ('cve', 'name', 'date_added', 'ransomware',
+                                                'every_version')} for m in matches[:10]],
+                    'cve_count': len(matches),
+                    'recommendation': (
+                        f"Update {first['product']} on {seen['ip']}, or the firmware of the "
+                        f"device it runs on. {first['required_action']} "
+                        f"{vulns.caveat(matches)}").strip(),
+                    'source': vulns.NVD_NOTICE,
+                },
+            ))
+
     def _check_forensics_alerts(self):
         """Generate alerts for new forensics findings (credentials, insecure services)."""
         from src.ids_engine import Alert
         from src.forensics import credential_alert
+
+        self._check_software_seen()
 
         # Check for new credentials — only entries appended since the last call.
         creds = self.forensics.credentials_found
@@ -647,7 +710,9 @@ class NetSentinelApp:
                 if self._insecure_service_named_today(svc):
                     continue
                 from src.forensics import SECURE_EQUIVALENTS, PROTOCOL_EXPLOITATION, DEFAULT_EXPLOITATION
-                exploit_info = PROTOCOL_EXPLOITATION.get(svc['port'], DEFAULT_EXPLOITATION)
+                # HTTP on an unlisted port takes port 80's advice.
+                advice_port = svc.get('advice_port', svc['port'])
+                exploit_info = PROTOCOL_EXPLOITATION.get(advice_port, DEFAULT_EXPLOITATION)
                 alert = Alert(
                     rule_id='FORENSICS-INSECURE-SVC',
                     severity=svc['risk'],
@@ -670,7 +735,7 @@ class NetSentinelApp:
                         'is_this_malicious': exploit_info['currently_malicious'],
                         'recommendation': (
                             f"Replace {svc['service']} with "
-                            f"{SECURE_EQUIVALENTS.get(svc['port'], 'encrypted alternative')}. "
+                            f"{SECURE_EQUIVALENTS.get(advice_port, 'encrypted alternative')}. "
                             f"All data on this service is visible to anyone on the network."
                         ),
                     },
