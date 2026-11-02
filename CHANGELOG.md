@@ -1,6 +1,12 @@
 # NetSentinel Changelog
 
-## Unreleased
+## v1.13.0 — Your UniFi gateway's log, kept here
+
+**2284 unit tests** plus 14 integration checks. From 1.10.x or later this
+installs from the Update button. To use it: in UniFi (CyberSecure → Traffic
+Logging) choose SIEM Server with this PC's address and a UDP port, let that port
+in through Windows Firewall from the gateway's address, then turn it on in
+Settings → UniFi traffic log over syslog.
 
 - **Your gateway's traffic log, kept here.** A UniFi gateway without a drive keeps its
   traffic log briefly and will not export it, but it can send it over syslog as it
