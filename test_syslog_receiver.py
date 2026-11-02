@@ -193,6 +193,11 @@ class TestStorage(_Case):
         r.prune(now=time.mktime((2026, 9, 3, 12, 0, 0, 0, 0, -1)))
         self.assertEqual(r.days(), ['2026-09-02', '2026-09-03'])
 
+    def test_the_status_counts_one_day_as_a_day(self):
+        r = self.receiver()
+        r.handle(CEF.encode(), GATEWAY)
+        self.assertEqual(r.status()['note'], '1 day kept on disk.')
+
     def test_a_day_must_look_like_a_date(self):
         with self.assertRaises(ValueError):
             self.receiver().day_path('../../config')

@@ -629,15 +629,23 @@ async function refreshTraffic() {
     download: `unifi-log-${day}.jsonl`, title: 'Download this day as JSON lines',
   }, `Export ${day}`)));
   const list = $('traffic-list');
+  // UniFi sends only what its firewall blocks; an Allowed column of zeros says nothing.
+  const anyAllowed = (d.devices || []).some((dev) => dev.top.some((t) => t.allowed));
   list.replaceChildren(...(d.devices || []).map((dev) => h('div', { class: 'alert' },
     h('div', { class: 'head' },
       h('span', { class: 'title' }, dev.name ? `${dev.name}  ·  ${dev.ip}` : dev.ip),
       h('span', { class: 'time' }, `${fmtNum(dev.destinations)} destinations${dev.blocked ? ` · ${fmtNum(dev.blocked)} blocked` : ''}`)),
-    table(['Destination', 'Allowed', 'Blocked', 'Last'], dev.top.map((t) => h('tr', null,
-      h('td', { class: 'mono wrap' }, t.to), h('td', { class: 'num' }, fmtNum(t.allowed)),
-      h('td', { class: 'num' }, t.blocked ? fmtNum(t.blocked) : ''),
-      h('td', { class: 'nowrap' }, ago(t.last))))))));
-  if (!(d.devices || []).length) list.append(h('div', { class: 'empty' }, 'Nothing received yet.'));
+    table(anyAllowed ? ['Destination', 'Allowed', 'Blocked', 'Last'] : ['Destination', 'Blocked', 'Last'],
+      dev.top.map((t) => h('tr', null,
+        h('td', { class: 'mono wrap' }, t.to),
+        anyAllowed ? h('td', { class: 'num' }, fmtNum(t.allowed)) : null,
+        h('td', { class: 'num' }, t.blocked ? fmtNum(t.blocked) : ''),
+        h('td', { class: 'nowrap' }, ago(t.last))))))));
+  if (!(d.devices || []).length) {
+    list.append(h('div', { class: 'empty' }, s.entries
+      ? 'Messages are arriving, but none was a device connection yet. UniFi sends the ones its firewall blocks.'
+      : 'Nothing received yet.'));
+  }
 }
 
 // ─── Threat data ─────────────────────────────────────────────────────────

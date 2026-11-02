@@ -10,8 +10,12 @@
     gateway's address. It never answers.
   - It reads CEF (UniFi's SIEM output), iptables-style and key=value lines, and stores
     each day as JSON lines under `data/unifi_logs/`, within 30 days and 500 MB.
-  - The new **Device traffic** page lists what each device reached and how often,
-    allowed or blocked, by its UniFi name, and exports any stored day.
+  - The new **Device traffic** page lists what each device tried to reach and how
+    often, by its UniFi name, and exports any stored day.
+  - Checked against a real UDM Pro on UniFi Network 10.6: it sends the connections
+    its firewall policies block (device, domain, policy and zones), Wi-Fi, DHCP,
+    admin and system events, but not the connections it allows (only NetFlow
+    exports those). So block a device for a day and the page shows what it needs.
 
 ## v1.12.0 — Your UniFi names, and no more false passwords
 

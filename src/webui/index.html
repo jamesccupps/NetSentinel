@@ -111,10 +111,11 @@
   <section class="page" id="page-traffic" hidden>
     <div class="panel">
       <h2>Device traffic</h2>
-      <p class="hint">What each device on your network reaches out to, from your gateway's own
-        traffic log sent here over syslog. Use it to see which devices need the internet, and for
-        what. Turn it on in the desktop app (Settings, UniFi traffic log over syslog), then point
-        your gateway's syslog at this PC.</p>
+      <p class="hint">What each device on your network tried to reach, from your gateway's log sent
+        here over syslog. A UniFi gateway sends the connections its firewall policies block, with
+        the device, the domain and the policy, but not the ones it allows. So block a device from
+        the internet for a day, and this shows what it needs. Turn it on in the desktop app
+        (Settings, UniFi traffic log over syslog), then point your gateway's syslog at this PC.</p>
       <p id="traffic-status" class="hint"></p>
       <div class="chips" id="traffic-days"></div>
     </div>

@@ -334,7 +334,8 @@ class SyslogReceiver:
             return dict(row, state='waiting', note=(
                 f'Listening on {self.bind}:{self.port} for {", ".join(sorted(self.allowed))}; '
                 'nothing received yet.'))
-        note = f'{len(self.days())} days kept on disk.'
+        days = len(self.days())
+        note = f'{days} day{"" if days == 1 else "s"} kept on disk.'
         if self.dropped_sender:
             note += f' {self.dropped_sender} from senders not allowed, dropped.'
         return dict(row, state='ok', note=note)
