@@ -57,6 +57,9 @@ FIELDS = {
     'rule': ('UNIFIpolicyName', 'UNIFIruleName', 'cs1', 'rule', 'policy'),
     'client': ('UNIFIclientAlias', 'UNIFIclientHostname', 'suser', 'shost'),
     'client_mac': ('UNIFIclientMac', 'smac', 'MAC'),
+    # Seen in real UniFi 10.6 messages: what kind of event, and its own words.
+    'category': ('UNIFIcategory',),
+    'message': ('msg',),
 }
 
 
@@ -66,11 +69,16 @@ def parse(text):
     m = _PRI.match(text)
     if m:
         text = text[m.end():]
-    m = _RFC5424.match(text) or _RFC3164.match(text)
-    if m:
-        text = text[m.end():]
-    fields = {}
+    # CEF first: UniFi sends "Nov 02 17:22:17 HOME-UDM CEF:0|...", and the RFC 3164
+    # header pattern took "CEF" for the program name and cut it off.
     if 'CEF:' in text:
+        text = text[text.index('CEF:'):]
+    else:
+        m = _RFC5424.match(text) or _RFC3164.match(text)
+        if m:
+            text = text[m.end():]
+    fields = {}
+    if text.startswith('CEF:'):
         head, _, rest = text[text.index('CEF:'):].partition('|')
         parts = re.split(r'(?<!\\)\|', rest, maxsplit=6)
         if len(parts) == 7:

@@ -74,6 +74,18 @@ class TestFormats(unittest.TestCase):
                          ('192.168.1.41', '198.51.100.7', '443', 'IOT_WAN-D-2147483647'))
         self.assertEqual(r['action'], 'block')
 
+    def test_a_real_unifi_message_with_its_short_header(self):
+        """UniFi 10.6 sends no priority and a 3164-style header; the header pattern
+        took "CEF" for the program name and cut the CEF off."""
+        r = parse('Nov 02 17:22:17 HOME-UDM CEF:0|Ubiquiti|UniFi Network|10.6.109|544|'
+                  'Network Accessed|4|UNIFIcategory=Audit UNIFIhost=HOME UDM '
+                  'UNIFIaccessMethod=web UNIFIadmin=Sam Admin src=192.168.1.20 '
+                  'UNIFIutcTime=2026-11-02T22:22:17.796Z msg=Sam Admin accessed UniFi Network '
+                  'using the web. Source IP: 192.168.1.20')
+        self.assertEqual((r['event'], r['category'], r['src']),
+                         ('Network Accessed', 'Audit', '192.168.1.20'))
+        self.assertTrue(r['message'].startswith('Sam Admin accessed'))
+
     def test_something_unknown_is_kept_trimmed(self):
         r = parse('<13>Nov  2 15:00:02 UDM-Pro hostapd: ' + 'x' * 2000)
         self.assertNotIn('src', r)
