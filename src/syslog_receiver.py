@@ -41,22 +41,26 @@ RAW_KEPT = 400
 
 _PRI = re.compile(r'^<(\d{1,3})>')
 _RFC5424 = re.compile(r'^1 (\S+) (\S+) (\S+) (\S+) (\S+) (?:-|(?:\[.*?\])+) ?')
-_RFC3164 = re.compile(r'^[A-Z][a-z]{2} [ \d]\d \d\d:\d\d:\d\d (\S+) ([^:\s]+(?:\[\d+\])?): ?')
+# A UniFi gateway's own lines name the host twice: "HOME-UDM HOME-UDM ulogd[26]: ..."
+_RFC3164 = re.compile(r'^[A-Z][a-z]{2} [ \d]\d \d\d:\d\d:\d\d (\S+) (?:[^:\s]+ )?([^:\s]+?)(?:\[\d+\])?: ?')
 _CEF_EXT = re.compile(r'(\w+)=((?:\\=|[^=])*?)(?=\s+\w+=|\s*$)')
 _KV = re.compile(r'(\w+)=("[^"]*"|\S*)')
 
 # Field names, as UniFi's CEF and iptables lines spell them, in preference order.
+# UniFi 10.6's "Blocked by Firewall" has no src=: the client is UNIFIsrcClient*.
 FIELDS = {
-    'src': ('src', 'SRC', 'sourceAddress'),
+    'src': ('src', 'SRC', 'UNIFIsrcClientIp', 'sourceAddress'),
     'dst': ('dst', 'DST', 'destinationAddress'),
     'sport': ('spt', 'SPT', 'sourcePort'),
     'dport': ('dpt', 'DPT', 'destinationPort'),
     'proto': ('proto', 'PROTO', 'transportProtocol', 'app'),
-    'domain': ('UNIFIdomain', 'dhost', 'destinationHostName', 'destinationDnsDomain', 'domain'),
+    'domain': ('UNIFIdstDomain', 'UNIFIdomain', 'dhost', 'destinationHostName',
+               'destinationDnsDomain', 'domain'),
     'action': ('act', 'UNIFIaction', 'action', 'deviceAction'),
-    'rule': ('UNIFIpolicyName', 'UNIFIruleName', 'cs1', 'rule', 'policy'),
-    'client': ('UNIFIclientAlias', 'UNIFIclientHostname', 'suser', 'shost'),
-    'client_mac': ('UNIFIclientMac', 'smac', 'MAC'),
+    'rule': ('UNIFIpolicyName', 'UNIFIfirewallPolicy', 'UNIFIruleName', 'cs1', 'rule', 'policy'),
+    'client': ('UNIFIsrcClientAlias', 'UNIFIclientAlias', 'UNIFIsrcClientHostname',
+               'UNIFIclientHostname', 'suser', 'shost'),
+    'client_mac': ('UNIFIsrcClientMac', 'UNIFIclientMac', 'smac', 'MAC'),
     # Seen in real UniFi 10.6 messages: what kind of event, and its own words.
     'category': ('UNIFIcategory',),
     'message': ('msg',),
@@ -71,12 +75,14 @@ def parse(text):
         text = text[m.end():]
     # CEF first: UniFi sends "Nov 02 17:22:17 HOME-UDM CEF:0|...", and the RFC 3164
     # header pattern took "CEF" for the program name and cut it off.
+    program = ''
     if 'CEF:' in text:
         text = text[text.index('CEF:'):]
     else:
         m = _RFC5424.match(text) or _RFC3164.match(text)
         if m:
             text = text[m.end():]
+            program = m.group(2) if m.re is _RFC3164 else m.group(3)
     fields = {}
     if text.startswith('CEF:'):
         head, _, rest = text[text.index('CEF:'):].partition('|')
@@ -89,8 +95,9 @@ def parse(text):
     else:
         for k, v in _KV.findall(text):
             fields[k] = v.strip('"')
-        # iptables puts the rule name first, in brackets: "[LAN_IN-RET-3] IN=..."
-        rule = re.match(r'\[([^\]]{1,80})\]', text)
+        # iptables puts the rule name in brackets: "[LAN_IN-RET-3] IN=...", after the
+        # kernel's own "[12345.678]" uptime when there is one.
+        rule = re.search(r'\[([A-Za-z][^\]\s]{0,79})\]', text) if 'SRC=' in text else None
         if rule:
             fields.setdefault('rule', rule.group(1))
     out = {}
@@ -106,6 +113,8 @@ def parse(text):
         action = 'block' if re.search(r'(?i)drop|block|reject|-d-|_d\b', out['rule']) else ''
     if action:
         out['action'] = 'block' if re.search(r'(?i)block|drop|deny|reject', action) else 'allow'
+    if program and program != '-':
+        out['program'] = program[:60]
     out['raw'] = text[:RAW_KEPT]
     return out
 

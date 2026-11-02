@@ -86,6 +86,36 @@ class TestFormats(unittest.TestCase):
                          ('Network Accessed', 'Audit', '192.168.1.20'))
         self.assertTrue(r['message'].startswith('Sam Admin accessed'))
 
+    def test_a_real_firewall_block_names_the_client_not_src(self):
+        """UniFi 10.6's "Blocked by Firewall" has no src=; it was never counted."""
+        r = parse('Nov 02 17:32:34 HOME-UDM CEF:0|Ubiquiti|UniFi Network|10.6.109|203|'
+                  'Blocked by Firewall|4|UNIFIcategory=Security UNIFIhost=HOME UDM proto=TCP '
+                  'spt=50261 dpt=80 act=blocked app=HTTP UNIFIrisk=low UNIFIpolicyName=IOT TV '
+                  'to WAN UNIFIpolicyType=Firewall UNIFIdirection=outgoing '
+                  'deviceInboundInterface=Home IOT deviceOutboundInterface=Internet 1 '
+                  'dst=142.250.68.195 UNIFIsrcClientAlias=Living Room TV '
+                  'UNIFIsrcClientHostname=Samsung UNIFIsrcClientIp=192.168.1.45 '
+                  'UNIFIsrcClientMac=02:00:00:00:00:45 UNIFIsrcZone=Home IOT UNIFIdstZone=External '
+                  'UNIFIdstDomain=tv.example.com UNIFIfirewallPolicy=IOT TV to WAN '
+                  'UNIFIflowCount=1 msg=Living Room TV was blocked from accessing 142.250.68.195')
+        self.assertEqual((r['src'], r['dst'], r['dport'], r['domain']),
+                         ('192.168.1.45', '142.250.68.195', '80', 'tv.example.com'))
+        self.assertEqual((r['client'], r['client_mac'], r['rule'], r['action']),
+                         ('Living Room TV', '02:00:00:00:00:45', 'IOT TV to WAN', 'block'))
+
+    def test_the_gateways_own_lines_name_the_host_twice(self):
+        r = parse('<29>Nov  2 17:34:39 HOME-UDM HOME-UDM ulogd[2678068]: NFLOG netlink '
+                  'buffer size has been set to 4194304')
+        self.assertEqual(r['program'], 'ulogd')
+        self.assertTrue(r['raw'].startswith('NFLOG netlink'))
+
+    def test_a_kernel_firewall_line_after_its_uptime(self):
+        r = parse('<4>Nov  2 15:00:01 HOME-UDM HOME-UDM kernel: [123456.789012] '
+                  '[IOT_WAN-D-2147483647] IN=br12 OUT=eth8 SRC=192.168.1.41 '
+                  'DST=142.250.68.195 PROTO=TCP SPT=40000 DPT=443')
+        self.assertEqual((r['program'], r['rule'], r['action']),
+                         ('kernel', 'IOT_WAN-D-2147483647', 'block'))
+
     def test_something_unknown_is_kept_trimmed(self):
         r = parse('<13>Nov  2 15:00:02 UDM-Pro hostapd: ' + 'x' * 2000)
         self.assertNotIn('src', r)
