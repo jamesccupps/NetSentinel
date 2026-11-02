@@ -1,5 +1,18 @@
 # NetSentinel Changelog
 
+## Unreleased
+
+- **A Windows Update download is not a password.** On 1.11.0's first afternoon,
+  Delivery Optimization fetched a Visual Studio update over plain HTTP from a
+  cache server, and two "[CONFIRMED] Plaintext Credential (HTTP Form)" alerts,
+  CRITICAL, came of it. The credential checks read the server's side too, and
+  27,000 packets of compressed data held "Token:" and "pwD:" by chance.
+  1.10.x had skipped most of such downloads under its 500-packet cap. Now
+  logins, tokens, keys and form fields are looked for only in what a client
+  sends, and form fields only in text: a binary upload can match by chance
+  the same way. Replayed, the two captures raise nothing, and ESET's hashed
+  update login in the same kind of traffic is still found.
+
 ## v1.11.0 — Threat data you can see, CVE checks, and HTTPS back in view
 
 **2247 unit tests** plus 14 integration checks. From 1.10.x this installs from

@@ -172,6 +172,21 @@ def bacnet_request(payload):
     return apdu_type, payload[choice], i
 
 
+_TEXT_BYTES = frozenset(range(0x20, 0x7f)) | {0x09, 0x0a, 0x0d}
+
+
+def looks_like_text(payload, sample=512):
+    """
+    Whether a payload reads as text: nine bytes in ten printable ASCII, judged
+    on its start. A form or JSON body does; compressed or encrypted data has
+    about four in ten, and a field-like "pwd:" turns up in it by chance.
+    """
+    head = payload[:sample]
+    if not head:
+        return False
+    return sum(b in _TEXT_BYTES for b in head) >= 0.9 * len(head)
+
+
 def is_private_address(ip):
     """
     RFC1918 / loopback / link-local check.
@@ -1335,6 +1350,11 @@ class NetworkForensics:
         HTTP_PORTS = {80, 3000, 4200, 5000, 8000, 8008, 8080, 8081, 8888, 9090}
         if (port in HTTP_PORTS or sport in HTTP_PORTS
                 or (port and HTTP_REQUEST_RE.match(payload))):
+            # Credentials are what a client sends. Reading the server's side too
+            # made a Windows Update download two "[CONFIRMED] Plaintext
+            # Credential" alerts: 27,000 packets of compressed data held "Token:"
+            # and "pwD:" by chance. A form is text, too; a binary upload is not.
+            to_server = bool(port in HTTP_PORTS or HTTP_REQUEST_RE.match(payload))
             # Track HTTP method for session context
             req_match = HTTP_REQUEST_RE.search(payload)
             if req_match:
@@ -1351,7 +1371,7 @@ class NetworkForensics:
             if port in HTTP_PORTS:
                 self._inspect_http_request(pkt_info, payload, ts, src, dst, port)
             # Basic Auth
-            match = HTTP_BASIC_AUTH_RE.search(payload)
+            match = HTTP_BASIC_AUTH_RE.search(payload) if to_server else None
             if match:
                 try:
                     decoded = base64.b64decode(match.group(1)).decode('utf-8', errors='replace')
@@ -1368,7 +1388,7 @@ class NetworkForensics:
                     pass
 
             # Digest Auth (routers, cameras, HVAC, older web interfaces)
-            match = HTTP_DIGEST_RE.search(payload)
+            match = HTTP_DIGEST_RE.search(payload) if to_server else None
             if match:
                 digest_data = match.group(1)
                 user_match = HTTP_DIGEST_USER_RE.search(digest_data)
@@ -1417,7 +1437,7 @@ class NetworkForensics:
                         raw_value=raw_digest)
 
             # Bearer / API tokens; Basic and Digest are read above
-            match = HTTP_AUTH_RE.search(payload)
+            match = HTTP_AUTH_RE.search(payload) if to_server else None
             words = match.group(1).split() if match else []
             if words and words[0].lower() not in (b'basic', b'digest'):
                 token = match.group(1).strip().decode('utf-8', errors='replace')
@@ -1439,14 +1459,15 @@ class NetworkForensics:
                         raw_value=token)
 
             # API key headers
-            match = HTTP_API_KEY_RE.search(payload)
+            match = HTTP_API_KEY_RE.search(payload) if to_server else None
             if match:
                 key = match.group(1).decode('utf-8', errors='replace')
                 self._add_credential('API Key', 'key',
                     self._mask(key, show=6), src, dst, port, ts, raw_value=key)
 
             # POST form data with passwords
-            match = HTTP_POST_CRED_RE.search(payload)
+            match = (HTTP_POST_CRED_RE.search(payload)
+                     if to_server and looks_like_text(payload) else None)
             if match:
                 value = match.group(1).decode('utf-8', errors='replace')
                 host = ''
