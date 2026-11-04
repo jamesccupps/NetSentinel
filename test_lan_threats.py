@@ -145,9 +145,9 @@ def dhcp_payload(msg_type, server):
 
 class TestRogueServers(_Lan):
 
-    def _offer(self, server, src=None):
+    def _offer(self, server, src=None, mac='00:1b:21:00:00:67'):
         return pkt(protocol='UDP', src_ip=src or server, dst_ip='255.255.255.255',
-                   src_port=67, dst_port=68, src_mac='00:1b:21:00:00:67',
+                   src_port=67, dst_port=68, src_mac=mac,
                    _raw_payload=dhcp_payload(2, server), payload_size=300)
 
     def test_an_unknown_dhcp_server(self):
@@ -155,6 +155,15 @@ class TestRogueServers(_Lan):
         ids.inspect_packet(self._offer('192.168.1.1'))
         self.assertNotIn('ROGUE-DHCP', self.rules(alerts))
         ids.inspect_packet(self._offer('192.168.1.99'))
+        self.assertIn('ROGUE-DHCP', self.rules(alerts))
+
+    def test_the_gateway_serving_another_network_is_not_rogue(self):
+        """On a trunk port the router's DHCP for its other VLANs arrives from its own MAC."""
+        ids, alerts = self.engine()
+        ids.inspect_packet(arp('192.168.1.1', '00:11:22:33:44:55'))
+        ids.inspect_packet(self._offer('192.168.20.1', mac='00:11:22:33:44:55'))
+        self.assertNotIn('ROGUE-DHCP', self.rules(alerts))
+        ids.inspect_packet(self._offer('192.168.20.1', mac='00:1b:21:00:00:67'))
         self.assertIn('ROGUE-DHCP', self.rules(alerts))
 
     def test_without_a_configured_server_the_first_is_learned(self):

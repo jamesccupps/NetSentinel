@@ -595,6 +595,11 @@ class LanThreatMonitor:
             known |= set(self._gateways())
         if server in known or pkt.src_ip in known:
             return []
+        # The router itself, serving one of its other networks: a trunk port hears
+        # those broadcasts too, from the gateway's pinned MAC (as router adverts).
+        pinned = {p['mac'] for p in self.state['gateway_macs'].values()}
+        if _norm_mac(pkt.src_mac) in pinned:
+            return []
         if not configured and (self.in_baseline(now) or not self.state['dhcp_servers']):
             if not self.offline:
                 self._learn('dhcp_servers', server)
