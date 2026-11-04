@@ -73,3 +73,4 @@ netmon/data/
 # Owner-specific notes and audits: names, MACs and addresses of his own network
 local-notes/
 unifi-audit-*.md
+HANDOFF.md
