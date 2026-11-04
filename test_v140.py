@@ -383,9 +383,9 @@ class TestDeviceLearner(unittest.TestCase):
 
     def test_dhcp_enrichment(self):
         self.dl.observe_dhcp("aa:bb:cc:dd:ee:ff", "192.168.1.50",
-                            hostname="james-desktop", vendor_class="MSFT 5.0")
+                            hostname="office-pc", vendor_class="MSFT 5.0")
         dev = self.dl.get_device("192.168.1.50")
-        self.assertEqual(dev.hostname, "james-desktop")
+        self.assertEqual(dev.hostname, "office-pc")
         self.assertEqual(dev.vendor_class, "MSFT 5.0")
 
     def test_gateway_detection_from_arp(self):
