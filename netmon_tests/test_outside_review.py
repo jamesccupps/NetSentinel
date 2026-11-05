@@ -333,5 +333,87 @@ class TestExtractsAreNotCaptures(unittest.TestCase):
         self.assertEqual(result['removed'], [])
 
 
+# ─── M22: the digest moved an hour earlier each day ──────────────────────────
+
+class _DigestNotifier:
+    """Takes the digest and pushes; ntfy never sees either."""
+
+    def __init__(self):
+        self.digests = []
+
+    def send(self, findings):
+        return list(findings), []
+
+    def send_digest(self, analyzer, title=None, open_items=None, body=None):
+        self.digests.append(body)
+        return True
+
+
+class TestTheDigestKeepsItsHour(unittest.TestCase):
+
+    def setUp(self):
+        import shutil
+        import tempfile
+        self.scratch = tempfile.mkdtemp(prefix='netmon-review-digest-')
+        self.addCleanup(shutil.rmtree, self.scratch, True)
+
+    @staticmethod
+    def local(*parts):
+        import time
+        return time.mktime(tuple(parts) + (0,) * (6 - len(parts)) + (0, 0, -1))
+
+    def test_after_a_digest_the_next_is_the_same_hour_tomorrow(self):
+        import time
+        from netmon.service import Service, ServiceConfig
+        config = ServiceConfig(profile_path=EXAMPLE, notify=False, digest_hour=7,
+                               state_dir=os.path.join(self.scratch, 'state'))
+        config.web_port = None
+        service = Service(config, clock=lambda: 0.0)
+        service.notifier = _DigestNotifier()
+        # A day well clear of any DST change.
+        sent_at = self.local(2026, 6, 10, 7, 0, 5)
+        service._next['digest'] = self.local(2026, 6, 10, 7)
+        service.tick(now=sent_at)
+        self.assertEqual(len(service.notifier.digests), 1)
+        self.assertEqual(time.localtime(service._next['digest'])[:5],
+                         (2026, 6, 11, 7, 0))
+
+    def in_new_york(self):
+        import time
+        if not hasattr(time, 'tzset'):
+            self.skipTest('time.tzset is not available on Windows')
+        before = os.environ.get('TZ')
+
+        def restore():
+            if before is None:
+                os.environ.pop('TZ', None)
+            else:
+                os.environ['TZ'] = before
+            time.tzset()
+
+        self.addCleanup(restore)
+        # A POSIX rule rather than a zone name, so no tz database is needed.
+        os.environ['TZ'] = 'EST5EDT,M3.2.0,M11.1.0'
+        time.tzset()
+
+    def test_the_autumn_change_does_not_fire_it_twice(self):
+        import time
+        from netmon.service import _next_occurrence
+        self.in_new_york()
+        # 2026-11-01 is the first Sunday in November: 02:00 EDT becomes 01:00.
+        nxt = _next_occurrence(self.local(2026, 10, 31, 7, 0, 30), 7)
+        self.assertEqual(time.localtime(nxt)[:5], (2026, 11, 1, 7, 0))
+        after = _next_occurrence(nxt + 30, 7)
+        self.assertEqual(time.localtime(after)[:5], (2026, 11, 2, 7, 0))
+
+    def test_the_spring_change_does_not_make_it_late(self):
+        import time
+        from netmon.service import _next_occurrence
+        self.in_new_york()
+        # 2026-03-08 is the second Sunday in March: 02:00 EST becomes 03:00.
+        nxt = _next_occurrence(self.local(2026, 3, 7, 7, 0, 30), 7)
+        self.assertEqual(time.localtime(nxt)[:5], (2026, 3, 8, 7, 0))
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)

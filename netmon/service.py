@@ -587,7 +587,9 @@ class Service:
 
         if self._due_for_digest(now):
             self.send_digest(now)
-            self._next['digest'] = now + 23 * 3600
+            # The configured hour tomorrow, not 23 hours on: that moved the
+            # digest an hour earlier every day.
+            self._next['digest'] = _next_occurrence(now, self.config.digest_hour)
         return findings
 
     def _due_for_digest(self, now):
@@ -696,11 +698,22 @@ class _Window:
 
 
 def _next_occurrence(now, hour):
-    """The next time it is `hour` o'clock, local."""
+    """
+    The next time it is `hour` o'clock, local.
+
+    Tomorrow is the next calendar day, not 86400 seconds on, and mktime is left
+    to work out whether DST applies (-1). Adding a day's seconds to a time
+    pinned to today's DST flag landed an hour out on a transition day; on the
+    autumn one that fired the digest at 06:00 and again at 07:00.
+    """
     parts = time.localtime(now)
     today = time.mktime((parts.tm_year, parts.tm_mon, parts.tm_mday, hour, 0, 0,
-                         0, 0, parts.tm_isdst))
-    return today if today > now else today + 86400
+                         0, 0, -1))
+    if today > now:
+        return today
+    # mktime normalises the 32nd of a month into the 1st of the next.
+    return time.mktime((parts.tm_year, parts.tm_mon, parts.tm_mday + 1, hour,
+                        0, 0, 0, 0, -1))
 
 
 def _parser():
