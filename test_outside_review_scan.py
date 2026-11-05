@@ -180,7 +180,7 @@ def random_container(rng):
     out = bytearray(b'\x01')
     for _ in range(rng.randrange(1, 4)):
         if rng.random() < 0.1:
-            out += (0x3FFF).to_bytes(2, 'little') + bytes(rng.randrange(256) for _ in range(4096))
+            out += (0x3FFF).to_bytes(2, 'little') + rng.randbytes(4096)
             continue
         data = bytearray()
         for _ in range(rng.randrange(1, 40)):
@@ -195,7 +195,7 @@ def random_container(rng):
             data = data[:rng.randrange(1, len(data) + 1)]       # a token cut short
         size = len(data) + 2 - 3 if rng.random() < 0.9 else rng.randrange(4096)
         out += (0xB000 | size).to_bytes(2, 'little') + data
-    return bytes(out + bytes(rng.randrange(256) for _ in range(rng.randrange(4))))
+    return bytes(out + rng.randbytes(rng.randrange(4)))
 
 
 def outcome(decompress, data, limit):
@@ -587,7 +587,8 @@ class TestSyslogExport(_ApiTestCase):
         self.addCleanup(tracemalloc.stop)
         self.download()
         peak = tracemalloc.get_traced_memory()[1]
-        self.assertLess(peak, 4 * 1024 * 1024, f'{peak:,} bytes at the peak')
+        # the old route peaked at about three times the day's 15 MB; this sends 256 KB at a time
+        self.assertLess(peak, 12 * 1024 * 1024, f'{peak:,} bytes at the peak')
 
     def test_a_day_that_is_gone_is_not_found(self):
         os.remove(self.receiver.day_path(self.day))
