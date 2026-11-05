@@ -113,6 +113,39 @@ def wheel_scrollable(canvas):
     return canvas
 
 
+def settings_from_form(raw):
+    """
+    The Settings form's values, typed: ({key: value}, [keys that are not numbers]).
+
+    A setting whose default is a number must be one. The form used to keep '15x'
+    or '5,514' as a string, which then stopped NetSentinel starting (int() in a
+    constructor) or silently switched IDS rules off (a threshold compared as a
+    string). Other fields keep the old guess: a number if it parses as one.
+    """
+    from src.config import DEFAULT_CONFIG, as_float, as_int
+    values, bad = {}, []
+    for key, val in raw.items():
+        if isinstance(val, bool):
+            values[key] = val
+            continue
+        default = DEFAULT_CONFIG
+        for part in key.split('.'):
+            default = default.get(part) if isinstance(default, dict) else None
+        if isinstance(default, (int, float)) and not isinstance(default, bool):
+            parse = as_int if isinstance(default, int) else as_float
+            number = parse(val, None)
+            if number is None:
+                bad.append(key)
+            else:
+                values[key] = number
+            continue
+        try:
+            values[key] = float(val) if '.' in val else int(val)
+        except (TypeError, ValueError):
+            values[key] = val
+    return values, bad
+
+
 class StyledFrame(tk.Frame):
     """A dark-themed frame."""
     def __init__(self, parent, **kwargs):
@@ -2871,21 +2904,16 @@ class NetSentinelGUI:
 
     def _save_settings(self):
         """Save all settings from the UI to config."""
-        for key, entry in self._setting_widgets.items():
-            parts = key.split('.')
-            val = entry.get()
-            if isinstance(entry, tk.BooleanVar):
-                self.app.config.set(*parts, bool(val))
-                continue
-            try:
-                # Try to cast to appropriate type
-                if '.' in val:
-                    val = float(val)
-                else:
-                    val = int(val)
-            except ValueError:
-                pass
-            self.app.config.set(*parts, val)
+        raw = {key: (bool(entry.get()) if isinstance(entry, tk.BooleanVar) else entry.get())
+               for key, entry in self._setting_widgets.items()}
+        values, bad = settings_from_form(raw)
+        if bad:
+            messagebox.showerror(
+                "Settings", "These need a number, so nothing was saved:\n\n" +
+                "\n".join(f"  {key}: {raw[key]!r}" for key in bad))
+            return
+        for key, val in values.items():
+            self.app.config.set(*key.split('.'), val)
         for key, entry in self._secret_widgets.items():
             self.app.config.set(*key.split('.'), entry.get().strip())
 

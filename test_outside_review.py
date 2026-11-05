@@ -553,5 +553,68 @@ class TestReverseDnsLowersNothing(unittest.TestCase):
         self.assertEqual(plain, named)
 
 
+class Typos:
+    """A config whose given keys hold what someone typed; the rest default."""
+
+    def __init__(self, **typed):
+        self.typed = {tuple(k.split('__')): v for k, v in typed.items()}
+
+    def get(self, *keys, default=None):
+        return self.typed.get(keys, default)
+
+    def set(self, *a):
+        pass
+
+
+class TestTyposInSettings(unittest.TestCase):
+    """M3: a typo in a number setting stopped NetSentinel starting, or switched
+    most IDS rules off without a word."""
+
+    def test_a_typed_threshold_does_not_switch_the_ids_off(self):
+        from src.ids_engine import IDSEngine
+        alerts = []
+        ids = IDSEngine(Typos(ids__port_scan_threshold='15x', ids__large_upload_mb='lots'),
+                        alert_callback=alerts.append)
+        if getattr(ids, 'lan', None) is not None:
+            ids.lan.state_path = None
+        self.assertEqual((ids.port_scan_threshold, ids.large_upload_mb), (15, 100))
+        for port in range(20, 45):
+            ids.inspect_packet(pkt(src_ip='192.168.1.5', dst_ip='203.0.113.9', src_port=40000,
+                                   dst_port=port, protocol='TCP', flags='S'))
+        self.assertIn('PORT-SCAN', [a.rule_id for a in alerts])
+
+    def test_typos_do_not_stop_the_lan_and_review_parts_starting(self):
+        import tempfile
+        from src.lan_threats import LanThreatMonitor
+        from src.review import ReviewRecorder
+        lan = LanThreatMonitor(Typos(ids__arp_max_ips_per_mac='5x', ids__lan_baseline_hours='a day'),
+                               offline=True)
+        self.assertEqual((lan.arp_max_ips_per_mac, lan.baseline_hours), (5, 24))
+        with tempfile.TemporaryDirectory() as folder:
+            rec = ReviewRecorder(folder, None, Typos(review__capture_budget_mb='2GB',
+                                                     review__capture_max_hours='1 day'))
+            self.assertEqual((rec.capture_budget, rec.capture_max_age),
+                             (2048 * 1024 * 1024, 24 * 3600))
+
+    def test_the_settings_form_refuses_a_non_number(self):
+        from src.gui import settings_from_form
+        values, bad = settings_from_form({
+            'ids.port_scan_threshold': '15x', 'syslog.port': '5,514',
+            'ml.contamination': '0.1', 'ids.brute_force_threshold': ' 12 ',
+            'capture.interface': 'Ethernet 2', 'alerts.sound_enabled': True})
+        self.assertEqual(sorted(bad), ['ids.port_scan_threshold', 'syslog.port'])
+        self.assertEqual(values['ml.contamination'], 0.1)
+        self.assertEqual(values['ids.brute_force_threshold'], 12)
+        self.assertEqual(values['capture.interface'], 'Ethernet 2')
+        self.assertIs(values['alerts.sound_enabled'], True)
+
+    def test_a_lower_case_severity_filter_still_filters(self):
+        from src.alerts import AlertManager
+        from src.ids_engine import Alert
+        manager = AlertManager(Typos(alerts__severity_filter='high'))
+        self.assertFalse(manager.add_alert(Alert('X', 'LOW', 't', 'd')))
+        self.assertTrue(manager.add_alert(Alert('X', 'CRITICAL', 't', 'd')))
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -89,11 +89,16 @@ class ReviewRecorder:
         for d in (self.directory, self.snippet_dir, self.capture_dir):
             os.makedirs(d, exist_ok=True)
         self.pcap_writer = pcap_writer
-        self.snippet_seconds = config.get('review', 'snippet_seconds', default=60)
-        self.capture_budget = int(config.get(
-            'review', 'capture_budget_mb', default=2048)) * 1024 * 1024
-        self.capture_max_age = float(config.get(
-            'review', 'capture_max_hours', default=24)) * 3600
+        # As numbers, with a fallback: a typo here stopped NetSentinel starting.
+        from src.config import as_float, as_int
+        self.snippet_seconds = as_int(config.get('review', 'snippet_seconds', default=60), 60,
+                                      lo=5, hi=3600, name='review.snippet_seconds')
+        self.capture_budget = as_int(config.get(
+            'review', 'capture_budget_mb', default=2048), 2048, lo=16,
+            name='review.capture_budget_mb') * 1024 * 1024
+        self.capture_max_age = as_float(config.get(
+            'review', 'capture_max_hours', default=24), 24, lo=1,
+            name='review.capture_max_hours') * 3600
         self._lock = threading.Lock()
         self._owns_recording = False
 

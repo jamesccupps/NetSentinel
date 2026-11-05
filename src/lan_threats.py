@@ -37,6 +37,7 @@ import threading
 import time
 from collections import OrderedDict, deque
 
+from src.config import as_float, as_int
 from src.ipcache import classify
 
 logger = logging.getLogger("NetSentinel.LAN")
@@ -279,10 +280,14 @@ class LanThreatMonitor:
         self.net_env = net_env
         self.offline = offline
         get = (lambda *keys, default=None: default) if config is None else config.get
-        self.baseline_hours = float(get('ids', 'lan_baseline_hours', default=24))
-        self.arp_max_ips_per_mac = int(get('ids', 'arp_max_ips_per_mac', default=5))
-        self.lateral_threshold = int(get('ids', 'lateral_fanout_hosts', default=10))
-        self.upload_floor_mb = float(get('ids', 'upload_spike_min_mb', default=50))
+        self.baseline_hours = as_float(get('ids', 'lan_baseline_hours', default=24), 24,
+                                       lo=0, name='ids.lan_baseline_hours')
+        self.arp_max_ips_per_mac = as_int(get('ids', 'arp_max_ips_per_mac', default=5), 5,
+                                          lo=1, name='ids.arp_max_ips_per_mac')
+        self.lateral_threshold = as_int(get('ids', 'lateral_fanout_hosts', default=10), 10,
+                                        lo=2, name='ids.lateral_fanout_hosts')
+        self.upload_floor_mb = as_float(get('ids', 'upload_spike_min_mb', default=50), 50,
+                                        lo=1, name='ids.upload_spike_min_mb')
         self.new_device_alerts = bool(get('ids', 'new_device_alerts', default=True))
 
         if state_path is None and not offline and config is not None:

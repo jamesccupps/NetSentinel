@@ -21,7 +21,9 @@ class AlertManager:
     def __init__(self, config):
         self.config = config
         self.max_stored = config.get('alerts', 'max_stored', default=5000)
-        self.severity_filter = config.get('alerts', 'severity_filter', default='LOW')
+        # Upper case: "high" typed by hand matched no level and turned filtering off.
+        self.severity_filter = str(config.get('alerts', 'severity_filter', default='LOW')
+                                   or 'LOW').strip().upper()
         self.sound_enabled = config.get('alerts', 'sound_enabled', default=True)
         self.desktop_notify = config.get('alerts', 'desktop_notifications', default=True)
 

@@ -16,6 +16,7 @@ from collections import Counter, defaultdict, deque
 from datetime import datetime
 
 from src.cloud_ranges import get_cloud_ranges
+from src.config import as_float, as_int
 from src.dns_analysis import DnsResponseMonitor, DnsTunnelMonitor
 from src.ipcache import is_private
 from src.lan_threats import LanThreatMonitor
@@ -396,11 +397,20 @@ class IDSEngine:
         self.blocked_ja4 = {f.lower() for f in config.get('ids', 'blocked_ja4', default=[])}
 
         # Thresholds
-        self.port_scan_threshold = config.get('ids', 'port_scan_threshold', default=15)
-        self.port_scan_window = config.get('ids', 'port_scan_window_sec', default=60)
-        self.brute_force_threshold = config.get('ids', 'brute_force_threshold', default=10)
-        self.brute_force_window = config.get('ids', 'brute_force_window_sec', default=30)
-        self.large_upload_mb = config.get('ids', 'large_upload_mb', default=100)
+        # As numbers: a threshold typed as '15x' was compared as a string, which
+        # raised on every SYN and silently skipped the rules after it.
+        self.port_scan_threshold = as_int(config.get('ids', 'port_scan_threshold', default=15),
+                                          15, lo=2, name='ids.port_scan_threshold')
+        self.port_scan_window = as_float(config.get('ids', 'port_scan_window_sec', default=60),
+                                         60, lo=1, name='ids.port_scan_window_sec')
+        self.brute_force_threshold = as_int(
+            config.get('ids', 'brute_force_threshold', default=10), 10, lo=2,
+            name='ids.brute_force_threshold')
+        self.brute_force_window = as_float(
+            config.get('ids', 'brute_force_window_sec', default=30), 30, lo=1,
+            name='ids.brute_force_window_sec')
+        self.large_upload_mb = as_float(config.get('ids', 'large_upload_mb', default=100),
+                                        100, lo=1, name='ids.large_upload_mb')
 
         # State tracking
         self._port_access = defaultdict(
