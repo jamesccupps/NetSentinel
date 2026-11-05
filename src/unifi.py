@@ -21,6 +21,7 @@ data page.
 """
 
 import hashlib
+import hmac
 import http.client
 import ipaddress
 import json
@@ -30,6 +31,8 @@ import ssl
 import threading
 import time
 from urllib.parse import quote
+
+from src.config import as_int
 
 logger = logging.getLogger("NetSentinel.UniFi")
 
@@ -60,22 +63,33 @@ def private_host(host):
     return bool(addresses) and all(a.is_private and not a.is_loopback for a in addresses)
 
 
-def https_get(host, path, api_key, timeout=TIMEOUT_SEC):
+def https_get(host, path, api_key, pin='', timeout=TIMEOUT_SEC):
     """
     One GET to the console: (status, body bytes, certificate SHA-256 hex).
-    Certificate checks are the caller's pin, since consoles sign their own.
+
+    Consoles sign their own certificates, so the check is the caller's pin, and it
+    is made after the handshake and before the request. The key went out first
+    before, and a host on the LAN that answered for the console's address got it
+    every refresh; the key can change firewall rules, not just read clients.
     """
     context = ssl.create_default_context()
     context.check_hostname = False
     context.verify_mode = ssl.CERT_NONE
     connection = http.client.HTTPSConnection(host, 443, timeout=timeout, context=context)
     try:
+        connection.connect()                # the handshake only: nothing is sent yet
+        connection.auto_open = 0            # and no silent reconnect past the check
+        der = connection.sock.getpeercert(binary_form=True) if connection.sock else None
+        if not der:
+            raise UnifiError('The console presented no certificate.')
+        fingerprint = hashlib.sha256(der).hexdigest()
+        if pin and not hmac.compare_digest(fingerprint, pin):
+            raise CertificateChanged()
         connection.request('GET', path, headers={'X-API-KEY': api_key, 'Accept': 'application/json',
                                                  'User-Agent': 'NetSentinel'})
         response = connection.getresponse()
-        der = connection.sock.getpeercert(binary_form=True) if connection.sock else b''
         body = response.read(32 * 1024 * 1024 + 1)
-        return response.status, body, hashlib.sha256(der or b'').hexdigest()
+        return response.status, body, fingerprint
     finally:
         connection.close()
 
@@ -91,7 +105,8 @@ class UnifiInventory:
         self.site = str(get('unifi', 'site', default='default') or 'default').strip()
         self._key = str(get('unifi', 'api_key', default='') or '').strip()
         self.pin = str(get('unifi', 'cert_sha256', default='') or '').strip().lower()
-        self.refresh_sec = max(60, int(get('unifi', 'refresh_minutes', default=5) or 5) * 60)
+        self.refresh_sec = 60 * as_int(get('unifi', 'refresh_minutes', default=5), 5,
+                                       lo=1, hi=24 * 60, name='unifi.refresh_minutes')
         self._fetch = fetch or https_get
         self._clock = clock
         self._lock = threading.Lock()
@@ -160,7 +175,7 @@ class UnifiInventory:
         return True
 
     def _get(self, path):
-        status, body, fingerprint = self._fetch(self.host, path, self._key)
+        status, body, fingerprint = self._fetch(self.host, path, self._key, self.pin)
         if not self.pin:
             self.pin = fingerprint
             self.config.set('unifi', 'cert_sha256', fingerprint)   # trust on first use

@@ -19,7 +19,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import _test_support  # noqa: E402,F401
 
-from src.unifi import API, UnifiInventory  # noqa: E402
+from src.unifi import API, CertificateChanged, UnifiInventory  # noqa: E402
 
 KEY = 'test-key-not-real'
 PIN = 'ab' * 32
@@ -54,7 +54,9 @@ class FakeConsole:
         self.fingerprint, self.status, self.page = fingerprint, status, page
         self.paths, self.keys = [], []
 
-    def __call__(self, host, path, key):
+    def __call__(self, host, path, key, pin=''):
+        if pin and pin != self.fingerprint:
+            raise CertificateChanged()      # as https_get does: before the key is sent
         self.paths.append(path)
         self.keys.append(key)
         if self.status != 200:
@@ -149,7 +151,7 @@ class TestTrust(unittest.TestCase):
         self.assertNotIn(KEY, '\n'.join(logs.output) + inv.error + json.dumps(inv.status()))
 
     def test_a_network_error_is_named_by_type_only(self):
-        def broken(host, path, key):
+        def broken(host, path, key, pin=''):
             raise OSError(f'failed GET {path} with {key}')
         inv = inventory(broken)
         self.assertFalse(inv.refresh())

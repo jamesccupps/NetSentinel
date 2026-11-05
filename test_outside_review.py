@@ -131,5 +131,58 @@ class TestParkingCredentialsMasked(unittest.TestCase):
         self.assertEqual(out['extra']['url'], 'h.example/p?[query removed]')
 
 
+class TestUnifiPinBeforeKey(unittest.TestCase):
+    """H2: the API key went out in the request, and the pin was checked after."""
+
+    def _connection(self, der):
+        from types import SimpleNamespace
+        from unittest import mock
+        conn = mock.MagicMock()
+        conn.sock.getpeercert.return_value = der
+        conn.getresponse.return_value = SimpleNamespace(status=200, read=lambda n: b'{}')
+        return mock.patch('http.client.HTTPSConnection', return_value=conn), conn
+
+    def test_a_certificate_that_is_not_the_pinned_one_never_gets_the_key(self):
+        import hashlib
+        from src.unifi import CertificateChanged, https_get
+        patch, conn = self._connection(b'an impostor certificate')
+        with patch:
+            with self.assertRaises(CertificateChanged):
+                https_get('192.168.1.1', '/proxy/network/integration/v1/sites', 'test-key',
+                          pin=hashlib.sha256(b'the console certificate').hexdigest())
+        conn.connect.assert_called_once()
+        conn.request.assert_not_called()
+
+    def test_the_pinned_certificate_gets_the_request(self):
+        import hashlib
+        from src.unifi import https_get
+        der = b'the console certificate'
+        patch, conn = self._connection(der)
+        with patch:
+            status, _, fingerprint = https_get('192.168.1.1', '/x', 'test-key',
+                                               pin=hashlib.sha256(der).hexdigest())
+        self.assertEqual((status, fingerprint), (200, hashlib.sha256(der).hexdigest()))
+        conn.request.assert_called_once()
+
+    def test_no_certificate_at_all_is_refused_before_the_key(self):
+        from src.unifi import UnifiError, https_get
+        patch, conn = self._connection(None)
+        with patch:
+            with self.assertRaises(UnifiError):
+                https_get('192.168.1.1', '/x', 'test-key')
+        conn.request.assert_not_called()
+
+    def test_a_typo_in_the_refresh_interval_does_not_stop_startup(self):
+        from src.unifi import UnifiInventory
+
+        class Settings:
+            def get(self, *keys, default=None):
+                return {('unifi', 'refresh_minutes'): '5m'}.get(keys, default)
+
+            def set(self, *a):
+                pass
+        self.assertEqual(UnifiInventory(Settings()).refresh_sec, 300)
+
+
 if __name__ == '__main__':
     unittest.main()
