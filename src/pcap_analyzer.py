@@ -35,7 +35,10 @@ try:
 except ImportError:
     SCAPY_AVAILABLE = False
 
+import shutil
 import subprocess
+
+from src.winpaths import program_files_dirs
 
 # Forensics security-finding types -> (rule id, alert category).
 _FINDING_RULES = {
@@ -47,28 +50,24 @@ _FINDING_RULES = {
 
 
 def find_tshark():
-    """Locate tshark (Wireshark CLI) on the system."""
-    common_paths = [
-        r"C:\Program Files\Wireshark\tshark.exe",
-        r"C:\Program Files (x86)\Wireshark\tshark.exe",
-        "/usr/bin/tshark",
-        "/usr/local/bin/tshark",
-    ]
-    for path in common_paths:
-        if os.path.exists(path):
+    """
+    Locate tshark (Wireshark CLI), by absolute path.
+
+    On Windows only under Program Files, as Windows reports it: NetSentinel runs
+    elevated, and a bare 'tshark' (or one found on a PATH the owner can change)
+    is looked up first in the exe's own, user-writable folder (src/winpaths.py).
+    """
+    if os.name == 'nt':
+        for root in program_files_dirs():
+            path = os.path.join(root, 'Wireshark', 'tshark.exe')
+            if os.path.isfile(path):
+                return path
+        return None
+    for path in ("/usr/bin/tshark", "/usr/local/bin/tshark"):
+        if os.path.isfile(path):
             return path
-    # Try PATH
-    try:
-        result = subprocess.run(
-            ['tshark', '--version'],
-            capture_output=True, text=True, timeout=5,
-            creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0)
-        )
-        if result.returncode == 0:
-            return 'tshark'
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        pass
-    return None
+    found = shutil.which('tshark')
+    return os.path.abspath(found) if found else None
 
 
 class PcapAnalyzer:

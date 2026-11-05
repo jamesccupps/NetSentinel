@@ -58,10 +58,14 @@ class TestGateway(unittest.TestCase):
         from src import net_detect
 
         def run(cmd, **kw):
-            out = self.ROUTE_PRINT if cmd[0] == 'route' else ''
+            out = self.ROUTE_PRINT if os.path.basename(cmd[0]).lower() == 'route.exe' else ''
             return SimpleNamespace(stdout=out, returncode=0)
 
+        def system_tool(*parts):
+            return os.path.join('C:\\Windows\\System32', *parts)
+
         with mock.patch.object(net_detect, 'PSUTIL_AVAILABLE', True), \
+                mock.patch.object(net_detect, 'system_tool', side_effect=system_tool), \
                 mock.patch.object(net_detect.subprocess, 'run', side_effect=run):
             self.assertEqual(net_detect.detect_default_gateway(), [ROUTER])
 

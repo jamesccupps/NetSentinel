@@ -184,5 +184,74 @@ class TestUnifiPinBeforeKey(unittest.TestCase):
         self.assertEqual(UnifiInventory(Settings()).refresh_sec, 300)
 
 
+class TestProgramsByAbsolutePath(unittest.TestCase):
+    """H1: the elevated process ran route, ipconfig, powershell and tshark by bare
+    name, and Windows looks for a bare name in the exe's own folder first."""
+
+    # POSIX-only openers (gui.py): no exe-folder lookup there.
+    POSIX_ONLY = {'open', 'xdg-open'}
+
+    def test_no_program_is_started_by_bare_name(self):
+        import ast
+        import glob
+        root = os.path.dirname(os.path.abspath(__file__))
+        bare = []
+        for path in glob.glob(os.path.join(root, 'src', '**', '*.py'), recursive=True):
+            with open(path, encoding='utf-8') as f:
+                tree = ast.parse(f.read())
+            for node in ast.walk(tree):
+                if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                        and node.func.attr in ('run', 'Popen', 'call', 'check_call',
+                                               'check_output')
+                        and node.args and isinstance(node.args[0], ast.List)
+                        and node.args[0].elts):
+                    continue
+                first = node.args[0].elts[0]
+                if isinstance(first, ast.Constant) and isinstance(first.value, str) \
+                        and first.value not in self.POSIX_ONLY:
+                    bare.append(f"{os.path.basename(path)}:{node.lineno} {first.value}")
+        self.assertEqual(bare, [])
+
+    def test_net_detect_runs_the_tools_it_was_given(self):
+        from types import SimpleNamespace
+        from unittest import mock
+        from src import net_detect
+        commands = []
+
+        def run(cmd, **kw):
+            commands.append(cmd[0])
+            return SimpleNamespace(stdout='', returncode=0)
+
+        with mock.patch.object(net_detect, 'PSUTIL_AVAILABLE', True), \
+                mock.patch.object(net_detect, 'system_tool',
+                                  side_effect=lambda *p: '|'.join(('SYS32',) + p)), \
+                mock.patch.object(net_detect.subprocess, 'run', side_effect=run):
+            net_detect.detect_default_gateway()
+            net_detect.detect_configured_dns_servers()
+            net_detect.detect_dhcp_server()
+        self.assertTrue(commands)
+        self.assertTrue(all(c.startswith('SYS32|') for c in commands), commands)
+
+    @unittest.skipUnless(os.name == 'nt', 'Windows paths')
+    def test_system32_comes_from_windows_not_the_environment(self):
+        from unittest import mock
+        from src.winpaths import system_tool
+        real = system_tool('ipconfig.exe')
+        self.assertTrue(os.path.isabs(real) and os.path.isfile(real), real)
+        with mock.patch.dict(os.environ, {'SystemRoot': 'C:\\owner-writable',
+                                          'windir': 'C:\\owner-writable'}):
+            self.assertEqual(system_tool('ipconfig.exe'), real)
+
+    @unittest.skipUnless(os.name == 'nt', 'Windows paths')
+    def test_tshark_is_never_taken_from_path_on_windows(self):
+        import tempfile
+        from unittest import mock
+        from src import pcap_analyzer
+        with tempfile.TemporaryDirectory() as empty, \
+                mock.patch.object(pcap_analyzer, 'program_files_dirs', return_value=[empty]), \
+                mock.patch.object(pcap_analyzer.shutil, 'which', return_value='tshark'):
+            self.assertIsNone(pcap_analyzer.find_tshark())
+
+
 if __name__ == '__main__':
     unittest.main()

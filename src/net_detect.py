@@ -23,6 +23,7 @@ import subprocess
 import ipaddress
 
 from src.ipcache import is_multicast_addr, is_link_local_addr
+from src.winpaths import system_tool
 
 logger = logging.getLogger("NetSentinel.NetDetect")
 
@@ -63,9 +64,13 @@ def detect_default_gateway():
     # Method 1: psutil + route table
     if PSUTIL_AVAILABLE:
         try:
-            # Parse 'route print' on Windows
+            # Parse 'route print' on Windows. Every tool is run by absolute path
+            # (src/winpaths.py): a bare name is looked up first in the exe's folder.
+            route = system_tool('ROUTE.EXE')
+            if not route:
+                raise FileNotFoundError('route')
             result = subprocess.run(
-                ['route', 'print', '0.0.0.0'],
+                [route, 'print', '0.0.0.0'],
                 capture_output=True, text=True, timeout=5,
                 creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0)
             )
@@ -75,8 +80,11 @@ def detect_default_gateway():
 
     # Method 2: ipconfig on Windows
     try:
+        ipconfig = system_tool('ipconfig.exe')
+        if not ipconfig:
+            raise FileNotFoundError('ipconfig')
         result = subprocess.run(
-            ['ipconfig'],
+            [ipconfig],
             capture_output=True, text=True, timeout=5,
             creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0)
         )
@@ -138,8 +146,11 @@ def detect_configured_dns_servers():
 
     # Method 1: Parse ipconfig /all
     try:
+        ipconfig = system_tool('ipconfig.exe')
+        if not ipconfig:
+            raise FileNotFoundError('ipconfig')
         result = subprocess.run(
-            ['ipconfig', '/all'],
+            [ipconfig, '/all'],
             capture_output=True, text=True, timeout=5,
             creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0)
         )
@@ -190,8 +201,11 @@ def detect_dhcp_server():
     """Try to detect the DHCP server IP."""
     dhcp_servers = []
     try:
+        ipconfig = system_tool('ipconfig.exe')
+        if not ipconfig:
+            raise FileNotFoundError('ipconfig')
         result = subprocess.run(
-            ['ipconfig', '/all'],
+            [ipconfig, '/all'],
             capture_output=True, text=True, timeout=5,
             creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0)
         )

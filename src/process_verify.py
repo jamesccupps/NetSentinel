@@ -26,6 +26,8 @@ import subprocess
 import json
 from datetime import datetime
 
+from src.winpaths import system_tool
+
 logger = logging.getLogger("NetSentinel.Verify")
 
 try:
@@ -386,11 +388,16 @@ class ProcessVerifier:
         result = {'signed': False, 'publisher': '', 'valid': False}
         if os.name != 'nt':
             return result
+        # By absolute path: a bare 'powershell' is looked up first in the exe's own
+        # (user-writable) folder, and this process is elevated (src/winpaths.py).
+        powershell = system_tool('WindowsPowerShell', 'v1.0', 'powershell.exe')
+        if not powershell:
+            return result
         try:
             env = dict(os.environ)
             env['NETSENTINEL_TARGET_PATH'] = exe_path
             proc = subprocess.run(
-                ['powershell', '-NoProfile', '-NonInteractive',
+                [powershell, '-NoProfile', '-NonInteractive',
                  '-Command', self._SIGNATURE_PS],
                 capture_output=True, text=True, timeout=10, env=env,
                 creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0)
