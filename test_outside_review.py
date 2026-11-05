@@ -305,5 +305,59 @@ class TestModelNotPickled(unittest.TestCase):
         self.assertFalse([n for n in os.listdir(MODELS_DIR) if n.endswith('.pkl')])
 
 
+class TestSignaturesThatDoNotVerify(unittest.TestCase):
+    """H7: a signature whose Status was not Valid still counted as signed, and
+    any trusted name found inside the publisher scored +3."""
+
+    def setUp(self):
+        import tempfile
+        from src.process_verify import ProcessVerifier
+        self.v = ProcessVerifier(cfg())
+        handle, self.exe = tempfile.mkstemp(suffix='.exe')
+        os.close(handle)
+        self.addCleanup(os.remove, self.exe)
+
+    def _verify(self, signature, location):
+        from unittest import mock
+        with mock.patch.object(self.v, '_check_signature', return_value=signature), \
+                mock.patch.object(self.v, '_check_location', return_value=location), \
+                mock.patch.object(self.v, '_get_file_metadata', return_value={'age_days': 30}):
+            return self.v.verify_process(exe_path=self.exe)
+
+    def test_a_forged_microsoft_signature_is_not_trusted(self):
+        from src.process_verify import Verdict
+        forged = {'signed': True, 'valid': False, 'publisher': 'Microsoft Corporation'}
+        result = self._verify(forged, {'is_system_dir': True})
+        self.assertNotIn(result['verdict'], (Verdict.VERIFIED_SAFE, Verdict.LIKELY_SAFE))
+        self.assertTrue(result['checks'].get('invalid_signature'))
+        self.assertNotIn('Digitally signed', result['summary'])
+        self.assertFalse(self.v._known_good, 'a forged signature reached known-good')
+
+    def test_a_valid_microsoft_signature_still_is(self):
+        from src.process_verify import Verdict
+        real = {'signed': True, 'valid': True, 'publisher': 'Microsoft Corporation'}
+        self.assertEqual(self._verify(real, {'is_system_dir': True})['verdict'],
+                         Verdict.VERIFIED_SAFE)
+
+    def test_publishers_match_by_whole_name(self):
+        from src.process_verify import is_trusted_publisher
+        for name in ('Microsoft Corporation', 'Microsoft Windows Publisher',
+                     'ESET, spol. s r.o.', 'Google LLC'):
+            self.assertTrue(is_trusted_publisher(name), name)
+        for name in ('Reset Ltd', 'Amdocs Ltd', 'Not Microsoft Corporation', ''):
+            self.assertFalse(is_trusted_publisher(name), name)
+
+    def test_the_writable_folders_under_windows_are_suspicious(self):
+        from src.process_verify import _WINDOWS, _SYSTEM32
+        for path in (os.path.join(_WINDOWS, 'Temp', 'svchost.exe'),
+                     os.path.join(_SYSTEM32, 'spool', 'drivers', 'color', 'x.exe'),
+                     os.path.join(_SYSTEM32, 'Tasks', 'x.exe')):
+            loc = self.v._check_location(path)
+            self.assertTrue(loc['is_suspicious_dir'], path)
+            self.assertFalse(loc['is_system_dir'], path)
+        self.assertTrue(self.v._check_location(
+            os.path.join(_SYSTEM32, 'svchost.exe'))['is_system_dir'])
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -24,9 +24,10 @@ import hashlib
 import logging
 import subprocess
 import json
+import ntpath
 from datetime import datetime
 
-from src.winpaths import system_tool
+from src.winpaths import program_files_dirs, system_directory, system_tool
 
 logger = logging.getLogger("NetSentinel.Verify")
 
@@ -91,20 +92,59 @@ TRUSTED_PUBLISHERS = {
     'cloudflare inc',
 }
 
+
+
+def _normalise_publisher(name):
+    return re.sub(r'\s+', ' ', str(name or '').strip().strip('"').lower()).rstrip('.')
+
+
+def is_trusted_publisher(publisher):
+    """
+    The signer is one of TRUSTED_PUBLISHERS: the whole name, or the name followed
+    by a word break ("Microsoft Windows Publisher"). Any substring used to do,
+    so "Reset Ltd" counted as ESET and "Amdocs" as AMD.
+    """
+    name = _normalise_publisher(publisher)
+    if not name:
+        return False
+    for trusted in TRUSTED_PUBLISHERS:
+        if name == trusted or (name.startswith(trusted) and name[len(trusted)] in ' ,('):
+            return True
+    return False
+
+
 # ─── Expected Process Locations ──────────────────────────────────────────────
 
+# From Windows itself (src/winpaths.py), not %SystemRoot%, which a program running
+# as the owner can set for the elevated process to inherit.
+_SYSTEM32 = system_directory() or r'C:\Windows\System32'
+_WINDOWS = ntpath.dirname(_SYSTEM32)
+
 SYSTEM_DIRS = {
-    os.environ.get('SystemRoot', r'C:\Windows'),
-    os.path.join(os.environ.get('SystemRoot', r'C:\Windows'), 'System32'),
-    os.path.join(os.environ.get('SystemRoot', r'C:\Windows'), 'SysWOW64'),
-    os.path.join(os.environ.get('SystemRoot', r'C:\Windows'), 'SystemApps'),
+    _WINDOWS,
+    _SYSTEM32,
+    ntpath.join(_WINDOWS, 'SysWOW64'),
+    ntpath.join(_WINDOWS, 'SystemApps'),
 }
 
-PROGRAM_DIRS = {
-    os.environ.get('ProgramFiles', r'C:\Program Files'),
-    os.environ.get('ProgramFiles(x86)', r'C:\Program Files (x86)'),
-    os.environ.get('ProgramW6432', r'C:\Program Files'),
+# Folders under Windows that ordinary users can write to, so a file there says
+# nothing about who put it there.
+WRITABLE_SYSTEM_DIRS = {
+    ntpath.join(_WINDOWS, 'Temp'),
+    ntpath.join(_WINDOWS, 'Tasks'),
+    ntpath.join(_WINDOWS, 'tracing'),
+    ntpath.join(_WINDOWS, 'Registration', 'CRMLog'),
+    ntpath.join(_SYSTEM32, 'Tasks'),
+    ntpath.join(_SYSTEM32, 'spool', 'drivers', 'color'),
+    ntpath.join(_SYSTEM32, 'spool', 'PRINTERS'),
+    ntpath.join(_SYSTEM32, 'spool', 'SERVERS'),
+    ntpath.join(_SYSTEM32, 'Microsoft', 'Crypto', 'RSA', 'MachineKeys'),
+    ntpath.join(_SYSTEM32, 'com', 'dmp'),
+    ntpath.join(_WINDOWS, 'SysWOW64', 'Tasks'),
+    ntpath.join(_WINDOWS, 'SysWOW64', 'com', 'dmp'),
 }
+
+PROGRAM_DIRS = set(program_files_dirs()) or {r'C:\Program Files', r'C:\Program Files (x86)'}
 
 # Suspicious locations where malware commonly hides
 SUSPICIOUS_LOCATIONS = {
@@ -113,6 +153,13 @@ SUSPICIOUS_LOCATIONS = {
     'programdata',  # Sometimes legitimate, but malware uses it
     'public', 'users\\public',
 }
+
+
+def _under(path_lower, folder):
+    """path is inside folder, so a folder named Windows2 is not under Windows."""
+    path_lower = path_lower.replace('/', '\\')
+    folder = folder.lower().replace('/', '\\').rstrip('\\')
+    return path_lower.startswith(folder + '\\')
 
 
 class ProcessVerifier:
@@ -207,14 +254,20 @@ class ProcessVerifier:
         checks['digital_signature'] = sig_result
         if sig_result.get('skipped'):
             pass  # No signal either way — don't score it
-        elif sig_result.get('signed'):
-            publisher = sig_result.get('publisher', '').lower()
-            if any(trusted in publisher for trusted in TRUSTED_PUBLISHERS):
+        elif sig_result.get('valid'):
+            # Only a signature that verifies says who published the file. One that
+            # does not (NotTrusted, HashMismatch) used to count the same: a
+            # self-signed "CN=Microsoft Corporation" scored as Microsoft.
+            if is_trusted_publisher(sig_result.get('publisher', '')):
                 score += 3  # Strong safe signal
                 checks['trusted_publisher'] = True
             else:
                 score += 1  # Signed but unknown publisher
                 checks['trusted_publisher'] = False
+        elif sig_result.get('signed'):
+            score -= 3  # A signature is there and does not verify: forged or tampered
+            checks['trusted_publisher'] = False
+            checks['invalid_signature'] = True
         else:
             score -= 1  # Unsigned
 
@@ -308,8 +361,9 @@ class ProcessVerifier:
             del self._cache[oldest_key]
         self._cache[cache_key] = (result['verdict'], result, time.time())
 
-        # If verified safe, add to known-good for future
-        if result['verdict'] == Verdict.VERIFIED_SAFE and file_hash:
+        # If verified safe, add to known-good for future. Only on a signature that
+        # verifies: the list adds +3 for good, so a wrong entry is permanent.
+        if result['verdict'] == Verdict.VERIFIED_SAFE and file_hash and sig_result.get('valid'):
             self._add_known_good(file_hash, exe_path)
 
         return result
@@ -441,24 +495,29 @@ class ProcessVerifier:
 
         path_lower = exe_path.lower()
 
-        # Check system directories
-        for sys_dir in SYSTEM_DIRS:
-            if path_lower.startswith(sys_dir.lower()):
-                result['is_system_dir'] = True
-                break
-
-        # Check program directories
-        for prog_dir in PROGRAM_DIRS:
-            if path_lower.startswith(prog_dir.lower()):
-                result['is_program_dir'] = True
-                break
-
-        # Check suspicious locations
-        for suspicious in SUSPICIOUS_LOCATIONS:
-            if suspicious in path_lower:
+        # Suspicious first: C:\Windows\Temp is under C:\Windows, and "system dir"
+        # (+2) used to win over the temp penalty there.
+        for writable in WRITABLE_SYSTEM_DIRS:
+            if _under(path_lower, writable):
                 result['is_suspicious_dir'] = True
-                result['suspicious_reason'] = f'File is in {suspicious} directory'
+                result['suspicious_reason'] = 'File is in a user-writable folder under Windows'
                 break
+        if not result['is_suspicious_dir']:
+            for suspicious in SUSPICIOUS_LOCATIONS:
+                if suspicious in path_lower:
+                    result['is_suspicious_dir'] = True
+                    result['suspicious_reason'] = f'File is in {suspicious} directory'
+                    break
+
+        if not result['is_suspicious_dir']:
+            for sys_dir in SYSTEM_DIRS:
+                if _under(path_lower, sys_dir):
+                    result['is_system_dir'] = True
+                    break
+            for prog_dir in PROGRAM_DIRS:
+                if _under(path_lower, prog_dir):
+                    result['is_program_dir'] = True
+                    break
 
         # User directory (AppData, etc.) — common for user-installed apps
         user_profile = os.environ.get('USERPROFILE', '').lower()
@@ -622,7 +681,7 @@ class ProcessVerifier:
         loc = checks.get('file_location', {})
 
         if verdict_type == 'safe':
-            if sig.get('signed') and sig.get('publisher'):
+            if sig.get('valid') and sig.get('publisher'):
                 parts.append(f"Digitally signed by {sig['publisher']}")
             if loc.get('is_system_dir'):
                 parts.append("Located in Windows system directory")
@@ -636,7 +695,7 @@ class ProcessVerifier:
             return ". ".join(parts) + "." if parts else "Verified safe."
 
         elif verdict_type == 'likely_safe':
-            if sig.get('signed'):
+            if sig.get('valid'):
                 parts.append(f"Signed by {sig.get('publisher', 'unknown publisher')}")
             if loc.get('is_program_dir') or loc.get('is_user_dir'):
                 parts.append("In expected location")
