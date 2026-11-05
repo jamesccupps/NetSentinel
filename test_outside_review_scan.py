@@ -20,8 +20,9 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import _test_support  # noqa: E402,F401
 
-from src import file_scan, script_rules  # noqa: E402
+from src import file_scan, script_rules, syslog_receiver  # noqa: E402
 from test_scan_scripts import ovba_literal  # noqa: E402
+from test_syslog_receiver import CEF  # noqa: E402
 
 _OLD_PDF_STREAM = re.compile(rb'stream\r?\n(.*?)endstream', re.S)
 
@@ -288,6 +289,66 @@ class TestMacroSource(unittest.TestCase):
                                        strings=False, notes=notes)
         self.assertEqual(len(text), 1024 * 1024)
         self.assertEqual(notes, ['macro source past the first 1 MB was not read'])
+
+
+# ─── Syslog ─────────────────────────────────────────────────────────────
+
+_OLD_CEF_EXT = re.compile(r'(\w+)=((?:\\=|[^=])*?)(?=\s+\w+=|\s*$)')
+
+
+def old_cef_extension(ext):
+    return {k: v.replace('\\=', '=').replace('\\\\', '\\').strip()
+            for k, v in _OLD_CEF_EXT.findall(ext)}
+
+
+# The UniFi lines test_syslog_receiver reads, after the CEF header's seven fields.
+UNIFI_LINES = [
+    CEF,
+    'Nov 02 17:22:17 HOME-UDM CEF:0|Ubiquiti|UniFi Network|10.6.109|544|Network Accessed|4|'
+    'UNIFIcategory=Audit UNIFIhost=HOME UDM UNIFIaccessMethod=web UNIFIadmin=Sam Admin '
+    'src=192.168.1.20 UNIFIutcTime=2026-11-02T22:22:17.796Z msg=Sam Admin accessed UniFi '
+    'Network using the web. Source IP: 192.168.1.20',
+    'Nov 02 17:32:34 HOME-UDM CEF:0|Ubiquiti|UniFi Network|10.6.109|203|Blocked by Firewall|4|'
+    'UNIFIcategory=Security UNIFIhost=HOME UDM proto=TCP spt=50261 dpt=80 act=blocked app=HTTP '
+    'UNIFIrisk=low UNIFIpolicyName=IOT TV to WAN UNIFIpolicyType=Firewall '
+    'UNIFIdirection=outgoing deviceInboundInterface=Home IOT deviceOutboundInterface=Internet 1 '
+    'dst=142.250.68.195 UNIFIsrcClientAlias=Living Room TV UNIFIsrcClientHostname=Samsung '
+    'UNIFIsrcClientIp=192.168.1.45 UNIFIsrcClientMac=02:00:00:00:00:45 UNIFIsrcZone=Home IOT '
+    'UNIFIdstZone=External UNIFIdstDomain=tv.example.com UNIFIfirewallPolicy=IOT TV to WAN '
+    'UNIFIflowCount=1 msg=Living Room TV was blocked from accessing 142.250.68.195',
+    'CEF:0|Ubiquiti|UniFi Network|10.6.109|1|Escapes|1|msg=a\\=b c\\\\d  dst=198.51.100.7   ',
+]
+
+
+def extension(line):
+    return re.split(r'(?<!\\)\|', line[line.index('CEF:'):].partition('|')[2], maxsplit=6)[6]
+
+
+class TestCefExtension(unittest.TestCase):
+    """M2: the CEF extension regex was quadratic on whitespace, holding the GIL."""
+
+    def test_unifi_lines_read_as_before(self):
+        for line in UNIFI_LINES:
+            with self.subTest(line=line[-40:]):
+                ext = extension(line)
+                self.assertEqual(syslog_receiver._cef_extension(ext), old_cef_extension(ext))
+
+    def test_an_equals_sign_inside_a_value_stays_in_it(self):
+        # the old parser dropped request and made up a key c
+        fields = syslog_receiver._cef_extension('request=http://x/?a=b&c=1 src=192.168.1.40')
+        self.assertEqual(fields, {'request': 'http://x/?a=b&c=1', 'src': '192.168.1.40'})
+        r = syslog_receiver.parse('CEF:0|Ubiquiti|UniFi Network|10.6.109|1|Blocked|4|'
+                                  'msg=blocked http://x/?a=b&c=1 src=192.168.1.40 dst=198.51.100.7')
+        self.assertEqual((r['message'], r['src'], r['dst']),
+                         ('blocked http://x/?a=b&c=1', '192.168.1.40', '198.51.100.7'))
+
+    def test_whitespace_runs_are_read_in_linear_time(self):
+        line = 'CEF:0|Ubiquiti|UniFi Network|10.6.109|1|E|1|key=' + ' \t' * 4060 + 'x'
+        self.assertLessEqual(len(line), syslog_receiver.MAX_MESSAGE)
+        started = time.perf_counter()
+        for _ in range(5):
+            syslog_receiver.parse(line)
+        self.assertLess(time.perf_counter() - started, 1.0)
 
 
 if __name__ == '__main__':

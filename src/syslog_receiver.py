@@ -43,7 +43,8 @@ _PRI = re.compile(r'^<(\d{1,3})>')
 _RFC5424 = re.compile(r'^1 (\S+) (\S+) (\S+) (\S+) (\S+) (?:-|(?:\[.*?\])+) ?')
 # A UniFi gateway's own lines name the host twice: "HOME-UDM HOME-UDM ulogd[26]: ..."
 _RFC3164 = re.compile(r'^[A-Z][a-z]{2} [ \d]\d \d\d:\d\d:\d\d (\S+) (?:[^:\s]+ )?([^:\s]+?)(?:\[\d+\])?: ?')
-_CEF_EXT = re.compile(r'(\w+)=((?:\\=|[^=])*?)(?=\s+\w+=|\s*$)')
+# A CEF extension key: a word and '=' at the start or after whitespace.
+_CEF_KEY = re.compile(r'(?:^|(?<=\s))(\w+)=')
 _KV = re.compile(r'(\w+)=("[^"]*"|\S*)')
 
 # Field names, as UniFi's CEF and iptables lines spell them, in preference order.
@@ -90,8 +91,7 @@ def parse(text):
         if len(parts) == 7:
             fields['event'] = parts[4][:120]
             fields['severity'] = parts[5][:10]
-            for k, v in _CEF_EXT.findall(parts[6]):
-                fields[k] = v.replace('\\=', '=').replace('\\\\', '\\').strip()
+            fields.update(_cef_extension(parts[6]))
     else:
         for k, v in _KV.findall(text):
             fields[k] = v.strip('"')
@@ -116,6 +116,24 @@ def parse(text):
     if program and program != '-':
         out['program'] = program[:60]
     out['raw'] = text[:RAW_KEPT]
+    return out
+
+
+def _cef_extension(ext):
+    """
+    A CEF extension's key=value pairs: each value runs to the next key.
+
+    The regex this replaced matched a value lazily up to a lookahead for the
+    next key, so 'key=' and a long run of whitespace before a non-space tail
+    took most of a second per 8 KB datagram, holding the GIL: one forged
+    packet a second stalled the whole app. It also stopped a value at an
+    unescaped '=', so request=http://x/?a=b&c=1 lost request and gained c.
+    """
+    keys = list(_CEF_KEY.finditer(ext))
+    out = {}
+    for i, m in enumerate(keys):
+        end = keys[i + 1].start() if i + 1 < len(keys) else len(ext)
+        out[m.group(1)] = ext[m.end():end].replace('\\=', '=').replace('\\\\', '\\').strip()
     return out
 
 
