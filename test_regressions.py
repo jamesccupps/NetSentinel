@@ -347,7 +347,11 @@ class TestSignatureCheckInjection(unittest.TestCase):
             captured['env'] = kwargs.get('env', {})
             raise RuntimeError('stop here')
 
+        # PowerShell by absolute path (src/winpaths.py), which off Windows has no
+        # System32 to find: give it one, so the check reaches the command.
         original, pv.subprocess.run = pv.subprocess.run, fake_run
+        original_tool = pv.system_tool
+        pv.system_tool = lambda *parts: 'C:\\Windows\\System32\\' + '\\'.join(parts)
         original_name, os.name = os.name, 'nt'
         try:
             verifier = ProcessVerifierFactory()
@@ -355,6 +359,7 @@ class TestSignatureCheckInjection(unittest.TestCase):
             verifier._check_signature(evil)
         finally:
             pv.subprocess.run = original
+            pv.system_tool = original_tool
             os.name = original_name
 
         joined = ' '.join(captured.get('cmd', []))
