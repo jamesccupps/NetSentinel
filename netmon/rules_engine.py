@@ -222,14 +222,48 @@ _PLACEHOLDER = re.compile(r'\{([a-zA-Z_][a-zA-Z0-9_]*)\}')
 #: is to be pasted into a terminal.
 _OPTIONAL = re.compile(r'\[([^\[\]]*\{[a-zA-Z_][a-zA-Z0-9_]*\}[^\[\]]*)\]')
 
+#: ASCII punctuation a value may carry into a suggested command. Every other
+#: ASCII symbol means something to a shell: quotes end the quoting the
+#: templates put around their values, and `$`, backticks, `;`, `|`, `&`,
+#: redirections, globs and `\` do the rest.
+_COMMAND_PUNCTUATION = frozenset(' ._-:/@%+,=')
 
-def render(template, event, fallback='?'):
+#: What stands in for a value that is not safe to paste. Shaped like the
+#: templates' own `<pcap>`: something the person fills in for themselves.
+UNSAFE_VALUE = '<withheld: shell characters>'
+
+
+def _safe_in_command(value):
+    """
+    Whether a value from the network can sit in a suggested command as it is.
+
+    Letters and digits in any script pass, and so do spaces: mDNS names have
+    both ("Büro Drucker"), and each template quotes what it substitutes.
+    Control and formatting characters do not, nor does any ASCII symbol
+    outside a short list.
+    """
+    for char in value:
+        if char.isalnum() or char in _COMMAND_PUNCTUATION:
+            continue
+        if ord(char) > 127 and char.isprintable():
+            continue
+        return False
+    return True
+
+
+def render(template, event, fallback='?', command=False):
     """
     Substitute `{field}` from the event. Deliberately not str.format.
 
     str.format on a rule-supplied string would allow `{x.__class__.__mro__}` and
     friends, which turns an editable rule file into a way to read the
     interpreter. This handles names, and optional groups, and nothing else.
+
+    `command` is for `next_check`, which is pasted into a root shell. The
+    values come from the network, so one carrying a quote or a `$(...)` is
+    replaced by UNSAFE_VALUE rather than quoted again: the templates already
+    quote their substitutions, and a second layer of quoting inside the first
+    would break exactly the values it meant to protect.
     """
     if not template:
         return ''
@@ -249,7 +283,10 @@ def render(template, event, fallback='?'):
         value = event.get(match.group(1))
         if value is None or value == '':
             return fallback
-        return str(value)
+        value = str(value)
+        if command and not _safe_in_command(value):
+            return UNSAFE_VALUE
+        return value
 
     return _PLACEHOLDER.sub(replace, text)
 
@@ -348,7 +385,7 @@ class Rule:
             ts=event.ts,
             device=str(device),
             key=render(self.key_template, event, fallback=''),
-            next_check=render(self.next_check, event),
+            next_check=render(self.next_check, event, command=True),
             event=event,
             evidence={name: event.get(name) for name in self.evidence_fields},
         )

