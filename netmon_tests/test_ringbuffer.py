@@ -210,10 +210,15 @@ class TestDirectory(_RingCase):
 
     def test_a_capture_with_another_name_falls_back_to_its_mtime(self):
         when = time.time() - 3600
-        self.write_capture('somethingelse.pcap', when=when)
+        self.write_capture('netmon-by-hand.pcap', when=when)
         files = self.ring.files()
         self.assertEqual(len(files), 1)
         self.assertAlmostEqual(files[0]['started'], when, delta=2)
+
+    def test_a_pcap_tcpdump_did_not_write_is_not_a_capture(self):
+        """An alert's extract lives here too; it is not part of the ring."""
+        self.write_capture('somethingelse.pcap', when=time.time() - 3600)
+        self.assertEqual(self.ring.files(), [])
 
     def test_an_empty_directory_is_not_an_error(self):
         self.assertEqual(self.ring.files(), [])

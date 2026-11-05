@@ -48,6 +48,9 @@ class RingBufferError(RuntimeError):
 #: tcpdump writes these with `-w <dir>/netmon-%Y%m%d-%H%M%S.pcap -G <seconds>`.
 _FILENAME = re.compile(r'^netmon-(\d{8})-(\d{6})\.pcapn?g?$')
 _PREFIX = 'netmon'
+#: What an alert's extract is called. Kept beside the captures, which is where
+#: the alert says to look, but never counted as one.
+_EXTRACT_PREFIX = 'extract-'
 
 
 class RingBuffer:
@@ -60,7 +63,8 @@ class RingBuffer:
     """
 
     def __init__(self, directory, profile=None, hours=36, max_gb=200,
-                 rotate_seconds=900, snaplen=2048, interface=''):
+                 rotate_seconds=900, snaplen=2048, interface='',
+                 max_extracts=200):
         self.directory = directory
         self.profile = profile
         self.hours = float(hours)
@@ -68,6 +72,9 @@ class RingBuffer:
         self.rotate_seconds = int(rotate_seconds)
         self.snaplen = int(snaplen)
         self.interface = interface or self._configured('interface', '')
+        # Extracts are kept as long as the captures they came from, and no
+        # more than this many: each push can cut one.
+        self.max_extracts = int(max_extracts)
 
     def _configured(self, key, default):
         capture = (getattr(self.profile, 'raw', {}) or {}).get('capture') or {}
@@ -161,6 +168,12 @@ class RingBuffer:
             return []
         out = []
         for name in os.listdir(self.directory):
+            # Only what tcpdump wrote. An alert's extract lands here too, and
+            # with a fresh mtime it sorted newest: the service then took the
+            # live capture for a finished one and analysed it half-written,
+            # and an extract covered "now" for the next one.
+            if not name.startswith(_PREFIX + '-'):
+                continue
             path = os.path.join(self.directory, name)
             if not os.path.isfile(path):
                 continue
@@ -247,8 +260,47 @@ class RingBuffer:
             freed += entry['size']
             total -= entry['size']
 
+        extracts = self._prune_extracts(cutoff, dry_run)
+        freed += sum(entry['size'] for entry in extracts)
         return {'removed': removed, 'freed_bytes': freed,
-                'remaining': len(files)}
+                'remaining': len(files),
+                'extracts_removed': [entry['name'] for entry in extracts]}
+
+    def extracts(self):
+        """The alert extracts in the directory, oldest first, by when written."""
+        if not os.path.isdir(self.directory):
+            return []
+        out = []
+        for name in os.listdir(self.directory):
+            if not (name.startswith(_EXTRACT_PREFIX) and name.endswith('.pcap')):
+                continue
+            path = os.path.join(self.directory, name)
+            try:
+                if not os.path.isfile(path):
+                    continue
+                out.append({'path': path, 'name': name,
+                            'written': os.path.getmtime(path),
+                            'size': os.path.getsize(path)})
+            except OSError:
+                continue
+        return sorted(out, key=lambda e: e['written'])
+
+    def _prune_extracts(self, cutoff, dry_run=False):
+        """
+        Extracts past the capture retention, then the oldest past the count.
+
+        By mtime, unlike the captures: an extract is written once, and its
+        name carries the time of the finding, not of the writing.
+        """
+        extracts = self.extracts()
+        doomed = [e for e in extracts if e['written'] < cutoff]
+        kept = [e for e in extracts if e['written'] >= cutoff]
+        if len(kept) > self.max_extracts:
+            doomed += kept[:len(kept) - self.max_extracts]
+        if not dry_run:
+            for entry in doomed:
+                self._remove(entry['path'])
+        return doomed
 
     @staticmethod
     def _remove(path):
@@ -304,7 +356,8 @@ class RingBuffer:
 
         if out_path is None:
             stamp = time.strftime('%Y%m%d-%H%M%S', time.localtime(around))
-            out_path = os.path.join(self.directory, f'extract-{stamp}.pcap')
+            out_path = os.path.join(self.directory,
+                                    f'{_EXTRACT_PREFIX}{stamp}.pcap')
 
         from netmon.leakcheck import Restricted, frame_layout
 
@@ -473,6 +526,8 @@ def _main(argv=None):
               f"{result['remaining']} remain")
         for name in result['removed'][:20]:
             print(f'  - {name}')
+        if result['extracts_removed']:
+            print(f"{verb} {len(result['extracts_removed'])} alert extracts")
         return 0
 
     try:

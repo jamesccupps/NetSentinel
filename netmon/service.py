@@ -450,9 +450,10 @@ class Service:
         if self.ring is None:
             return
         result = self.ring.prune()
-        if result['removed']:
-            logger.info('pruned %d capture files, %d MB',
+        if result['removed'] or result.get('extracts_removed'):
+            logger.info('pruned %d capture files and %d alert extracts, %d MB',
                         len(result['removed']),
+                        len(result.get('extracts_removed') or ()),
                         result['freed_bytes'] // (1024 * 1024))
 
     def digest_view(self):

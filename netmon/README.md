@@ -340,7 +340,9 @@ python -m netmon.ringbuffer --profile my-site.yaml --dir ... --prune
 Pass `--ring <dir>` to `netmon.analyze --notify` and each pushed alert gets the
 packets around it written out and named, narrowed to the devices involved — a
 hundred thousand packets become the few dozen someone will read. A failed
-extract never stops the alert.
+extract never stops the alert. Extracts are written beside the captures as
+`extract-*.pcap`, are never mistaken for one, and are pruned with them: none
+older than the captures kept, and no more than 200.
 
 **Restricted segments are excluded by the filter, not omitted from it.** A
 capture that happens not to select VLAN 40 is one edit away from selecting it.

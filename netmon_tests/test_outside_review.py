@@ -259,5 +259,79 @@ class TestUrlsLoseTheirCredentials(unittest.TestCase):
                 self.assertEqual(audit(text), [])
 
 
+# ─── M21: alert extracts were taken for captures ─────────────────────────────
+
+class TestExtractsAreNotCaptures(unittest.TestCase):
+    """
+    Extracts are written into the capture directory, and any .pcap there was
+    a capture, dated by its mtime. A fresh extract therefore sorted newest:
+    the service took the live tcpdump file for a finished one and analysed it
+    half-written on every pass, and the extract "covered" the present.
+    """
+
+    def setUp(self):
+        import shutil
+        import tempfile
+        import time
+        from netmon.ringbuffer import RingBuffer
+        self.scratch = tempfile.mkdtemp(prefix='netmon-review-ring-')
+        self.addCleanup(shutil.rmtree, self.scratch, True)
+        self.ring_dir = os.path.join(self.scratch, 'capture')
+        os.makedirs(self.ring_dir)
+        self.ring = RingBuffer(self.ring_dir)
+        self.now = time.time()
+        self.old = self.write(self.capture_name(self.now - 1800))
+        self.live = self.write(self.capture_name(self.now - 600))
+        self.extract = self.write('extract-20261105-101500.pcap', when=self.now)
+
+    @staticmethod
+    def capture_name(when):
+        import time
+        return time.strftime('netmon-%Y%m%d-%H%M%S.pcap', time.localtime(when))
+
+    def write(self, name, when=None, size=64):
+        path = os.path.join(self.ring_dir, name)
+        with open(path, 'wb') as handle:
+            handle.write(b'\0' * size)
+        if when is not None:
+            os.utime(path, (when, when))
+        return path
+
+    def test_the_ring_is_only_what_tcpdump_wrote(self):
+        self.assertEqual([f['path'] for f in self.ring.files()],
+                         [self.old, self.live])
+
+    def test_the_present_is_covered_by_the_live_capture(self):
+        covering = self.ring.files_covering(self.now - 10, self.now + 10)
+        self.assertEqual([f['path'] for f in covering], [self.live])
+
+    def test_the_live_capture_is_not_analysed(self):
+        from netmon.service import Service, ServiceConfig
+        config = ServiceConfig(profile_path=EXAMPLE, ring_dir=self.ring_dir,
+                               state_dir=os.path.join(self.scratch, 'state'),
+                               notify=False)
+        config.web_port = None
+        service = Service(config)
+        with self.assertLogs('netmon.service', level='WARNING'):
+            service.analyse_new_captures()          # the files are not pcaps
+        self.assertIn(self.old, service.processed)
+        self.assertNotIn(self.live, service.processed)
+        self.assertNotIn(self.extract, service.processed)
+
+    def test_extracts_are_pruned_by_age_and_count(self):
+        self.ring.hours = 1
+        self.ring.max_extracts = 2
+        stale = self.write('extract-20261105-050000.pcap', when=self.now - 7200)
+        recent = [self.write(f'extract-20261105-1{n}0000.pcap',
+                             when=self.now - 300 + n) for n in range(3)]
+        result = self.ring.prune(now=self.now)
+        left = {e['path'] for e in self.ring.extracts()}
+        self.assertNotIn(stale, left)
+        self.assertEqual(left, {recent[2], self.extract})
+        self.assertEqual(len(result['extracts_removed']), 3)
+        # The captures are judged on their own terms, and none is old enough.
+        self.assertEqual(result['removed'], [])
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)
