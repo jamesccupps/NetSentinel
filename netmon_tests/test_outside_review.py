@@ -766,17 +766,23 @@ class _ServiceWithNtfy(unittest.TestCase):
         self.opener = _Opener()
         self.ring = _Ring()
 
-    def service(self):
+    def service(self, budget=None):
         from netmon.alerting import Notifier, NotifierConfig
         from netmon.service import Service, ServiceConfig
         config = ServiceConfig(profile_path=EXAMPLE, notify=False,
                                state_dir=os.path.join(self.scratch, 'state'))
         config.web_port = None
         service = Service(config, clock=self.clock)
+        extra = {}
+        if budget is not None:
+            from netmon.alerting import PushBudget
+            extra['budget'] = PushBudget(config.push_budget_path,
+                                         per_hour=budget[0], reserve=budget[1],
+                                         clock=self.clock)
         service.notifier = Notifier(
             NotifierConfig(server='https://ntfy.example.test', topic='site'),
             service.profile, opener=self.opener, ring=self.ring,
-            silences=service.silences)
+            silences=service.silences, **extra)
         service._next['digest'] = float('inf')     # no digest in these
         return service
 
@@ -905,6 +911,131 @@ class TestFailedPushesAreRetried(_ServiceWithNtfy):
         # The send never got as far as an extract, so the retry cut one.
         self.assertEqual(self.ring.cuts, 1)
         self.assertIn(_Ring.PATH, self.opener.bodies[0])
+
+
+# ─── M20: no push budget ─────────────────────────────────────────────────────
+
+def _high(n, src='192.168.10.20', port=53):
+    from netmon.events import Event, Finding
+    dst = f'203.0.113.{n}'
+    return Finding('dns_bypass', 'DNS sent somewhere other than the gateway',
+                   severity='high', tier='push', device='ops-laptop-3',
+                   key=dst, description=f'ops-laptop-3 sent dns to {dst}',
+                   event=Event(kind='dns', ts=1_790_000_000.0, src_ip=src,
+                               dst_ip=dst, dst_port=port, protocol='udp'))
+
+
+class TestThePushBudget(_ServiceWithNtfy):
+    """Six an hour here, two of them kept for what must always get through."""
+
+    def setUp(self):
+        super().setUp()
+        self.opener.fail = False
+
+    def flood(self, service, count=10, start=1):
+        with self.assertLogs('netmon.alerting', level='WARNING'):
+            service.deliver([_high(n) for n in range(start, start + count)])
+
+    def test_ordinary_pushes_stop_at_the_budget_and_go_to_the_digest(self):
+        service = self.service(budget=(6, 2))
+        self.flood(service)
+        self.assertEqual(len(self.opener.bodies), 4)
+        self.assertEqual(self.ring.cuts, 4)          # none for what was held
+        held = [f for f in service.recent if f.push_status == 'held']
+        self.assertEqual(len(held), 6)
+        self.assertEqual(held[0].as_dict()['push_status'], 'held')
+        body = service.digest_body()
+        self.assertIn('6 held back from push by the hourly budget', body)
+        self.assertIn('[held by the push budget]', body)
+        self.assertEqual(service.window.pending, {})   # held, not retried
+
+    def test_critical_findings_and_canary_hits_always_get_through(self):
+        service = self.service(budget=(6, 2))
+        self.flood(service, count=20)
+        critical = _high(99)
+        critical.severity = 'critical'
+        service.deliver([critical, _canary_hit()])
+        self.assertEqual(len(self.opener.bodies), 6)
+        self.assertEqual(service.recent[-1].push_status, '')
+        self.assertEqual(service.recent[-2].push_status, '')
+
+    def test_a_restart_is_not_a_new_hour_but_an_hour_is(self):
+        self.flood(self.service(budget=(6, 2)))
+        restarted = self.service(budget=(6, 2))
+        with self.assertLogs('netmon.alerting', level='WARNING'):
+            restarted.deliver([_high(50)])
+        self.assertEqual(len(self.opener.bodies), 4)
+        self.clock.now += 3601
+        restarted.deliver([_high(51)])
+        self.assertEqual(len(self.opener.bodies), 5)
+
+    def test_the_service_keeps_its_budget_under_state(self):
+        from unittest import mock
+        from netmon.service import Service, ServiceConfig
+        state = os.path.join(self.scratch, 'state')
+        config = ServiceConfig(profile_path=EXAMPLE, state_dir=state)
+        config.web_port = None
+        settings = {'NETMON_NTFY_SERVER': 'https://ntfy.example.test',
+                    'NETMON_NTFY_TOPIC': 'site', 'NETMON_PUSH_BUDGET': '12',
+                    'NETMON_PUSH_RESERVE': '3'}
+        with mock.patch.dict(os.environ, settings):
+            os.environ.pop('NETMON_SECRETS', None)
+            budget = Service(config).notifier.budget
+        self.assertEqual(budget.path, os.path.join(state, 'push-budget.json'))
+        self.assertEqual((budget.per_hour, budget.reserve), (12, 3))
+
+    def test_a_mistyped_budget_is_the_default(self):
+        from netmon.alerting import PushBudget, load_config
+        with self.assertLogs('netmon.alerting', level='WARNING'):
+            config = load_config(None, environ={'NETMON_PUSH_BUDGET': '2O'})
+        self.assertEqual(config.push_budget, PushBudget.PER_HOUR)
+        self.assertEqual(load_config(None, environ={
+            'NETMON_PUSH_BUDGET': '0'}).push_budget, 0)
+
+
+class TestScansAreRolledUp(_ServiceWithNtfy):
+
+    def setUp(self):
+        super().setUp()
+        self.opener.fail = False
+
+    def scan(self, ports):
+        from netmon.events import Event, Finding
+        out = []
+        for port in ports:
+            event = Event(kind='flow', ts=1_790_000_000.0 + port,
+                          src_ip='10.10.60.50', dst_ip='10.10.20.21',
+                          dst_port=port, protocol='tcp')
+            out.append(Finding(
+                'cross_vlan_unexpected', 'Traffic between VLANs',
+                severity='high', tier='push', device='ops-workstation',
+                key=f'60->20:{port}', event=event,
+                description=f'ops-workstation reached ahu on tcp/{port}'))
+        return out
+
+    def test_a_port_scan_is_one_push_with_one_extract(self):
+        service = self.service()
+        service.deliver(self.scan(range(1, 301)))
+        self.assertEqual(len(self.opener.bodies), 1)
+        self.assertEqual(self.ring.cuts, 1)
+        self.assertEqual(len(service.recent), 1)
+        rolled = service.recent[0]
+        self.assertEqual(rolled.count, 300)
+        self.assertEqual(rolled.key, '10.10.60.50->10.10.20.21/scan')
+        self.assertIn('300 ports', rolled.description)
+        self.assertIn('300 ports', self.opener.bodies[0])
+
+    def test_the_next_pass_of_the_same_scan_is_a_repeat(self):
+        service = self.service()
+        service.deliver(self.scan(range(1, 101)))
+        service.deliver(self.scan(range(101, 201)))
+        self.assertEqual(len(self.opener.bodies), 1)
+        self.assertEqual(service.recent[0].count, 200)
+
+    def test_a_few_ports_are_not_a_scan(self):
+        service = self.service()
+        service.deliver(self.scan([80, 443, 8443]))
+        self.assertEqual(len(self.opener.bodies), 3)
 
 
 if __name__ == '__main__':

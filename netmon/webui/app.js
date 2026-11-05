@@ -18,7 +18,7 @@ const SUMMARISE = document.body.dataset.summarise === 'true';
 
 const SILENCE_LABELS = { ack: 'acknowledged', maintenance: 'maintenance',
                          snooze: 'snoozed' };
-const PUSH_LABELS = { failed: 'push failed' };
+const PUSH_LABELS = { failed: 'push failed', held: 'held by the push budget' };
 
 const $ = (sel) => document.querySelector(sel);
 const $$ = (sel) => Array.from(document.querySelectorAll(sel));
@@ -119,7 +119,8 @@ function renderFindings() {
                        silenced.kind));
       if (silenced.reason) top.append(el('span', 'note', silenced.reason));
     }
-    // A push that reached nobody: the service is still retrying it.
+    // A push that reached nobody: still being retried, or held back by the
+    // hourly budget for the digest.
     const pushLabel = PUSH_LABELS[finding.push_status];
     if (typeof pushLabel === 'string') {
       top.append(badge(pushLabel, 'push-' + finding.push_status));

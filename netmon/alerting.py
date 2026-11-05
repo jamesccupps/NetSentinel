@@ -39,7 +39,9 @@ Quiet by design
 Push is reserved for the `push` tier. A notification for something low is how
 push gets muted, after which nothing gets through at all. Deduplication happens
 before this module sees anything — one laptop produced 1,017 NAT-PMP requests in
-an afternoon, and that is one notification, not 1,017.
+an afternoon, and that is one notification, not 1,017. What deduplication cannot
+collapse, an hourly budget caps (PushBudget), with room kept for critical
+findings and canary hits.
 """
 
 from __future__ import annotations
@@ -57,9 +59,9 @@ from netmon.redact import ALERT, redact_finding
 
 logger = logging.getLogger("netmon.alerting")
 
-__all__ = ['Notifier', 'NotifierConfig', 'Delivery', 'load_config',
-           'AlertingError', 'build_digest', 'EmailConfig', 'load_email_config',
-           'send_email_digest', 'digest_title']
+__all__ = ['Notifier', 'NotifierConfig', 'Delivery', 'PushBudget',
+           'load_config', 'AlertingError', 'build_digest', 'EmailConfig',
+           'load_email_config', 'send_email_digest', 'digest_title']
 
 
 class AlertingError(ValueError):
@@ -83,7 +85,8 @@ class NotifierConfig:
 
     def __init__(self, server='', topic='', token='', enabled=True,
                  min_push_severity=Severity.HIGH, timeout=10,
-                 digest_topic='', dry_run=False, extract_seconds=30):
+                 digest_topic='', dry_run=False, extract_seconds=30,
+                 push_budget=None, push_reserve=None):
         self.server = (server or '').rstrip('/')
         self.topic = topic or ''
         self.token = token or ''
@@ -93,6 +96,10 @@ class NotifierConfig:
         self.digest_topic = digest_topic or topic or ''
         self.dry_run = bool(dry_run)
         self.extract_seconds = int(extract_seconds)
+        # Pushes an hour, and how many of them only critical findings and
+        # canary hits may use. See PushBudget.
+        self.push_budget = _whole(push_budget, PushBudget.PER_HOUR)
+        self.push_reserve = _whole(push_reserve, PushBudget.RESERVE)
 
     def validate(self):
         """Raise AlertingError on anything that would fail or leak at send time."""
@@ -145,6 +152,11 @@ def load_config(path=None, environ=None):
     def pick(key, env_name, default=''):
         return environ.get(env_name) or data.get(key) or default
 
+    def count(key, env_name):
+        # Not `pick`: 0 is a setting here, not a blank.
+        value = environ.get(env_name)
+        return data.get(key) if value in (None, '') else value
+
     return NotifierConfig(
         server=pick('ntfy_server', 'NETMON_NTFY_SERVER'),
         topic=pick('ntfy_topic', 'NETMON_NTFY_TOPIC'),
@@ -155,7 +167,103 @@ def load_config(path=None, environ=None):
         min_push_severity=pick('min_push_severity', 'NETMON_MIN_PUSH_SEVERITY',
                                Severity.HIGH),
         dry_run=str(pick('dry_run', 'NETMON_ALERTS_DRY_RUN', 'false')).lower()
-        in ('1', 'true', 'yes', 'on'))
+        in ('1', 'true', 'yes', 'on'),
+        push_budget=count('push_budget_per_hour', 'NETMON_PUSH_BUDGET'),
+        push_reserve=count('push_budget_reserve', 'NETMON_PUSH_RESERVE'))
+
+
+def _whole(value, default):
+    """
+    A count typed by hand, or the default. A typo in a secrets file or a unit's
+    Environment= should cost a warning, not the alerting.
+    """
+    if value is None or value == '':
+        return default
+    try:
+        number = int(str(value).strip())
+    except ValueError:
+        logger.warning('not a whole number: %r; using %d', value, default)
+        return default
+    return max(0, number)
+
+
+class PushBudget:
+    """
+    How many pushes an hour, kept under the service's --state.
+
+    A 300-port scan produced 300 HIGH pushes in a dry run, and a phone that
+    buzzes three hundred times in a minute is muted, after which nothing gets
+    through. So ordinary pushes stop at PER_HOUR - RESERVE in any hour, and
+    what they would have pushed goes to the digest, marked as held by the
+    budget. Critical findings and canary hits are never held: the reserve is
+    the room kept for them, and they are let through even past it, because
+    they are the pushes the budget exists to protect.
+
+    On disk because a restart is not a new hour.
+    """
+
+    PER_HOUR = 20
+    RESERVE = 5
+    #: Pushed whatever the budget says, like anything critical.
+    ALWAYS = frozenset({'canary_hit'})
+
+    def __init__(self, path='', per_hour=PER_HOUR, reserve=RESERVE,
+                 clock=time.time):
+        self.path = path
+        self.per_hour = max(0, int(per_hour))
+        self.reserve = min(max(0, int(reserve)), self.per_hour)
+        self._clock = clock
+        self._stamps = self._load()
+
+    def always(self, finding):
+        return (Severity.normalise(finding.severity) == Severity.CRITICAL
+                or finding.rule_id in self.ALWAYS)
+
+    def used(self, now=None):
+        now = self._clock() if now is None else now
+        self._stamps = [s for s in self._stamps if now - 3600 < s <= now]
+        return len(self._stamps)
+
+    def allows(self, finding, now=None):
+        """Whether this finding may push now."""
+        if self.always(finding):
+            return True
+        return self.used(now) < self.per_hour - self.reserve
+
+    def spend(self, now=None):
+        now = self._clock() if now is None else now
+        self.used(now)
+        self._stamps.append(now)
+        self._save()
+
+    def _load(self):
+        if not self.path or not os.path.exists(self.path):
+            return []
+        try:
+            with open(self.path, encoding='utf-8') as handle:
+                data = json.load(handle)
+            return [float(s) for s in data.get('pushed') or []]
+        except (OSError, ValueError, TypeError, AttributeError) as e:
+            # An unreadable record means a fresh hour: more pushes, not none.
+            logger.warning('could not read %s (%s); the push budget starts '
+                           'again', self.path, type(e).__name__)
+            return []
+
+    def _save(self):
+        if not self.path:
+            return
+        try:
+            os.makedirs(os.path.dirname(self.path) or '.', exist_ok=True)
+            temporary = self.path + '.tmp'
+            with open(temporary, 'w', encoding='utf-8') as handle:
+                json.dump({'pushed': self._stamps}, handle)
+            try:
+                os.chmod(temporary, 0o600)
+            except OSError:
+                pass
+            os.replace(temporary, self.path)
+        except OSError as e:
+            logger.warning('could not record the push budget: %s', e)
 
 
 def _read_secrets_file(path):
@@ -189,12 +297,14 @@ class Delivery(tuple):
     attempted and did not get through, with the path of the extract it
     carried, so a caller can deliver it again without cutting another. Those
     from the findings passed in are in `skipped` as well; a leak raised while
-    sending is only here.
+    sending is only here. `held` is the part of `skipped` that would have
+    pushed but for the hourly budget (PushBudget): the digest's, marked so.
     """
 
-    def __new__(cls, sent, skipped, failed=()):
+    def __new__(cls, sent, skipped, failed=(), held=()):
         delivery = super().__new__(cls, (list(sent), list(skipped)))
         delivery.failed = list(failed)
+        delivery.held = list(held)
         return delivery
 
     @property
@@ -210,9 +320,12 @@ class Notifier:
     """Sends findings. Holds no state beyond what it has already sent."""
 
     def __init__(self, config, profile=None, opener=None, ring=None,
-                 silences=None):
+                 silences=None, budget=None):
         self.config = config
         self.profile = profile
+        # Pushes an hour (PushBudget). None for a one-off run from the command
+        # line, which sends one file's findings and has nowhere to keep count.
+        self.budget = budget
         # Injectable so tests exercise the real body-building and header logic
         # without a network. The default is urllib, not requests: one fewer
         # dependency on a sensor that may have no route to a package index.
@@ -268,7 +381,7 @@ class Notifier:
         self.config.validate()
         floor = Severity.rank(self.config.min_push_severity)
 
-        sent, skipped, failed = [], [], []
+        sent, skipped, failed, held = [], [], [], []
         for finding, extract in items:
             if finding.tier != Tier.PUSH or Severity.rank(finding.severity) < floor:
                 skipped.append(finding)
@@ -276,6 +389,11 @@ class Notifier:
             if self.silences is not None and self.silences.decide(finding) != 'push':
                 skipped.append(finding)
                 self.silenced.append(finding)
+                continue
+            # Before the extract: a push the budget holds must not cut one.
+            if self.budget is not None and not self.budget.allows(finding):
+                skipped.append(finding)
+                held.append(finding)
                 continue
             record = redact_finding(finding, self.profile, audience=ALERT)
             if record is None:                       # cannot happen for ALERT
@@ -287,6 +405,7 @@ class Notifier:
                 record['pcap'] = extract
             if self._deliver(record):
                 sent.append(finding)
+                self._spend()
             else:
                 skipped.append(finding)
                 failed.append((finding, extract))
@@ -297,10 +416,18 @@ class Notifier:
             self._leak_keys.add(leak.key)
             if self._deliver(redact_finding(leak, self.profile, audience=ALERT)):
                 sent.append(leak)
+                self._spend()
             else:
                 failed.append((leak, ''))
         self.leaks = []
-        return Delivery(sent, skipped, failed)
+        if held:
+            logger.warning('the hourly push budget held %d findings for the '
+                           'digest', len(held))
+        return Delivery(sent, skipped, failed, held)
+
+    def _spend(self):
+        if self.budget is not None:
+            self.budget.spend()
 
     def send_digest(self, analyzer, title=None, open_items=None, body=None):
         """Send the daily report. One message, whatever it contains."""
@@ -443,7 +570,8 @@ _SILENCE_MARKS = {'ack': 'acknowledged', 'maintenance': 'maintenance',
 
 
 #: How a push that did not go out is shown against a finding in the digest.
-_PUSH_MARKS = {'failed': '  [push failed]'}
+_PUSH_MARKS = {'failed': '  [push failed]',
+               'held': '  [held by the push budget]'}
 
 
 def _silence_mark(finding):
@@ -551,6 +679,12 @@ def build_digest(analyzer, profile=None, limit=40, open_items=None):
     silenced = sum(1 for f in findings if getattr(f, 'silenced', None))
     if silenced:
         lines.append(f'  {silenced} acknowledged or under maintenance, marked below')
+    held = sum(1 for f in findings if getattr(f, 'push_status', '') == 'held')
+    if held:
+        # Each would have pushed. Counted here because the list below stops
+        # at `limit`, and these are the ones nobody's phone mentioned.
+        lines.append(f'  {held} held back from push by the hourly budget, '
+                     f'marked below')
 
     lines += _open_items(open_items)
 

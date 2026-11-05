@@ -188,6 +188,18 @@ the packet extract cut the first time, until it gets through, a silence
 answers it, or a week passes. Meanwhile the UI marks it *push failed* and the
 digest's checklist leads with it.
 
+**Pushes are budgeted.** A port scan used to be one HIGH push per port. Now a
+rule's findings from one source to one destination across five ports or more
+in a pass are rolled up into one finding for the scan, and past 15 pushes in
+an hour ordinary findings stop pushing and go to the digest, marked *held by
+the push budget*. Five more pushes an hour are kept for critical findings and
+canary hits, which push whatever the count. The count is kept under `--state`
+(`push-budget.json`), so a restart is not a new hour; set the hour's total and
+the reserve with `push_budget_per_hour` and `push_budget_reserve` in the
+secrets file, or `NETMON_PUSH_BUDGET` and `NETMON_PUSH_RESERVE` (defaults 20
+and 5). A rolled-up scan is a new finding: an ack or snooze of one of its
+per-port findings does not cover it.
+
 ### The digest
 
 Once a day, by ntfy and by email, whichever are configured. It leads with an
@@ -664,8 +676,9 @@ UI write (the editors and the silence buttons); `--allow-summarise` adds the
 model-triage button. Both are off by default.
 
 Under `--state` it keeps: `processed.json` (which captures are done),
-`findings.json` (the day's findings and the open pushes), `silences.json`,
-`summariser-spend.json`, the canary read position and the controller snapshot.
+`findings.json` (the day's findings, the open pushes and the failed ones still
+being retried), `silences.json`, `push-budget.json`, `summariser-spend.json`,
+the canary read position and the controller snapshot.
 
 **It does not capture packets.** tcpdump does, under its own unit, with the
 filter `netmon capture --command` prints. Keeping them separate means a crash

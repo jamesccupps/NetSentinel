@@ -279,6 +279,12 @@ class FindingWindow:
                 if float(item.get('next_attempt', 0)) <= now]
 
     @_locked
+    def mark_held(self, finding):
+        """Held by the hourly push budget: the digest's, marked so, and not
+        retried. Tomorrow's window may push it."""
+        self._settle(_identity(finding), finding, 'held')
+
+    @_locked
     def clear_pending(self, finding):
         """No longer to be pushed: a silence answers it, or it stopped
         qualifying for push. Kept in the day's findings as it is."""

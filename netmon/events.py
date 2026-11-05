@@ -165,7 +165,8 @@ class Finding:
     # this finding: {'kind', 'id', 'reason'}. None when nothing does.
     silenced: dict | None = None
     # Set by the service's window when a push for this finding did not go
-    # out: 'failed' while it is being retried. Empty otherwise.
+    # out: 'failed' while it is being retried, 'held' when the hourly push
+    # budget kept it for the digest. Empty otherwise.
     push_status: str = ''
 
     def __post_init__(self):

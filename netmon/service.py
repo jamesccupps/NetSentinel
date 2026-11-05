@@ -107,6 +107,10 @@ class ServiceConfig:
     def window_path(self):
         return os.path.join(self.state_dir, 'findings.json')
 
+    @property
+    def push_budget_path(self):
+        return os.path.join(self.state_dir, 'push-budget.json')
+
 
 class _Processed:
     """
@@ -330,7 +334,8 @@ class Service:
         return self.window.findings()
 
     def _build_notifier(self):
-        from netmon.alerting import AlertingError, Notifier, load_config
+        from netmon.alerting import (AlertingError, Notifier, PushBudget,
+                                     load_config)
         try:
             alert_config = load_config(self.config.secrets)
             if self.config.dry_run:
@@ -339,8 +344,11 @@ class Service:
         except AlertingError as e:
             logger.warning('alerting is off: %s', e)
             return None
+        budget = PushBudget(self.config.push_budget_path,
+                            per_hour=alert_config.push_budget,
+                            reserve=alert_config.push_reserve, clock=self._clock)
         return Notifier(alert_config, self.profile, ring=self.ring,
-                        silences=self.silences)
+                        silences=self.silences, budget=budget)
 
     def _build_email(self):
         """The email digest, if the secrets file configures one."""
@@ -524,6 +532,7 @@ class Service:
         findings = [f for f in findings if self.silences.decide(f) != 'drop']
         if not findings:
             return
+        findings = roll_up_scans(findings)
         fresh = [f for f in findings if self.window.admit(f)]
         self.counts['findings'] += len(fresh)
         self.counts['repeats'] += len(findings) - len(fresh)
@@ -549,7 +558,11 @@ class Service:
             self.window.save()
 
     def _record(self, delivery, attempted):
-        """Keep what a send did: pushed, or failed and to be tried again."""
+        """
+        Keep what a send did: pushed, failed and to be tried again, or held
+        by the budget. Returns the failed and the held, which the window has
+        settled; the rest of the skipped were never meant to push.
+        """
         sent = delivery[0]
         # A Notifier says which pushes failed; anything else that sends is
         # taken at its (sent, skipped).
@@ -568,7 +581,10 @@ class Service:
             self.window.mark_failed(finding, pcap)
             logger.warning('push for %s failed; it will be tried again',
                            finding.rule_id)
-        return failed
+        held = getattr(delivery, 'held', ())
+        for finding in held:
+            self.window.mark_held(finding)
+        return list(failed) + [(finding, None) for finding in held]
 
     def retry_pushes(self, now=None):
         """
@@ -593,10 +609,10 @@ class Service:
                 for finding, pcap in due:
                     self.window.mark_failed(finding, pcap, now)
                 return
-            failed = self._record(delivery, [finding for finding, _ in due])
-            failed_ids = {id(finding) for finding, _ in failed}
+            settled = self._record(delivery, [finding for finding, _ in due])
+            settled_ids = {id(finding) for finding, _ in settled}
             for finding in delivery[1]:
-                if id(finding) not in failed_ids:
+                if id(finding) not in settled_ids:
                     self.window.clear_pending(finding)
         finally:
             self.window.save()
@@ -753,6 +769,79 @@ class _Window:
         repeats = sum(max(0, int(f.count or 1) - 1) for f in self.findings)
         return {'events': self.events_seen, 'findings': len(self.findings),
                 'by_severity': by_severity, 'suppressed_repeats': repeats}
+
+
+#: How many ports one source must reach on one destination, within one pass,
+#: for a rule's findings about them to be read as a scan.
+SCAN_PORTS = 5
+
+
+def roll_up_scans(findings, threshold=SCAN_PORTS):
+    """
+    One finding per scan, instead of one per port.
+
+    A rule keyed by port fires once for every port a scan touches: a 300-port
+    scan was 300 HIGH pushes, each with its own extract. Findings of one rule
+    from one source to one destination, across `threshold` ports or more, are
+    replaced by one finding for them all, keyed by the two addresses.
+
+    That key is a new identity, so an ack or a snooze of one of the per-port
+    findings does not cover the rolled-up one.
+    """
+    from collections import OrderedDict
+
+    groups = OrderedDict()
+    for finding in findings:
+        event = finding.event
+        if event is None or not event.src_ip or not event.dst_ip \
+                or event.dst_port is None:
+            continue
+        groups.setdefault((finding.rule_id, event.src_ip, event.dst_ip),
+                          []).append(finding)
+
+    replaced = {}
+    for group in groups.values():
+        ports = sorted({finding.event.dst_port for finding in group})
+        if len(ports) < threshold:
+            continue
+        replaced[id(group[0])] = _scan_finding(group, ports)
+        for finding in group[1:]:
+            replaced[id(finding)] = None
+
+    out = []
+    for finding in findings:
+        if id(finding) not in replaced:
+            out.append(finding)
+        elif replaced[id(finding)] is not None:
+            out.append(replaced[id(finding)])
+    return out
+
+
+def _scan_finding(group, ports):
+    from netmon.events import Finding, Severity, Tier
+    from netmon.rules_engine import render
+
+    first = group[0]
+    event = first.event
+    worst = max(group, key=lambda f: Severity.rank(f.severity))
+    source = event.get('src_name') or event.src_ip
+    target = event.get('dst_name') or event.dst_ip
+    shown = ', '.join(str(port) for port in ports[:12])
+    if len(ports) > 12:
+        shown += ', …'
+    return Finding(
+        first.rule_id, first.title, severity=worst.severity,
+        tier=Tier.PUSH if any(f.tier == Tier.PUSH for f in group) else first.tier,
+        description=f'{source} reached {len(ports)} ports on {target} '
+                    f'({shown}): read as a scan, and reported once',
+        ts=min(f.ts for f in group), device=first.device,
+        key=f'{event.src_ip}->{event.dst_ip}/scan',
+        next_check=render("tshark -r <pcap> -Y 'ip.src == {src_ip} && "
+                          "ip.dst == {dst_ip}' -T fields -e tcp.dstport "
+                          "-e udp.dstport | sort -un", event, command=True),
+        event=event, count=sum(int(f.count or 1) for f in group),
+        evidence={'src_ip': event.src_ip, 'dst_ip': event.dst_ip,
+                  'dst_port': ports[:12]})
 
 
 def _next_occurrence(now, hour):
