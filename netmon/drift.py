@@ -43,8 +43,8 @@ from netmon.events import Event, Finding, Severity, Tier
 
 logger = logging.getLogger("netmon.drift")
 
-__all__ = ['snapshot', 'load_state', 'save_state', 'audit', 'diff',
-           'DriftError', 'CONFIG_ENDPOINTS']
+__all__ = ['snapshot', 'load_state', 'save_state', 'audit', 'diff', 'compare',
+           'check', 'DriftError', 'CONFIG_ENDPOINTS']
 
 
 class DriftError(RuntimeError):
@@ -561,23 +561,95 @@ def diff(previous, current, profile=None):
     return findings
 
 
-def check(client, profile=None, state_path='', save=True):
-    """
-    One run: read the configuration, report what is wrong and what changed.
+def _section(key):
+    """The snapshot section a finding's key names: `section/...`, and a
+    switch port's `port/...`, which comes from the device list."""
+    head = str(key or '').split('/', 1)[0]
+    return 'devices' if head == 'port' else head
 
-    Returns (findings, report). On a first run `report['baseline']` is true and
-    the drift findings are empty by construction.
+
+def _unread_sections(current, previous):
     """
-    current = snapshot(client)
-    previous = load_state(state_path) if state_path else None
+    The sections this run cannot vouch for, each with why.
+
+    Every endpoint that failed, and every one that answered with no rows
+    where the last run had some: a controller part-way through a reboot
+    answers 200 with an empty list as readily as it refuses. An empty answer
+    is believed the second time running, so a section that really was
+    emptied is reported one run late rather than never.
+    """
+    previous = previous or {}
+    errors = current.get('errors') or {}
+    doubted = set(previous.get('distrusted') or ())
+    unread = {}
+    for name in CONFIG_ENDPOINTS:
+        if name in errors:
+            unread[name] = str(errors[name])
+            continue
+        had = len(_rows(previous, name))
+        if had and not _rows(current, name) and name not in doubted:
+            unread[name] = (f'answered with no rows where the last run had '
+                            f"{had}; kept the last run's until it says so twice")
+    return unread
+
+
+def _carry_forward(current, previous, unread):
+    """
+    Put the last run's copy back for each section this run could not read.
+
+    Saved that way, the baseline keeps what was last known instead of
+    recording a reboot as an empty configuration, whose recovery then read
+    as every forward and every rule being new. A section with no earlier
+    copy to restore is listed under `unread`, and the next run compares it
+    against nothing, as on a first run.
+    """
+    previous = previous or {}
+    without = set(previous.get('unread') or ())
+    missing = set()
+    for name in unread:
+        if name in previous and name not in without:
+            current[name] = previous.get(name) or []
+            if name == 'devices':
+                current['ports'] = previous.get('ports') or {}
+        else:
+            missing.add(name)
+    current['unread'] = sorted(missing)
+    current['distrusted'] = sorted(name for name in unread
+                                   if name not in (current.get('errors') or {}))
+
+
+def compare(current, previous, profile=None):
+    """
+    What is wrong in `current`, and what changed since `previous`.
+
+    Returns (findings, report), and fills in `current` with the last run's
+    copy of any section it could not read, so it can be saved as the next
+    baseline. Raises DriftError when no section could be read at all: that
+    is an outage, and saving it would be a baseline of nothing.
+    """
+    unread = _unread_sections(current, previous)
+    if len(unread) == len(CONFIG_ENDPOINTS):
+        raise DriftError('could not read any of the controller configuration ('
+                         + '; '.join(f'{name}: {why}'
+                                     for name, why in sorted(unread.items()))
+                         + '); the last baseline is kept')
+    # A section the last run had no copy of has nothing to compare against.
+    no_baseline = set((previous or {}).get('unread') or ())
+    _carry_forward(current, previous, unread)
 
     standing = audit(current, profile, previous)
-    drift_findings = diff(previous, current, profile)
     # Everything wrong now, whether or not it also changed this run — the
-    # digest's open-items checklist lists it until it is fixed.
+    # digest's open-items checklist lists it until it is fixed. That includes
+    # what a section carried forward still shows, so an outage does not take
+    # a standing problem off the list.
     problems = [{'rule': f.rule_id, 'key': f.key, 'device': f.device,
                  'severity': f.severity, 'description': f.description}
                 for f in standing]
+    # Not reported afresh, though: nobody has seen those sections this run.
+    standing = [f for f in standing if _section(f.key) not in unread]
+    skip = set(unread) | no_baseline
+    drift_findings = [f for f in diff(previous, current, profile)
+                      if _section(f.key) not in skip]
 
     # When something is both newly wrong and a change, the change is strictly
     # more informative: "a port forward appeared" beats "a port forward
@@ -585,22 +657,37 @@ def check(client, profile=None, state_path='', save=True):
     changed = {finding.key for finding in drift_findings}
     standing = [finding for finding in standing if finding.key not in changed]
 
-    findings = standing + drift_findings
-
-    if state_path and save:
-        save_state(current, state_path)
-
-    return findings, {
+    errors = dict(current.get('errors') or {})
+    errors.update(unread)
+    return standing + drift_findings, {
         'baseline': previous is None,
-        'taken_at': current['taken_at'],
+        'taken_at': current.get('taken_at', 0),
         'previous_at': (previous or {}).get('taken_at'),
         'standing': len(standing),
         'changed': len(drift_findings),
         'standing_problems': problems,
         'counts': {name: len(current.get(name) or [])
                    for name in CONFIG_ENDPOINTS},
-        'errors': current.get('errors') or {},
+        'errors': errors,
+        'unread': sorted(unread),
     }
+
+
+def check(client, profile=None, state_path='', save=True):
+    """
+    One run: read the configuration, report what is wrong and what changed.
+
+    Returns (findings, report). On a first run `report['baseline']` is true and
+    the drift findings are empty by construction. A section the controller
+    would not give this run is the last run's copy, neither diffed nor
+    reported again; if it gave none at all, DriftError, and nothing is saved.
+    """
+    current = snapshot(client)
+    previous = load_state(state_path) if state_path else None
+    findings, report = compare(current, previous, profile)
+    if state_path and save:
+        save_state(current, state_path)
+    return findings, report
 
 
 def format_findings(findings, report):
@@ -621,6 +708,9 @@ def format_findings(findings, report):
                            for k, v in report['counts'].items() if v))
     for name, error in (report['errors'] or {}).items():
         lines.append(f'  could not read {name}: {error}')
+    if report.get('unread'):
+        lines.append('  the last run\'s copy stands in for: '
+                     + ', '.join(report['unread']))
     lines.append('')
 
     if not findings:
@@ -691,16 +781,11 @@ def _main(argv=None):
             print(f'could not read {args.from_file}', file=sys.stderr)
             return 1
         previous = load_state(args.state) if args.state else None
-        standing = audit(current, profile, previous)
-        changes = diff(previous, current, profile)
-        changed = {f.key for f in changes}
-        findings = [f for f in standing if f.key not in changed] + changes
-        report = {'baseline': previous is None, 'taken_at': current.get('taken_at', 0),
-                  'previous_at': (previous or {}).get('taken_at'),
-                  'standing': len(findings) - len(changes),
-                  'changed': len(changes),
-                  'counts': {n: len(current.get(n) or []) for n in CONFIG_ENDPOINTS},
-                  'errors': current.get('errors') or {}}
+        try:
+            findings, report = compare(current, previous, profile)
+        except DriftError as e:
+            print(str(e), file=sys.stderr)
+            return 1
         if args.state and not args.no_save:
             save_state(current, args.state)
     else:
@@ -717,7 +802,7 @@ def _main(argv=None):
             client.login()
             findings, report = check(client, profile, args.state,
                                      save=not args.no_save)
-        except UnifiApiError as e:
+        except (UnifiApiError, DriftError) as e:
             print(str(e), file=sys.stderr)
             return 1
 

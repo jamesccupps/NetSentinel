@@ -316,6 +316,15 @@ A three-run sequence settles: the first run pushes what it found, the second
 pushes what changed, and the third pushes nothing while still listing every
 standing problem in the digest.
 
+**An outage is not a change.** A section the controller will not give — an
+error, or an empty answer where the last run had rows, which a rebooting
+controller gives as readily — keeps the last run's copy. It is neither diffed
+nor reported again, its standing problems stay on the checklist, and the
+baseline is saved with the old copy in it, so the recovery does not read as
+every rule and forward being new. An empty answer is believed the second time
+running. When nothing at all can be read the check fails, logs why, and saves
+nothing.
+
 The snapshot is the network's defences written down — every firewall rule, every
 forward, every port's VLAN membership — so it is kept owner-only, and the
 findings carry rule names and port numbers rather than the rules themselves.

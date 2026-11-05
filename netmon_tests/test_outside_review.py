@@ -545,5 +545,168 @@ class TestWhichNamesABindHas(unittest.TestCase):
         self.assertIn('--allowed-host', err.getvalue())
 
 
+# ─── H9: drift wiped its baseline when an endpoint failed ────────────────────
+
+class TestDriftSurvivesAnOutage(unittest.TestCase):
+    """
+    A failed endpoint became an empty section, and the snapshot was saved
+    anyway. During a controller reboot every firewall rule read as deleted
+    (HIGH, pushed), and on recovery every forward read as new (pushed again).
+    """
+
+    RULES_ = [{'_id': 'f1', 'name': 'block ot to wan', 'enabled': True,
+               'action': 'drop', 'ruleset': 'LAN_OUT'},
+              {'_id': 'f2', 'name': 'old exception', 'enabled': False,
+               'action': 'accept', 'ruleset': 'LAN_IN'}]
+    FORWARDS = [{'_id': 'pf1', 'name': 'vendor vpn', 'enabled': True,
+                 'src': '203.0.113.9', 'dst_port': '1194',
+                 'fwd': '192.168.10.40', 'fwd_port': '1194', 'proto': 'udp'}]
+    DEVICES = [{'_id': 'd1', 'mac': '02:00:00:00:10:01', 'name': 'sw-core',
+                'port_table': [{'port_idx': 3, 'name': 'ahu',
+                                'portconf_id': 'p1', 'up': True}]}]
+
+    def setUp(self):
+        import copy
+        import shutil
+        import tempfile
+        from netmon_tests.test_drift import _FakeClient
+        self.scratch = tempfile.mkdtemp(prefix='netmon-review-drift-')
+        self.addCleanup(shutil.rmtree, self.scratch, True)
+        self.path = os.path.join(self.scratch, 'unifi-config.json')
+        self.client = _FakeClient(copy.deepcopy({
+            'firewall_rules': self.RULES_, 'port_forwards': self.FORWARDS,
+            'devices': self.DEVICES,
+            'networks': [{'_id': 'n10', 'name': 'ot', 'vlan': 10}]}))
+
+    def check(self):
+        from netmon.drift import check
+        from netmon_tests.test_drift import profile
+        return check(self.client, profile(), self.path)
+
+    def keys(self, findings, *rules):
+        return sorted(f.key for f in findings if f.rule_id in rules)
+
+    def test_a_failed_endpoint_reports_nothing_deleted_or_new(self):
+        from netmon.drift import load_state
+        self.check()
+        self.client.fail = {'firewall_rules', 'port_forwards'}
+        findings, report = self.check()
+        self.assertEqual(self.keys(findings, 'firewall_change', 'exposure_change',
+                                   'firewall_rule_disabled'), [])
+        self.assertEqual(report['unread'], ['firewall_rules', 'port_forwards'])
+        saved = load_state(self.path)
+        self.assertEqual([r['_id'] for r in saved['firewall_rules']], ['f1', 'f2'])
+        self.assertEqual([f['_id'] for f in saved['port_forwards']], ['pf1'])
+
+        self.client.fail = set()
+        findings, _ = self.check()                  # recovered
+        self.assertEqual(self.keys(findings, 'firewall_change', 'exposure_change'),
+                         ['port_forwards/pf1'])      # the inventory line only
+        self.assertEqual(
+            [f.tier for f in findings if f.key == 'port_forwards/pf1'], ['digest'])
+
+    def test_a_failed_device_list_keeps_the_port_table(self):
+        from netmon.drift import load_state
+        self.check()
+        baseline = load_state(self.path)['ports']
+        self.client.fail = {'devices'}
+        findings, _ = self.check()
+        self.assertEqual(self.keys(findings, 'port_profile_change'), [])
+        self.assertEqual(load_state(self.path)['ports'], baseline)
+        # And the baseline is still a baseline: a real change shows.
+        self.client.fail = set()
+        self.client.data['devices'][0]['port_table'][0]['portconf_id'] = 'p2'
+        findings, _ = self.check()
+        self.assertEqual(self.keys(findings, 'port_profile_change'),
+                         ['port/02:00:00:00:10:01/3'])
+
+    def test_a_failed_section_keeps_its_standing_problems(self):
+        _, report = self.check()
+        before = {p['key'] for p in report['standing_problems']}
+        self.assertIn('firewall_rules/f2', before)
+        self.client.fail = {'firewall_rules'}
+        findings, report = self.check()
+        self.assertEqual({p['key'] for p in report['standing_problems']}, before)
+        # Kept on the list, not reported afresh from a copy nobody re-read.
+        self.assertNotIn('firewall_rules/f2', {f.key for f in findings})
+
+    def test_nothing_read_at_all_raises_and_saves_nothing(self):
+        from netmon.drift import CONFIG_ENDPOINTS, DriftError, load_state
+        self.check()
+        before = load_state(self.path)
+        self.client.fail = set(CONFIG_ENDPOINTS)
+        with self.assertRaises(DriftError):
+            self.check()
+        self.assertEqual(load_state(self.path), before)
+
+    def test_an_empty_answer_is_doubted_once(self):
+        """A rebooting controller can answer 200 with nothing in it."""
+        self.check()
+        self.client.data['firewall_rules'] = []
+        findings, report = self.check()
+        self.assertEqual(self.keys(findings, 'firewall_change'), [])
+        self.assertIn('firewall_rules', report['unread'])
+        findings, _ = self.check()                   # and again: it is real
+        self.assertEqual(self.keys(findings, 'firewall_change'),
+                         ['firewall_rules/f1', 'firewall_rules/f2'])
+
+    def test_a_section_never_read_is_not_compared_against_nothing(self):
+        self.client.fail = {'port_forwards'}
+        self.check()                                 # the first run
+        self.client.fail = set()
+        findings, _ = self.check()
+        self.assertEqual([f.tier for f in findings if f.key == 'port_forwards/pf1'],
+                         ['digest'])                 # not "a new forward appeared"
+
+    def test_the_service_keeps_the_standing_list_through_an_outage(self):
+        from unittest import mock
+        from netmon.drift import CONFIG_ENDPOINTS
+        from netmon.service import Service, ServiceConfig
+        client = self.client
+
+        class _Client:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            site, host = client.site, client.host
+
+            def login(self):
+                return None
+
+            def get(self, path):
+                return client.get(path)
+
+        config = ServiceConfig(profile_path=EXAMPLE, notify=False,
+                               unifi_host='https://unifi.example.test',
+                               state_dir=self.scratch)
+        config.web_port = None
+        service = Service(config)
+        with mock.patch('netmon.sources.unifi_api.UnifiClient', _Client):
+            service.check_drift()
+            standing = list(service.window.standing)
+            self.assertTrue(standing)
+            client.fail = set(CONFIG_ENDPOINTS)
+            with self.assertLogs('netmon.service', level='WARNING'):
+                self.assertEqual(service.check_drift(), [])
+        self.assertEqual(service.window.standing, standing)
+        self.assertEqual(service.counts['errors'], 1)
+
+    def test_the_command_says_so_and_fails(self):
+        import contextlib
+        import io
+        import json
+        from netmon.drift import CONFIG_ENDPOINTS, _main
+        snapshot = os.path.join(self.scratch, 'snapshot.json')
+        with open(snapshot, 'w', encoding='utf-8') as handle:
+            json.dump({'taken_at': 1.0, 'errors': {
+                name: 'HTTP 502' for name in CONFIG_ENDPOINTS}}, handle)
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err), \
+                contextlib.redirect_stdout(io.StringIO()):
+            code = _main(['--profile', EXAMPLE, '--from-file', snapshot])
+        self.assertEqual(code, 1)
+        self.assertIn('could not read any', err.getvalue())
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)

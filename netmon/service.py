@@ -405,7 +405,7 @@ class Service:
     def check_drift(self):
         if not self.config.unifi_host:
             return []
-        from netmon.drift import check
+        from netmon.drift import DriftError, check
         from netmon.sources.unifi_api import UnifiApiError, UnifiClient
 
         try:
@@ -420,9 +420,10 @@ class Service:
             client.login()
             findings, report = check(client, self.profile,
                                      self.config.drift_state_path)
-        except UnifiApiError as e:
+        except (UnifiApiError, DriftError) as e:
             # The controller being unreachable is a reason to look, not a reason
-            # to stop analysing packets.
+            # to stop analysing packets. The baseline and the standing problems
+            # stay as the last good check left them.
             logger.warning('configuration check failed: %s', e)
             self.counts['errors'] += 1
             return []
