@@ -509,5 +509,34 @@ class TestSyslogLoop(_SyslogCase):
         self.assertEqual(r.status()['state'], 'waiting')     # stopped on purpose
 
 
+class TestSyslogNumbers(_SyslogCase):
+    """M3 for syslog: a typo in a number setting stopped NetSentinel starting."""
+
+    def test_typos_fall_back_to_the_defaults(self):
+        for enabled in (False, True):
+            with self.subTest(enabled=enabled), mock.patch('src.config.logger'):
+                r = self.receiver(enabled=enabled, port='55l4', keep_days='30d', max_mb='lots')
+                self.assertEqual((r.port, r.keep_days, r.max_bytes),
+                                 (5514, 30, 500 * 1024 * 1024))
+
+    def test_numbers_typed_as_text_are_read(self):
+        r = self.receiver(port=' 5515 ', keep_days='7', max_mb='2')
+        self.assertEqual((r.port, r.keep_days, r.max_bytes), (5515, 7, 2 * 1024 * 1024))
+
+    def test_the_port_is_kept_in_range(self):
+        # 70000 raised OverflowError from bind(), which start() did not catch
+        for typed, port in ((70000, 65535), (-3, 1), (0, 5514), ('', 5514)):
+            # as_int warns about a value out of range, once a value; expected here
+            with self.subTest(typed=typed), mock.patch('src.config.logger'):
+                self.assertEqual(self.receiver(port=typed).port, port)
+
+    def test_an_address_that_cannot_be_a_host_name_does_not_raise(self):
+        # non-ASCII, so it fails in the IDNA encoding before any lookup is tried
+        r = self.receiver(bind='é' * 70)
+        with self.assertLogs('NetSentinel.Syslog', 'WARNING'):
+            self.assertFalse(r.start())
+        self.assertEqual(r.status()['state'], 'failed')
+
+
 if __name__ == '__main__':
     unittest.main()

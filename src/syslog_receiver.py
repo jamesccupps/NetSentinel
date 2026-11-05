@@ -217,13 +217,20 @@ class SyslogReceiver:
     """Listens when enabled; stores days to disk; keeps per-device destinations."""
 
     def __init__(self, config, data_dir=None, clock=time.time, names=None):
+        from src.config import as_int
         get = config.get
         self.enabled = bool(get('syslog', 'enabled', default=False))
         self.bind = str(get('syslog', 'bind', default='') or '').strip()
-        self.port = int(get('syslog', 'port', default=5514) or 5514)
+        # Typed by hand: '55l4' or '30d' raised here even with syslog off, and
+        # NetSentinel did not start; port 70000 raised OverflowError in start(),
+        # which its OSError handler did not catch. 0 or blank still means the default.
+        self.port = as_int(config.get('syslog', 'port', default=5514) or 5514, 5514,
+                           lo=1, hi=65535, name='syslog.port')
         self.allowed = _sender_list(get('syslog', 'allowed_senders', default=[]))
-        self.keep_days = max(1, int(get('syslog', 'keep_days', default=30) or 30))
-        self.max_bytes = max(1, int(get('syslog', 'max_mb', default=500) or 500)) * 1024 * 1024
+        self.keep_days = as_int(config.get('syslog', 'keep_days', default=30) or 30, 30,
+                                lo=1, name='syslog.keep_days')
+        self.max_bytes = as_int(config.get('syslog', 'max_mb', default=500) or 500, 500,
+                                lo=1, name='syslog.max_mb') * 1024 * 1024
         # Today's share of max_mb. Senders can be forged, so a flood must not be
         # able to fill the disk, nor push every older day out to make room.
         self.day_cap = self.max_bytes // 2
@@ -255,12 +262,18 @@ class SyslogReceiver:
         if not self.bind or not self.allowed:
             self.error = 'Needs the address to listen on and the gateway allowed to send.'
             return False
+        sock = None
         try:
             sock = socket.socket(socket.AF_INET6 if ':' in self.bind else socket.AF_INET,
                                  socket.SOCK_DGRAM)
             sock.bind((self.bind, self.port))
             sock.settimeout(1.0)
-        except OSError as e:
+        except (OSError, ValueError, TypeError, OverflowError) as e:
+            # The address is typed by hand, and one that cannot be a host name
+            # (a label over 63 characters) raises TypeError from bind(): it
+            # must not stop NetSentinel starting.
+            if sock is not None:
+                sock.close()
             self.error = f'Could not listen on {self.bind}:{self.port} ({type(e).__name__}).'
             logger.warning("Syslog: %s", self.error)
             return False
