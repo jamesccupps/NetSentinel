@@ -1,5 +1,77 @@
 # NetSentinel Changelog
 
+## Unreleased — Fixes from an outside review
+
+An outside review of 1.13.0 (2026-11-05) found these; each was checked against
+the code before it was fixed, and each fix has a test (`test_outside_review.py`).
+
+- **RFID tags and card digits stay out.** The parking parser put whole RFID tag
+  numbers into alerts, the timeline and review bundles. Tags now show only their
+  agency and last two digits, and review bundles drop card and tag fields, mask the
+  digits a masked card still shows, and keep text from nested evidence only under
+  known keys.
+- **The UniFi key goes only to the pinned console.** The API key was sent before
+  the certificate was compared with the pin, so a device answering for the console's
+  address got it. The pin is now checked after the handshake, before the request.
+- **Windows tools by absolute path.** NetSentinel runs as Administrator and ran
+  `route`, `ipconfig`, `powershell` and `tshark` by bare name, which Windows looks
+  up first in the exe's own folder (usually Downloads). They now run from System32
+  and Program Files, as Windows reports them.
+- **The ML model is no longer saved.** It was a pickle signed with a key kept beside
+  it, so a program running as you could have run code as Administrator. Startup
+  already trains from the feature history; the old files are deleted.
+- **Only signatures that verify count.** A self-signed "Microsoft Corporation"
+  scored as Microsoft, and "Reset Ltd" as ESET. Now a signature must verify, the
+  publisher must match by name, and the writable folders under Windows count as
+  suspicious, not as system folders.
+- **A false-positive verdict is about the actor.** On an inbound alert it was keyed
+  to this PC, which silenced that rule for every source. Verdicts now name the
+  sender for scans, floods and spoofing, and never this PC's own addresses.
+- **Names have to vouch for an address.** A TLS handshake naming drive.google.com,
+  or a DNS answer nobody asked for, could make a C2 server a "Shared Cloud IP" at
+  LOW. Only a DNS answer to this side's own query, or a TLS name inside its owner's
+  published ranges, can lower an alert now, and reverse DNS never does.
+- **A typo in Settings no longer switches the IDS off.** A threshold saved as `15x`
+  silently skipped most rules on every connection, and other typos stopped
+  NetSentinel starting. Settings refuses a non-number in a number field, and saved
+  values fall back to their defaults with a warning.
+- **Hostile files and syslog can't freeze the app.** A PDF built to stall the stream
+  search held the whole app for minutes (1 MB: about a quarter of an hour), and a
+  forged CEF message with long runs of whitespace for about a second each. Both are
+  read in one pass now, and macro recovery from Office files reads each compressed
+  chunk once, noting in the report when it hit its limits.
+- **Syslog can't fill the disk.** Today's log file is capped at half of
+  `syslog.max_mb`; past that its own oldest records go and the newest are kept, so
+  older days are no longer deleted to make room. The drops are counted on the Threat
+  data and Device traffic pages, "today" is the clock's date, one bad message no
+  longer stops the receiver (a stopped one shows as Failed), a typo in its numbers no
+  longer stops NetSentinel starting, and a day's export streams from disk.
+- **The release build can't reach the signing key.** Building, signing and publishing
+  are separate jobs; dependencies are pinned by hash (`requirements-build.lock`), only
+  `cryptography` is installed next to the key, and actions are pinned by commit.
+- The About dialog shows the real version.
+
+**netmon** (the Linux site sensor):
+
+- Drift: an endpoint that fails, or answers empty where it had rows, keeps the last
+  run's copy, so a controller reboot no longer reports every rule deleted and every
+  forward new. If nothing can be read, the check fails and saves nothing.
+- A push that can't reach ntfy is retried, backing off to hourly; the UI and the
+  digest show it as "push failed". An hourly push budget (20, with 5 kept for
+  critical findings and canary hits) holds the rest for the digest, and a port scan
+  is one finding per source and destination.
+- The UniFi importer keeps only a URL's scheme, host and path, so a password in a URL
+  no longer reaches a push or the summariser.
+- The web UI checks the Host header on every bind, not only loopback; a 0.0.0.0 or ::
+  bind needs the new `--allowed-host`.
+- Names from the network are quoted or withheld in suggested commands.
+- `bacnet_control` matches only Confirmed-Request, so a controller's SimpleACK no
+  longer raises a critical push.
+- Alert extracts are no longer taken for captures, and are pruned by age and count.
+- The digest keeps its hour instead of moving an hour earlier each day, and a DST
+  change no longer sends it twice.
+- The capture unit starts on a fresh install.
+
 ## v1.13.0 — Your UniFi gateway's log, kept here
 
 **2284 unit tests** plus 14 integration checks. From 1.10.x or later this

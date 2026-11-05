@@ -307,7 +307,7 @@ Worth knowing before you rely on a detector:
 ## Testing
 
 ```bash
-# Everything (about 2,060 tests, NetSentinel and netmon; no network access)
+# Everything (about 2,400 tests, NetSentinel and netmon; no network access)
 python -m unittest discover -s . -p "test_*.py"
 
 # Review mode, live detection, LAN threats, file scans, the network audit

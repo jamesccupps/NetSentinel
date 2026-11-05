@@ -31,7 +31,7 @@ and what is left. Keep it current during long work (the owner asked for that).
 
 ```
 pip install scapy psutil scikit-learn numpy cryptography pyyaml maxminddb "py7zr>=1.0" python-evtx
-python -m unittest discover -s . -p "test_*.py"    # all tests (~2,060, ~1 min, ~63 skips)
+python -m unittest discover -s . -p "test_*.py"    # all tests (~2,400, ~1 min, ~65 skips)
 python tools/integration_check.py                  # 14 integration checks
 ruff check --select E9,F63,F7,F82 .                # what CI fails on
 python main.py                                     # GUI + dashboard
@@ -68,9 +68,18 @@ releasing. Publishing a release is the owner's call: ask before pushing a tag.
 The signing key's private half never goes in the repo, a prompt or a log;
 `PUBLIC_KEY` in `src/updater.py` is its public half.
 
+The workflow builds from `requirements-build.lock` (hash-pinned), signs in a
+separate job that installs only `tools/sign-requirements.lock`, and publishes in
+a third; actions are pinned by commit. After changing `requirements.txt`,
+regenerate the lock (the command is at the top of `release.yml`), or the exe is
+built without the change.
+
 ## Conventions
 
 - The owner works on `main` and has allowed pushing to it directly.
+- NetSentinel runs as Administrator: start programs by absolute path from
+  `src/winpaths.py`, never by bare name (a test fails on one), and never unpickle
+  or trust a file a program running as the owner could write.
 - Commit messages: a plain subject, then a body that says what was wrong and why
   the change is right. Comments explain why, not what; match the file you are in.
 - Every fix gets a test that would have caught it. Run the full suite before pushing.
