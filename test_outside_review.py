@@ -359,5 +359,60 @@ class TestSignaturesThatDoNotVerify(unittest.TestCase):
             os.path.join(_SYSTEM32, 'svchost.exe'))['is_system_dir'])
 
 
+class TestVerdictSubjects(unittest.TestCase):
+    """H6: a false-positive verdict stored its first subject, the destination,
+    which for inbound and flood alerts is this PC: every later alert of that
+    rule against this PC, from anyone, was then dropped for good."""
+
+    PC = '192.168.10.32'
+
+    def setUp(self):
+        import tempfile
+        from src.baseline_whitelist import ConfirmedFalsePositives
+        self.dir = tempfile.mkdtemp(prefix='ns_verdicts_')
+        self.store = ConfirmedFalsePositives(os.path.join(self.dir, 'confirmed.json'),
+                                             local_addresses=lambda: frozenset({self.PC}))
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.dir, True)
+
+    def alert(self, rule, src, dst, **evidence):
+        from src.ids_engine import Alert
+        return Alert(rule, 'HIGH', 't', 'd', src_ip=src, dst_ip=dst, category='Test',
+                     evidence=evidence)
+
+    def test_a_verdict_on_an_inbound_flood_names_the_sender(self):
+        entry = self.store.add(self.alert('ICMP-FLOOD', '192.168.10.50', self.PC))
+        self.assertEqual((entry['kind'], entry['value']), ('src_ip', '192.168.10.50'))
+        self.assertIsNotNone(self.store.matches(self.alert('ICMP-FLOOD', '192.168.10.50', self.PC)))
+        self.assertIsNone(self.store.matches(self.alert('ICMP-FLOOD', '203.0.113.66', self.PC)),
+                          'a flood from anyone else must still alert')
+
+    def test_this_pc_is_never_a_subject(self):
+        from src.baseline_whitelist import alert_subjects
+        out = self.alert('DATA-EXFIL', self.PC, '203.0.113.7')
+        self.assertEqual(alert_subjects(out, {self.PC}), [('dst_ip', '203.0.113.7')])
+        self.assertIsNone(self.store.add(self.alert('ODD-HOURS', self.PC, self.PC)))
+
+    def test_a_claimed_name_is_not_the_subject_of_an_address_rule(self):
+        entry = self.store.add(self.alert('THREAT-INTEL-IP', self.PC, '203.0.113.9',
+                                          tls_sni='www.gstatic.com'))
+        self.assertEqual((entry['kind'], entry['value']), ('dst_ip', '203.0.113.9'))
+        self.assertIsNone(self.store.matches(self.alert('THREAT-INTEL-IP', self.PC, '198.51.100.4',
+                                                        tls_sni='www.gstatic.com')))
+
+    def test_an_old_verdict_naming_this_pc_stops_applying(self):
+        from src.baseline_whitelist import ConfirmedFalsePositives
+        with open(self.store.path, 'w', encoding='utf-8') as f:
+            json.dump([{'rule_id': 'PORT-SCAN', 'kind': 'dst_ip', 'value': self.PC,
+                        'note': '', 'review_id': '', 'added': 1.0}], f)
+        with self.assertLogs('NetSentinel.BaselineWL', 'WARNING'):
+            store = ConfirmedFalsePositives(self.store.path,
+                                            local_addresses=lambda: frozenset({self.PC}))
+        self.assertTrue(store.entries()[0]['names_this_pc'])
+        self.assertIsNone(store.matches(self.alert('PORT-SCAN', '203.0.113.66', self.PC)))
+
+
 if __name__ == '__main__':
     unittest.main()

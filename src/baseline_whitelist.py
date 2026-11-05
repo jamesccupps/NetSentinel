@@ -40,25 +40,68 @@ def _field(alert, name):
     return getattr(alert, name, None)
 
 
-def alert_subjects(alert):
+# Rules about what the source did to others (scans, floods, spoofing, rogue
+# servers): a verdict on one is about that actor. Keyed on the destination, a
+# verdict on "ICMP flood from my NAS" silenced every ICMP flood against this PC.
+ACTOR_IS_SOURCE = frozenset({
+    'PORT-SCAN', 'BRUTE-FORCE', 'SYN-FLOOD', 'ICMP-FLOOD', 'DNS-FLOOD', 'ARP-SPOOF',
+    'ROGUE-DHCP', 'ROGUE-DHCPV6', 'ROGUE-RA', 'NAME-POISONING', 'LLMNR',
+    'LATERAL-MOVEMENT', 'BL-IP-SRC', 'NEW-DEVICE',
+})
+# Rules about an address's reputation. A name the traffic claimed (a TLS server
+# name) is not their subject: a verdict on "gstatic.com" would hide any server
+# that says it is one.
+IP_REPUTATION_RULES = frozenset({'THREAT-INTEL-IP', 'BL-IP-SRC', 'BL-IP-DST', 'IOC-TOR'})
+
+
+def _bare(ip):
+    return str(ip).split('%')[0].lower()
+
+
+_local_cache = {'at': 0.0, 'addresses': frozenset()}
+
+
+def this_machines_addresses():
+    """This PC's own addresses (cached for a minute): never a verdict's subject."""
+    now = time.time()
+    if now - _local_cache['at'] > 60:
+        found = {'127.0.0.1', '::1'}
+        try:
+            import psutil
+            import socket
+            for addrs in psutil.net_if_addrs().values():
+                for a in addrs:
+                    if a.family in (socket.AF_INET, socket.AF_INET6):
+                        found.add(_bare(a.address))
+        except Exception:
+            pass
+        _local_cache.update(at=now, addresses=frozenset(found))
+    return _local_cache['addresses']
+
+
+def alert_subjects(alert, local_addresses=frozenset()):
     """
     What an alert is about, most specific first: (kind, value) pairs.
 
     Domains come only from what the traffic itself said (SNI, the DNS query), not
     from destination_domains, which is a guess from recent lookups and can name an
-    unrelated site.
+    unrelated site. This PC's own addresses are never a subject: every alert names
+    one, so a verdict on it silenced the rule for this PC entirely.
     """
+    rule_id = _field(alert, 'rule_id') or ''
     evidence = _field(alert, 'evidence') or {}
     subjects = []
-    for key in ('tls_sni', 'dns_query', 'query', 'domain'):
-        name = evidence.get(key) if isinstance(evidence, dict) else None
-        if isinstance(name, str) and '.' in name:
-            name = name.lower().strip('.')
-            subjects.append(('domain', registrable_domain(name) or name))
-            break
-    for kind in ('dst_ip', 'src_ip'):
+    if rule_id not in IP_REPUTATION_RULES:
+        for key in ('tls_sni', 'dns_query', 'query', 'domain'):
+            name = evidence.get(key) if isinstance(evidence, dict) else None
+            if isinstance(name, str) and '.' in name:
+                name = name.lower().strip('.')
+                subjects.append(('domain', registrable_domain(name) or name))
+                break
+    order = ('src_ip', 'dst_ip') if rule_id in ACTOR_IS_SOURCE else ('dst_ip', 'src_ip')
+    for kind in order:
         ip = _field(alert, kind)
-        if ip and not _is_group_address(ip):
+        if ip and not _is_group_address(ip) and _bare(ip) not in local_addresses:
             subjects.append((kind, ip))
     return subjects
 
@@ -86,12 +129,18 @@ class ConfirmedFalsePositives:
     cannot overwrite it.
     """
 
-    def __init__(self, path):
+    def __init__(self, path, local_addresses=None):
         self.path = path
+        self._local = local_addresses or this_machines_addresses
         self._lock = threading.Lock()
         self._entries = {}
         self._mtime = None
         self._reload()
+        for e in self.entries():
+            if e['names_this_pc']:
+                logger.warning("The false-positive verdict %s for %s %s names this PC, so it "
+                               "no longer applies; remove it from %s.", e.get('rule_id'),
+                               e.get('kind'), e.get('value'), os.path.basename(self.path))
 
     @staticmethod
     def key(rule_id, kind, value):
@@ -99,7 +148,7 @@ class ConfirmedFalsePositives:
 
     def add(self, alert, note='', review_id=''):
         """Confirm an alert as a false positive. None if it names nothing to match."""
-        subjects = alert_subjects(alert)
+        subjects = alert_subjects(alert, self._local())
         if not subjects:
             return None
         kind, value = subjects[0]
@@ -123,9 +172,14 @@ class ConfirmedFalsePositives:
             return True
 
     def entries(self):
+        """Every verdict. One that names this PC's own address (saved before that
+        was refused) is marked names_this_pc: it no longer matches, so remove it."""
+        local = self._local()
         with self._lock:
             self._reload()
-            return sorted(self._entries.values(), key=lambda e: e['added'])
+            out = sorted(self._entries.values(), key=lambda e: e['added'])
+        return [dict(e, names_this_pc=e.get('kind') in ('src_ip', 'dst_ip')
+                     and _bare(e.get('value', '')) in local) for e in out]
 
     def matches(self, alert):
         """The entry that suppresses this alert, or None."""
@@ -134,7 +188,7 @@ class ConfirmedFalsePositives:
             if not self._entries:
                 return None
             rule_id = _field(alert, 'rule_id') or ''
-            for kind, value in alert_subjects(alert):
+            for kind, value in alert_subjects(alert, self._local()):
                 entry = self._entries.get(self.key(rule_id, kind, value))
                 if entry is not None:
                     return entry
