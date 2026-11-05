@@ -103,6 +103,10 @@ _SECRET_SHAPES = (
     (re.compile(r'\b[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\b'),
      'json web token'),
     (re.compile(r'\bsnmp[^\s]*\s*[:=]\s*\S+', re.I), 'snmp community'),
+    # A credential in a URL's query or path parameters. Anchored on the
+    # separator: a bare `key=` would also match `monkey=`.
+    (re.compile(r'[?&;](?:password|passwd|pwd|token|api_?key|secret)=', re.I),
+     'credential in a url'),
 )
 
 

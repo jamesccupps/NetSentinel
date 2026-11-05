@@ -35,6 +35,7 @@ from __future__ import annotations
 import ipaddress
 import time
 from dataclasses import dataclass, field
+from urllib.parse import urlsplit
 
 __all__ = ['Event', 'Finding', 'Severity', 'Tier', 'enrich', 'Deduplicator']
 
@@ -343,10 +344,15 @@ def enrich(event, profile, now=None):
     # flow export fills `query`, a DNS parser fills both. One resolved field
     # means a rule's description reads the same whichever produced the event,
     # instead of rendering "?" for half of them.
+    #
+    # From a URL, only the host. `name_seen` is allowlisted out to pushes and
+    # the model, and the rest of a URL is where a password or a token rides.
     event.fields['name_seen'] = next(
-        (str(event.fields[key]) for key in
-         ('sni', 'server_name', 'query', 'domain', 'hostname', 'url')
-         if str(event.fields.get(key) or '').strip()), '')
+        (value for value in
+         [str(event.fields.get(key) or '') for key in
+          ('sni', 'server_name', 'query', 'domain', 'hostname')]
+         + [_url_host(event.fields.get('url'))]
+         if value.strip()), '')
 
     watched = _matched_watched_name(event, profile.watched_names)
     event.fields['watched_name'] = watched
@@ -404,6 +410,17 @@ def _geolocate(event, profile, src_device, src_public, dst_public):
         from netmon.geoip import normalise_asn
         permitted = {normalise_asn(a) for a in allowed} - {None}
         event.fields['dst_asn_allowed'] = normalise_asn(asn) in permitted
+
+
+def _url_host(url):
+    """The host a URL names, or '' when it names none."""
+    text = str(url or '').strip()
+    if not text:
+        return ''
+    try:
+        return urlsplit(text if '://' in text else '//' + text).hostname or ''
+    except ValueError:
+        return ''
 
 
 def _is_approved_remote_access(event, approved):

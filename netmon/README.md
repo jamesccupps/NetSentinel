@@ -586,6 +586,11 @@ one file, `Dst. Domain` is inferred and unreliable (kept as `domain_hint` so no
 rule matches it by accident), and traffic the gateway itself sends or receives
 is absent. Absence of a flow in an export is not evidence it did not happen.
 
+**The `URL` column can hold a password.** A login submitted by GET leaves
+`?password=...` in it, and `user:pass@` still turns up before a host. The
+importer keeps only the scheme, host and path, and a finding that names the
+URL names only its host.
+
 ---
 
 ## Telling it "I know"

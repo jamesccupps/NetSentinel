@@ -48,12 +48,13 @@ import io
 import logging
 import os
 import re
+from urllib.parse import urlsplit
 
 from netmon.events import Event
 
 logger = logging.getLogger("netmon.sources.unifi")
 
-__all__ = ['read_flows', 'parse_row', 'COLUMNS', 'UnifiCsvError']
+__all__ = ['read_flows', 'parse_row', 'scrub_url', 'COLUMNS', 'UnifiCsvError']
 
 DELIMITER = ';'
 
@@ -143,6 +144,37 @@ def parse_timestamp(value):
     return parsed.timestamp()
 
 
+def scrub_url(value):
+    """
+    A URL from the export, cut to scheme, host and path.
+
+    The gateway records the whole URL, so a login form submitted by GET puts
+    `?user=ops&password=...` in this column, and `user:pass@` before the host
+    is still in use on building kit. The URL travels as `name_seen` into
+    pushes, the digest and the model's summary, so what may carry a
+    credential is dropped here, before anything else sees the row: userinfo,
+    query, fragment, and `;` path parameters, where session ids go.
+    """
+    text = str(value or '').strip()
+    if not text:
+        return ''
+    # Without a scheme, urlsplit reads the host as part of the path.
+    try:
+        parts = urlsplit(text if '://' in text else '//' + text)
+    except ValueError:
+        return ''                              # an unclosed [ in the host
+    host = parts.hostname or ''
+    if ':' in host:
+        host = f'[{host}]'
+    try:
+        if parts.port is not None:
+            host += f':{parts.port}'
+    except ValueError:
+        pass                                   # a port that is not a number
+    path = parts.path.split(';', 1)[0]
+    return (f'{parts.scheme}://' if parts.scheme else '') + host + path
+
+
 def parse_row(row):
     """
     One CSV row to an Event.
@@ -201,7 +233,7 @@ def parse_row(row):
         'session_id': (row.get('Session Id') or '').strip(),
         'flow_count': _to_int(row.get('Flow Count')),
         'query': (row.get('Query') or '').strip(),
-        'url': (row.get('URL') or '').strip(),
+        'url': scrub_url(row.get('URL')),
         # Deliberately not `domain`: it is inferred, it mislabels shared
         # addresses, and it is blank for exactly the long-lived connections
         # worth looking at. A rule that wants a domain should use the SNI from

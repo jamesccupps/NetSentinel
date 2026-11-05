@@ -183,5 +183,81 @@ class TestSuggestedCommandsCarryNoShell(unittest.TestCase):
         self.assertEqual(rule.evaluate(event)[0].description, 'reached a;b')
 
 
+# ─── H11: passwords in UniFi CSV URLs reached pushes and the model ───────────
+
+class TestUrlsLoseTheirCredentials(unittest.TestCase):
+    """
+    The export keeps the whole URL. `name_seen` fell back to it, and
+    remote_access_tool's description renders `name_seen`, so a login submitted
+    by GET was pushed with its password in it.
+    """
+
+    SECRETS = ('Hunter2', 'tok3nV4lue', 'ABCDEF0123')
+    URL = ('https://ops:Hunter2@relay.anydesk.example.test:8443/connect;'
+           'jsessionid=ABCDEF0123?user=ops&password=Hunter2&token=tok3nV4lue#top')
+
+    def test_the_url_keeps_scheme_host_and_path(self):
+        from netmon.sources.unifi_csv import scrub_url
+        self.assertEqual(scrub_url(self.URL),
+                         'https://relay.anydesk.example.test:8443/connect')
+        self.assertEqual(scrub_url('portal.example.test/login?pwd=x'),
+                         'portal.example.test/login')
+        self.assertEqual(scrub_url('http://[fe80::1]:8080/a?b=c'),
+                         'http://[fe80::1]:8080/a')
+        self.assertEqual(scrub_url(''), '')
+        self.assertEqual(scrub_url('http://[broken/x?password=y'), '')
+
+    def row(self):
+        from netmon_tests.test_unifi_csv import row
+        return row(**{'Dst. Domain': '', 'URL': self.URL,
+                      'Src. Ip': '10.10.60.50', 'Dst. Ip': '203.0.113.7'})
+
+    def test_parse_row_drops_them(self):
+        from netmon.sources.unifi_csv import parse_row
+        event = parse_row(self.row())
+        for secret in self.SECRETS:
+            self.assertNotIn(secret, event.fields['url'])
+
+    def test_name_seen_is_only_the_host(self):
+        from netmon.events import Event, enrich
+        from netmon.profile import load_profile
+        event = Event(kind='http', src_ip='10.10.60.50', dst_ip='203.0.113.7',
+                      fields={'url': 'http://user:pw@cam.example.test/a?b=c'})
+        enrich(event, load_profile(EXAMPLE))
+        self.assertEqual(event.fields['name_seen'], 'cam.example.test')
+
+    def test_nothing_reaches_a_push_or_the_model(self):
+        import json
+        from netmon.events import enrich
+        from netmon.profile import load_profile
+        from netmon.redact import AI, ALERT, audit, redact_finding
+        from netmon.rules_engine import load_rules
+        from netmon.sources.unifi_csv import parse_row
+        profile = load_profile(EXAMPLE)
+        event = parse_row(self.row())
+        enrich(event, profile)
+        findings = load_rules(RULES).by_id('remote_access_tool').evaluate(event)
+        self.assertEqual(len(findings), 1)
+        for audience in (ALERT, AI):
+            record = redact_finding(findings[0], profile, audience)
+            blob = json.dumps(record, default=str)
+            with self.subTest(audience=audience):
+                for secret in self.SECRETS:
+                    self.assertNotIn(secret, blob)
+                self.assertEqual(audit(record), [])
+
+    def test_the_audit_knows_the_shape(self):
+        from netmon.redact import audit
+        for text in ('https://x.example.test/login?user=a&password=b',
+                     '/portal;token=abc', '?api_key=1', '&apikey=1',
+                     '?PWD=1', '&secret=1', '?passwd=1'):
+            with self.subTest(text=text):
+                self.assertTrue(audit(text))
+        for text in ('monkey=1&donkey=2', '?keyboard=uk', 'token bucket',
+                     '/password-reset'):
+            with self.subTest(text=text):
+                self.assertEqual(audit(text), [])
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)
