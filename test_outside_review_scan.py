@@ -7,10 +7,13 @@ above what the fixed code takes, so a slow CI runner does not flake them, and
 far below what the old code took.
 """
 
+import json
 import os
 import random
 import re
+import shutil
 import sys
+import tempfile
 import time
 import unittest
 import zlib
@@ -22,7 +25,7 @@ import _test_support  # noqa: E402,F401
 
 from src import file_scan, script_rules, syslog_receiver  # noqa: E402
 from test_scan_scripts import ovba_literal  # noqa: E402
-from test_syslog_receiver import CEF  # noqa: E402
+from test_syslog_receiver import CEF, GATEWAY, T0, Settings  # noqa: E402
 
 _OLD_PDF_STREAM = re.compile(rb'stream\r?\n(.*?)endstream', re.S)
 
@@ -349,6 +352,95 @@ class TestCefExtension(unittest.TestCase):
         for _ in range(5):
             syslog_receiver.parse(line)
         self.assertLess(time.perf_counter() - started, 1.0)
+
+
+def day_of(when):
+    return time.strftime('%Y-%m-%d', time.localtime(when))
+
+
+class _SyslogCase(unittest.TestCase):
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix='ns_syslog_review_')
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+
+    def receiver(self, **settings):
+        r = syslog_receiver.SyslogReceiver(Settings(**settings), data_dir=self.tmp,
+                                           clock=lambda: T0)
+        self.addCleanup(r.stop)
+        return r
+
+    def write_day(self, r, day, size):
+        with open(r.day_path(day), 'wb') as f:
+            f.write(b'x' * (size - 1) + b'\n')
+
+    def flood(self, r, count):
+        # one a second, so the rate cap is not what drops them
+        for i in range(count):
+            r.handle(f'{CEF} msg=record {i}'.encode(), GATEWAY, now=T0 + i)
+
+    def lines(self, r, day):
+        with open(r.day_path(day), encoding='utf-8') as f:
+            return [json.loads(line) for line in f]
+
+
+class TestSyslogDayCap(_SyslogCase):
+    """M2: today's file had no cap, and pruning made room for it by deleting every other day."""
+
+    def test_todays_file_stays_within_its_share(self):
+        r = self.receiver(max_mb=1)
+        self.flood(r, 3000)
+        today = day_of(T0)
+        self.assertLessEqual(os.path.getsize(r.day_path(today)), r.day_cap)
+        self.assertEqual(r.day_cap, 512 * 1024)
+        kept = [int(rec['message'].split()[-1]) for rec in self.lines(r, today)]
+        # the newest are kept, in order, and every record is either kept or counted
+        self.assertEqual(kept, list(range(3000 - len(kept), 3000)))
+        self.assertGreater(r.dropped_cap, 0)
+        self.assertEqual(r.dropped_cap + len(kept), 3000)
+        status = r.status()
+        self.assertEqual(status['dropped_cap'], r.dropped_cap)
+        self.assertIn(f"{r.dropped_cap} of the day's oldest dropped", status['note'])
+
+    def test_a_flood_today_leaves_the_other_days(self):
+        r = self.receiver(max_mb=1, keep_days=30)
+        older = [day_of(T0 - n * 86400) for n in (3, 2, 1)]
+        for day in older:
+            self.write_day(r, day, 100_000)
+        self.flood(r, 3000)
+        r.prune(now=T0)
+        self.assertEqual(r.days(), older + [day_of(T0)])
+
+    def test_today_is_the_clocks_date_not_the_newest_name(self):
+        # the clock stepped back: a later day's file exists, and today's must survive
+        r = self.receiver(max_mb=1, keep_days=30)
+        today, later = day_of(T0), day_of(T0 + 60 * 86400)
+        self.write_day(r, today, 400_000)
+        self.write_day(r, later, 700_000)
+        r.prune(now=T0)
+        self.assertEqual(r.days(), [today])
+
+    def test_older_days_go_when_the_total_with_today_is_over(self):
+        r = self.receiver(max_mb=1, keep_days=30)
+        old, older = day_of(T0 - 86400), day_of(T0 - 2 * 86400)
+        self.write_day(r, older, 300_000)
+        self.write_day(r, old, 300_000)
+        self.write_day(r, day_of(T0), 500_000)
+        r.prune(now=T0)
+        self.assertEqual(r.days(), [old, day_of(T0)])
+
+    def test_dropping_the_oldest_keeps_whole_records(self):
+        path = os.path.join(self.tmp, 'day.jsonl')
+        records = [json.dumps({'n': i, 'pad': 'p' * (i % 37)}) + '\n' for i in range(500)]
+        with open(path, 'w', encoding='utf-8', newline='') as f:
+            f.writelines(records)
+        dropped, left = syslog_receiver._drop_oldest(path, 6000)
+        with open(path, encoding='utf-8') as f:
+            kept = f.readlines()
+        self.assertEqual(kept, records[dropped:])
+        self.assertEqual(left, os.path.getsize(path))
+        self.assertLessEqual(left, 6000)
+        self.assertGreater(left, 6000 - len(max(records, key=len)))
 
 
 if __name__ == '__main__':

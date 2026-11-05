@@ -11,7 +11,9 @@ server: opt-in, on the address and port set, from the senders listed.
 - A sender not on syslog.allowed_senders is dropped unread. (UDP's source can be
   forged by something on the LAN; what is stored is advisory either way.)
 - Each day is a JSON-lines file under data/unifi_logs/, kept syslog.keep_days
-  and within syslog.max_mb, the oldest first to go. The dashboard exports them.
+  and within syslog.max_mb, the oldest first to go. Today's may use half of
+  max_mb: past that its own oldest records go, so a flood can neither fill the
+  disk nor push the other days out. The dashboard exports them.
 - Per device, the destinations it reached and how often, allowed or blocked,
   are kept for the dashboard: what each device needs to talk to.
 
@@ -137,6 +139,67 @@ def _cef_extension(ext):
     return out
 
 
+def _day(when):
+    return datetime.fromtimestamp(when).strftime('%Y-%m-%d')
+
+
+def _size(path):
+    try:
+        return os.path.getsize(path)
+    except OSError:
+        return 0
+
+
+_COPY = 1024 * 1024
+
+
+def _drop_oldest(path, keep):
+    """
+    Drop a day file's oldest records so at most `keep` bytes of the newest
+    remain: (records dropped, bytes left). Rewritten in place, since a copy
+    beside it would need the free space a flood is using up; a crash part-way
+    costs a torn record or a few repeated ones, not the day. Keeping half the
+    cap makes the next rewrite wait for as many bytes again, so the cost is
+    linear in what is received.
+    """
+    with open(path, 'r+b') as f:
+        size = f.seek(0, os.SEEK_END)
+        if size <= keep:
+            return 0, size
+        # the first whole record at or after size - keep
+        cut, at = size, size - keep - 1
+        f.seek(at)
+        while True:
+            chunk = f.read(_COPY)
+            if not chunk:
+                break
+            newline = chunk.find(b'\n')
+            if newline >= 0:
+                cut = at + newline + 1
+                break
+            at += len(chunk)
+        f.seek(0)
+        dropped, left = 0, cut
+        while left > 0:
+            chunk = f.read(min(_COPY, left))
+            if not chunk:
+                break
+            dropped += chunk.count(b'\n')
+            left -= len(chunk)
+        src, dst = cut, 0
+        while True:
+            f.seek(src)
+            chunk = f.read(_COPY)
+            if not chunk:
+                break
+            f.seek(dst)
+            f.write(chunk)
+            src += len(chunk)
+            dst += len(chunk)
+        f.truncate(dst)
+    return dropped, dst
+
+
 def _sender_list(value):
     if isinstance(value, str):
         value = [v for v in re.split(r'[,\s]+', value) if v]
@@ -160,6 +223,9 @@ class SyslogReceiver:
         self.allowed = _sender_list(get('syslog', 'allowed_senders', default=[]))
         self.keep_days = max(1, int(get('syslog', 'keep_days', default=30) or 30))
         self.max_bytes = max(1, int(get('syslog', 'max_mb', default=500) or 500)) * 1024 * 1024
+        # Today's share of max_mb. Senders can be forged, so a flood must not be
+        # able to fill the disk, nor push every older day out to make room.
+        self.day_cap = self.max_bytes // 2
         if data_dir is None:
             from src.config import DB_DIR
             data_dir = os.path.join(DB_DIR, 'unifi_logs')
@@ -169,6 +235,8 @@ class SyslogReceiver:
         self._lock = threading.Lock()
         self._clients = OrderedDict()   # ip -> {'dests': {key: [allow, block, last]}, ...}
         self.received = self.dropped_sender = self.dropped_rate = self.stored = 0
+        self.dropped_cap = 0          # today's oldest records, dropped to keep within day_cap
+        self._today, self._today_bytes = None, 0
         self.last_message = None
         self.error = ''
         self._sock = None
@@ -304,11 +372,21 @@ class SyslogReceiver:
             return []
 
     def _store(self, record, now):
-        day = datetime.fromtimestamp(now).strftime('%Y-%m-%d')
+        day = _day(now)
+        # bytes, not text: the cap counts what is on disk, and text mode on
+        # Windows writes two bytes for each '\n'
+        line = (json.dumps(record, ensure_ascii=False) + '\n').encode('utf-8')
         try:
             os.makedirs(self.data_dir, exist_ok=True)
-            with open(self.day_path(day), 'a', encoding='utf-8') as f:
-                f.write(json.dumps(record, ensure_ascii=False) + '\n')
+            path = self.day_path(day)
+            if day != self._today:
+                self._today, self._today_bytes = day, _size(path)
+            if self._today_bytes + len(line) > self.day_cap:
+                dropped, self._today_bytes = _drop_oldest(path, self.day_cap // 2)
+                self.dropped_cap += dropped
+            with open(path, 'ab') as f:
+                f.write(line)
+            self._today_bytes += len(line)
             self.stored += 1
             if self.stored % 1000 == 1:
                 self.prune(now)
@@ -316,17 +394,23 @@ class SyslogReceiver:
             self.error = f'Could not store a message ({type(e).__name__}).'
 
     def prune(self, now=None):
-        """Days past keep_days, then the oldest until the rest fit max_mb."""
+        """
+        Days past keep_days, then the oldest until the rest fit max_mb with
+        today's counted. Today's is never removed: it is kept within day_cap
+        by dropping its own oldest records. Today is the clock's date, not
+        the newest file: after the clock steps back, a file named for a later
+        day is just another day.
+        """
         now = self._clock() if now is None else now
-        cutoff = datetime.fromtimestamp(now - self.keep_days * 86400).strftime('%Y-%m-%d')
-        days = self.days()
-        for day in days:
-            if day < cutoff:
+        today = _day(now)
+        cutoff = _day(now - self.keep_days * 86400)
+        for day in self.days():
+            if day < cutoff and day != today:
                 self._remove(day)
-        days = self.days()
-        sizes = {d: os.path.getsize(self.day_path(d)) for d in days}
-        total = sum(sizes.values())
-        for day in days[:-1]:           # never today's
+        days = [d for d in self.days() if d != today]
+        sizes = {d: _size(self.day_path(d)) for d in days}
+        total = sum(sizes.values()) + min(_size(self.day_path(today)), self.day_cap)
+        for day in days:
             if total <= self.max_bytes:
                 break
             total -= sizes[day]
@@ -343,7 +427,9 @@ class SyslogReceiver:
     def status(self):
         row = {'name': 'unifi_syslog', 'category': 'Device traffic',
                'description': 'UniFi traffic log, received over syslog',
-               'updated': self.last_message, 'entries': self.received, 'refresh_hours': None}
+               'updated': self.last_message, 'entries': self.received, 'refresh_hours': None,
+               'dropped_sender': self.dropped_sender, 'dropped_rate': self.dropped_rate,
+               'dropped_cap': self.dropped_cap}
         if not self.enabled:
             return dict(row, state='off', note='Off in settings (syslog.enabled).')
         if self.error and self._thread is None:
@@ -356,4 +442,9 @@ class SyslogReceiver:
         note = f'{days} day{"" if days == 1 else "s"} kept on disk.'
         if self.dropped_sender:
             note += f' {self.dropped_sender} from senders not allowed, dropped.'
+        if self.dropped_rate:
+            note += f' {self.dropped_rate} past {MAX_PER_SECOND:,} a second, dropped.'
+        if self.dropped_cap:
+            note += (f" {self.dropped_cap} of the day's oldest dropped to keep it within "
+                     f"{self.day_cap / 1024 ** 2:g} MB.")
         return dict(row, state='ok', note=note)
