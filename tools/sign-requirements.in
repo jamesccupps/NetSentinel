@@ -1,0 +1,4 @@
+# The signing job installs only this (.github/workflows/release.yml), pinned by
+# hash in sign-requirements.lock:
+#   pip-compile --allow-unsafe --generate-hashes --no-emit-index-url tools/sign-requirements.in -o tools/sign-requirements.lock
+cryptography==50.0.2

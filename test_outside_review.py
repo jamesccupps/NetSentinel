@@ -616,5 +616,67 @@ class TestTyposInSettings(unittest.TestCase):
         self.assertTrue(manager.add_alert(Alert('X', 'CRITICAL', 't', 'd')))
 
 
+class TestReleaseWorkflow(unittest.TestCase):
+    """M1: one job installed every unpinned dependency, then signed with the
+    updater's key, with a write token in .git/config. A compromised package
+    could read the key that signs every install's one-click update."""
+
+    def setUp(self):
+        try:
+            import yaml
+        except ImportError:
+            self.skipTest('needs pyyaml')
+        root = os.path.dirname(os.path.abspath(__file__))
+        with open(os.path.join(root, '.github', 'workflows', 'release.yml'),
+                  encoding='utf-8') as f:
+            self.flow = yaml.safe_load(f)
+        self.jobs = self.flow['jobs']
+
+    def steps(self, job):
+        return self.jobs[job]['steps']
+
+    def runs(self, job):
+        return '\n'.join(s.get('run', '') for s in self.steps(job))
+
+    def test_no_permission_unless_a_job_asks(self):
+        self.assertEqual(self.flow['permissions'], {})
+        writers = [name for name, job in self.jobs.items()
+                   if (job.get('permissions') or {}).get('contents') == 'write']
+        self.assertEqual(writers, ['publish'])
+
+    def test_the_key_and_the_write_token_never_meet_third_party_code(self):
+        import re
+        with_key = [name for name, job in self.jobs.items()
+                    if 'NETSENTINEL_SIGNING_KEY' in str(job)]
+        self.assertEqual(with_key, ['sign'])
+        installs = re.findall(r'pip install[^\n]*', self.runs('sign'))
+        self.assertEqual(installs, ['pip install --require-hashes -r tools/sign-requirements.lock'])
+        self.assertNotIn('pip install', self.runs('publish'))
+        self.assertIn('--require-hashes -r requirements-build.lock', self.runs('build'))
+
+    def test_actions_are_pinned_by_commit_and_keep_no_credentials(self):
+        import re
+        for name, job in self.jobs.items():
+            for step in job['steps']:
+                uses = step.get('uses')
+                if not uses:
+                    continue
+                self.assertRegex(uses, r'@[0-9a-f]{40}$', f'{name}: {uses}')
+                if uses.startswith('actions/checkout@'):
+                    self.assertIs((step.get('with') or {}).get('persist-credentials'), False)
+
+    def test_the_locks_pin_every_package_by_hash(self):
+        root = os.path.dirname(os.path.abspath(__file__))
+        for lock in ('requirements-build.lock', os.path.join('tools', 'sign-requirements.lock')):
+            with open(os.path.join(root, lock), encoding='utf-8') as f:
+                text = f.read()
+            lines = [line for line in text.splitlines()
+                     if line and not line.startswith((' ', '#'))]
+            self.assertTrue(lines, lock)
+            for line in lines:
+                self.assertRegex(line, r'^[A-Za-z0-9_.-]+==[^\s]+ \\$', f'{lock}: {line}')
+            self.assertGreaterEqual(text.count('--hash=sha256:'), len(lines), lock)
+
+
 if __name__ == '__main__':
     unittest.main()
