@@ -23,12 +23,19 @@ the same browser cannot drive this one.
 
 Foreign Host headers
 --------------------
-While bound to loopback, a request whose Host header is not a loopback name is
-refused before anything is served. Without that, a page on any website can
-point its own hostname at 127.0.0.1 (DNS rebinding), read `/` as same-origin,
-and take the token off it — after which the token check protects nothing. A
-loopback bind is the only case where the legitimate names are knowable; bound
-anywhere else, the firewall is the boundary, as the warning says.
+A request whose Host header is not one of this server's names is refused
+before anything is served. Without that, a page on any website can point its
+own hostname at the sensor's address (DNS rebinding), read `/` as
+same-origin, and take the token off it — after which the token check protects
+nothing. A firewall does not help: the browser making the request is on the
+management network already.
+
+The names are the address it is bound to (and the loopback names, on a
+loopback bind) plus each `--allowed-host`. Bound to 0.0.0.0 or ::, there is no
+address a browser would use, so it will not start without `--allowed-host`.
+Writes from off loopback are allowed, with the token, the Origin check and
+`--allow-edit`, because editing from a management workstation is what
+`--allow-edit` on a sensor is for.
 
 Nothing here touches the network. It reads files and shows what is in them.
 """
@@ -36,6 +43,7 @@ Nothing here touches the network. It reads files and shows what is in them.
 from __future__ import annotations
 
 import html
+import ipaddress
 import json
 import logging
 import os
@@ -70,6 +78,10 @@ _STATIC_TYPES = {'.html': 'text/html; charset=utf-8',
 LOOPBACK_NAMES = frozenset({'127.0.0.1', 'localhost', '::1'})
 
 
+class BindError(ValueError):
+    """Asked to listen where no request's Host header could be checked."""
+
+
 def _host_name(header):
     """The name part of a Host header, without the port, lowercased."""
     host = (header or '').strip().lower()
@@ -78,6 +90,39 @@ def _host_name(header):
     # One colon is host:port. More than one is a bare IPv6 address, which a
     # browser would have bracketed; it is compared as it stands.
     return host.rsplit(':', 1)[0] if host.count(':') == 1 else host
+
+
+def _normal_host(name):
+    """A name or address in one spelling, so two ways of writing it compare."""
+    text = str(name or '').strip().lower().rstrip('.')
+    if text.startswith('[') and text.endswith(']'):
+        text = text[1:-1]
+    try:
+        return str(ipaddress.ip_address(text))
+    except ValueError:
+        return text
+
+
+def _address(host):
+    try:
+        return ipaddress.ip_address(str(host or '').strip().strip('[]'))
+    except ValueError:
+        return None
+
+
+def is_loopback(host):
+    """Whether a bind address is this machine only: 127.0.0.2 is, too."""
+    if str(host or '').strip().lower() == 'localhost':
+        return True
+    address = _address(host)
+    return address is not None and address.is_loopback
+
+
+def _is_wildcard(host):
+    if not str(host or '').strip():
+        return True
+    address = _address(host)
+    return address is not None and address.is_unspecified
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -103,17 +148,18 @@ class _Handler(BaseHTTPRequestHandler):
 
     def _host_allowed(self):
         """
-        Refuse a foreign Host header while bound to loopback.
+        Refuse a Host header that is not one of this server's names.
 
         Checked on every request, page and API alike: the page carries the
         token, so serving it to a rebound hostname hands over the one thing the
         write checks rely on.
         """
         allowed = self.server.netmon_app.allowed_hosts()
-        if allowed is None or _host_name(self.headers.get('Host')) in allowed:
+        if _normal_host(_host_name(self.headers.get('Host'))) in allowed:
             return True
         self._send_json({'error': 'unexpected Host header',
-                         'detail': 'this server answers only to a loopback name'},
+                         'detail': 'this server answers only to the address it '
+                                   'is bound to and each --allowed-host'},
                         421)
         return False
 
@@ -317,12 +363,22 @@ class WebServer:
     def __init__(self, profile_path, rules_path=None, analyzer=None,
                  host='127.0.0.1', port=8788, allow_edit=False, silences_path='',
                  allow_summarise=False, state_dir='', secrets_path='',
-                 summariser_factory=None):
+                 summariser_factory=None, allowed_hosts=()):
         self.profile_path = profile_path
         self.rules_path = rules_path or os.path.join(HERE, 'rules')
         self.analyzer = analyzer
         self.host = host
         self.port = port
+        # The names, beyond the bound address, a browser may reach this by:
+        # a DNS name for the sensor, or the address behind a wildcard bind.
+        self.extra_hosts = frozenset(_normal_host(name) for name in
+                                     (allowed_hosts or ()) if str(name).strip())
+        if _is_wildcard(host) and not self.extra_hosts:
+            raise BindError(
+                f'bound to {host or "every address"}, no request\'s Host header '
+                'can be checked: a page elsewhere could rebind its own name to '
+                'this sensor and read it. Pass --allowed-host with each name '
+                'or address the UI will be reached by, or bind to one address.')
         self.allow_edit = allow_edit
         self.allow_summarise = bool(allow_summarise)
         self.token = secrets.token_urlsafe(32)
@@ -408,13 +464,17 @@ class WebServer:
 
     def allowed_hosts(self):
         """
-        The Host names to accept, or None for any.
-
-        Only a loopback bind has a knowable answer. Bound to an address on a
-        management network, the names it is reached by are the site's business
-        and the firewall is the boundary.
+        The Host names to accept: the bound address, every loopback name on a
+        loopback bind, and each --allowed-host. Never "any": bound to an
+        address on a management network, a rebinding page reaches it from a
+        browser that is already inside the firewall.
         """
-        return LOOPBACK_NAMES if self.host in LOOPBACK_NAMES else None
+        names = set(self.extra_hosts)
+        if is_loopback(self.host):
+            names |= LOOPBACK_NAMES
+        if not _is_wildcard(self.host):
+            names.add(_normal_host(self.host))
+        return frozenset(names)
 
     # ─── Read routes ─────────────────────────────────────────────────────
 
@@ -845,7 +905,7 @@ def _int(params, name, default, maximum):
 
 def make_server(profile_path, rules_path=None, analyzer=None, host='127.0.0.1',
                 port=8788, allow_edit=False, state_dir='', allow_summarise=False,
-                secrets_path=''):
+                secrets_path='', allowed_hosts=()):
     """
     The UI as `netmon web` builds it, not yet listening.
 
@@ -857,15 +917,16 @@ def make_server(profile_path, rules_path=None, analyzer=None, host='127.0.0.1',
     return WebServer(profile_path, rules_path, analyzer, host, port, allow_edit,
                      silences_path=silences_path,
                      allow_summarise=allow_summarise, state_dir=state_dir,
-                     secrets_path=secrets_path)
+                     secrets_path=secrets_path, allowed_hosts=allowed_hosts)
 
 
 def run_web(profile_path, rules_path=None, analyzer=None, host='127.0.0.1',
             port=8788, allow_edit=False, open_browser=False, state_dir='',
-            allow_summarise=False, secrets_path=''):
+            allow_summarise=False, secrets_path='', allowed_hosts=()):
     """Start the UI and block until interrupted."""
     server = make_server(profile_path, rules_path, analyzer, host, port,
-                         allow_edit, state_dir, allow_summarise, secrets_path)
+                         allow_edit, state_dir, allow_summarise, secrets_path,
+                         allowed_hosts)
     silences_path = server.silences_path
     server.start()
 
@@ -887,12 +948,13 @@ def run_web(profile_path, rules_path=None, analyzer=None, host='127.0.0.1',
         if not state_dir:
             print('  WARNING: no --state, so token spend is kept under the home '
                   'directory')
-    if host not in ('127.0.0.1', 'localhost', '::1'):
+    if not is_loopback(host):
         print()
         print(f'  WARNING: bound to {host}, not localhost.')
         print('  This page is a complete map of the network — every device, every')
         print('  VLAN, which segments are unencrypted. There is no login. Restrict')
         print('  it at the firewall to your management addresses.')
+        print('  It answers to: ' + ', '.join(sorted(server.allowed_hosts())))
     print()
     print('Ctrl-C to stop.')
 
@@ -932,6 +994,12 @@ def _parser():
                              'decision — this page is a map of the network and '
                              'has no login')
     parser.add_argument('--port', type=int, default=8788)
+    parser.add_argument('--allowed-host', action='append', default=[],
+                        metavar='NAME',
+                        help='a name or address the UI may be reached by, '
+                             'besides the one it is bound to; repeatable. '
+                             'Needed with --host 0.0.0.0 or ::. Requests '
+                             'naming any other host are refused')
     parser.add_argument('--allow-edit', action='store_true',
                         help='let the profile and rule editors write to disk, '
                              'and the acknowledge, snooze and maintenance '
@@ -981,8 +1049,9 @@ def _main(argv=None):
         return run_web(args.profile, args.rules, analyzer, args.host, args.port,
                        args.allow_edit, args.open, state_dir=args.state,
                        allow_summarise=args.allow_summarise,
-                       secrets_path=args.secrets)
-    except (ProfileError, RuleError) as e:
+                       secrets_path=args.secrets,
+                       allowed_hosts=args.allowed_host)
+    except (ProfileError, RuleError, BindError) as e:
         print(f'{e}', file=sys.stderr)
         return 1
     except OSError as e:

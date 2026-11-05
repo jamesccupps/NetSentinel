@@ -139,13 +139,17 @@ class TestWhereTheAllowlistApplies(unittest.TestCase):
                 self.assertIsNotNone(WebServer(EXAMPLE, RULES, None,
                                                host=host).allowed_hosts())
 
-    def test_any_other_bind_does_not(self):
-        """The names it is reached by are the site's business; the firewall is
-        the boundary, which the startup warning says."""
-        self.assertIsNone(WebServer(EXAMPLE, RULES, None,
-                                    host='0.0.0.0').allowed_hosts())
-        self.assertIsNone(WebServer(EXAMPLE, RULES, None,
-                                    host='10.10.1.5').allowed_hosts())
+    def test_any_other_bind_has_one_too(self):
+        """
+        A rebinding page reaches a sensor on the management network from a
+        browser already inside the firewall, so off loopback is no exception.
+        """
+        self.assertEqual(WebServer(EXAMPLE, RULES, None,
+                                   host='10.10.1.5').allowed_hosts(),
+                         {'10.10.1.5'})
+        self.assertEqual(WebServer(EXAMPLE, RULES, None, host='0.0.0.0',
+                                   allowed_hosts=['sensor.example.test'])
+                         .allowed_hosts(), {'sensor.example.test'})
 
     def test_an_ipv6_url_is_bracketed(self):
         server = WebServer(EXAMPLE, RULES, None, host='::1', port=8788)

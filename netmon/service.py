@@ -57,7 +57,7 @@ class ServiceConfig:
                  canary_log='', secrets='', web_host='127.0.0.1', web_port=0,
                  drift_interval=4 * 3600, prune_interval=3600,
                  digest_hour=7, poll_interval=30, notify=True, dry_run=False,
-                 allow_edit=False, allow_summarise=False):
+                 allow_edit=False, allow_summarise=False, allowed_hosts=()):
         self.profile_path = profile_path
         self.rules_path = rules_path
         self.ring_dir = ring_dir
@@ -71,6 +71,8 @@ class ServiceConfig:
         self.secrets = secrets
         self.web_host = web_host
         self.web_port = web_port
+        # Names the UI may be reached by besides web_host (netmon.web).
+        self.allowed_hosts = tuple(allowed_hosts or ())
         self.drift_interval = int(drift_interval)
         self.prune_interval = int(prune_interval)
         self.digest_hour = int(digest_hour)
@@ -615,7 +617,8 @@ class Service:
                              allow_edit=self.config.allow_edit,
                              allow_summarise=self.config.allow_summarise,
                              state_dir=self.config.state_dir,
-                             secrets_path=self.config.secrets)
+                             secrets_path=self.config.secrets,
+                             allowed_hosts=self.config.allowed_hosts)
         port = self.web.start()
         logger.info('UI on http://%s:%d/', self.config.web_host, port)
         return port
@@ -744,6 +747,11 @@ def _parser():
     web = parser.add_argument_group('ui')
     web.add_argument('--web-host', default='127.0.0.1')
     web.add_argument('--web-port', type=int, default=8788)
+    web.add_argument('--allowed-host', action='append', default=[],
+                     metavar='NAME',
+                     help='a name or address the UI may be reached by, besides '
+                          '--web-host; repeatable, and needed with --web-host '
+                          '0.0.0.0 or ::')
     web.add_argument('--no-web', action='store_true')
     web.add_argument('--allow-edit', action='store_true',
                      help='let the UI write: the profile and rule editors, and '
@@ -781,7 +789,8 @@ def config_from_args(args):
         drift_interval=args.drift_interval, digest_hour=args.digest_hour,
         poll_interval=args.poll, notify=not args.no_notify,
         dry_run=args.dry_run, allow_edit=args.allow_edit,
-        allow_summarise=args.allow_summarise)
+        allow_summarise=args.allow_summarise,
+        allowed_hosts=args.allowed_host)
 
 
 def _main(argv=None):
@@ -808,10 +817,14 @@ def _main(argv=None):
         print(f'{len(findings)} findings; {service.counts}')
         return 2 if findings else 0
 
+    from netmon.web import BindError
     try:
         service.run()
     except KeyboardInterrupt:
         service.stop()
+    except BindError as e:
+        print(str(e), file=sys.stderr)
+        return 1
     return 0
 
 

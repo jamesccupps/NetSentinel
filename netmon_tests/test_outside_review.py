@@ -415,5 +415,135 @@ class TestTheDigestKeepsItsHour(unittest.TestCase):
         self.assertEqual(time.localtime(nxt)[:5], (2026, 3, 8, 7, 0))
 
 
+# ─── M17: off loopback, the UI answered to any Host ──────────────────────────
+
+class TestHostCheckOffLoopback(unittest.TestCase):
+    """
+    Bound to a management address, the UI skipped the Host check, so a page
+    that rebound its own name to the sensor read the token and the profile
+    from a browser on the management network, and could then write.
+    """
+
+    ADDRESS = '192.168.10.5'
+
+    def setUp(self):
+        import shutil
+        import tempfile
+        self.scratch = tempfile.mkdtemp(prefix='netmon-review-hosts-')
+        self.addCleanup(shutil.rmtree, self.scratch, True)
+        self.profile = os.path.join(self.scratch, 'site.yaml')
+        shutil.copy(EXAMPLE, self.profile)
+        self.start()
+
+    def start(self, **extra):
+        from netmon.web import WebServer
+        self.server = WebServer(self.profile, RULES, None, host='127.0.0.1',
+                                port=0, allow_edit=True, **extra)
+        self.port = self.server.start()
+        self.addCleanup(self.server.stop)
+        # It listens on loopback, so nothing leaves this machine, and judges
+        # requests as a sensor bound to a management address would.
+        self.server.host = self.ADDRESS
+
+    def request(self, method, path, host, headers=None):
+        import http.client
+        connection = http.client.HTTPConnection('127.0.0.1', self.port, timeout=5)
+        self.addCleanup(connection.close)
+        sent = {'Host': host}
+        sent.update(headers or {})
+        body = b'{}' if method == 'POST' else None
+        if body is not None:
+            sent['Content-Type'] = 'application/json'
+        connection.request(method, path, body=body, headers=sent)
+        response = connection.getresponse()
+        return response.status, response.read().decode('utf-8', 'replace')
+
+    def test_a_rebound_name_is_refused(self):
+        for path in ('/', '/api/profile'):
+            with self.subTest(path=path):
+                status, body = self.request('GET', path, 'attacker.example')
+                self.assertEqual(status, 421)
+                self.assertNotIn(self.server.token, body)
+
+    def test_the_bound_address_is_served(self):
+        status, body = self.request('GET', '/', f'{self.ADDRESS}:{self.port}')
+        self.assertEqual(status, 200)
+        self.assertIn(self.server.token, body)
+
+    def test_and_so_is_each_allowed_host(self):
+        self.server.stop()
+        self.start(allowed_hosts=['sensor.example.test'])
+        for host in ('sensor.example.test', f'SENSOR.example.test.:{self.port}',
+                     f'{self.ADDRESS}:{self.port}'):
+            with self.subTest(host=host):
+                status, body = self.request('GET', '/', host)
+                self.assertEqual(status, 200)
+                self.assertIn(self.server.token, body)
+        self.assertEqual(self.request('GET', '/', 'attacker.example')[0], 421)
+
+    def test_loopback_names_are_not_its_names_here(self):
+        self.assertEqual(self.request('GET', '/', 'localhost')[0], 421)
+
+    def test_writes_from_the_management_network_still_work(self):
+        """--allow-edit from a management workstation is the documented use."""
+        host = f'{self.ADDRESS}:{self.port}'
+        status, _ = self.request('POST', '/api/reload', host, headers={
+            'X-Netmon-Token': self.server.token, 'Origin': f'http://{host}'})
+        self.assertEqual(status, 200)
+
+
+class TestWhichNamesABindHas(unittest.TestCase):
+
+    def server(self, host, allowed=()):
+        from netmon.web import WebServer
+        return WebServer(EXAMPLE, RULES, None, host=host, allowed_hosts=allowed)
+
+    def test_a_wildcard_bind_will_not_start_without_allowed_hosts(self):
+        from netmon.web import BindError
+        for host in ('0.0.0.0', '::', ''):
+            with self.subTest(host=host):
+                with self.assertRaises(BindError) as ctx:
+                    self.server(host)
+                self.assertIn('--allowed-host', str(ctx.exception))
+        self.assertEqual(self.server('0.0.0.0', ['192.168.10.5']).allowed_hosts(),
+                         {'192.168.10.5'})
+
+    def test_every_loopback_address_is_loopback(self):
+        names = self.server('127.0.0.2').allowed_hosts()
+        self.assertIn('127.0.0.2', names)
+        self.assertIn('localhost', names)
+
+    def test_ipv6_spellings_compare_equal(self):
+        from netmon.web import _normal_host
+        names = self.server('fe80:0:0::1').allowed_hosts()
+        self.assertEqual(names, {'fe80::1'})
+        self.assertIn(_normal_host('[FE80::0001]'), names)
+
+    def test_the_command_lines_take_allowed_hosts(self):
+        from netmon.service import _parser, config_from_args
+        from netmon.web import _parser as web_parser
+        extra = ['--allowed-host', 'sensor.example.test',
+                 '--allowed-host', '192.168.10.5']
+        args = _parser().parse_args(['--profile', EXAMPLE,
+                                     '--web-host', '0.0.0.0'] + extra)
+        self.assertEqual(config_from_args(args).allowed_hosts,
+                         ('sensor.example.test', '192.168.10.5'))
+        args = web_parser().parse_args(['--profile', EXAMPLE,
+                                        '--host', '0.0.0.0'] + extra)
+        self.assertEqual(args.allowed_host, ['sensor.example.test', '192.168.10.5'])
+
+    def test_netmon_web_refuses_a_bare_wildcard_before_listening(self):
+        import contextlib
+        import io
+        # Imported first: on code without the check, _main would listen.
+        from netmon.web import BindError, _main  # noqa: F401
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err), \
+                contextlib.redirect_stdout(io.StringIO()):
+            code = _main(['--profile', EXAMPLE, '--host', '0.0.0.0'])
+        self.assertEqual(code, 1)
+        self.assertIn('--allowed-host', err.getvalue())
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)

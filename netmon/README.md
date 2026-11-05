@@ -41,9 +41,13 @@ python -m netmon.web --profile my-site.yaml --unifi flows.csv
 python -m netmon.web --profile my-site.yaml --state /var/lib/netmon/state --allow-edit
 ```
 
-It binds to localhost, refuses any request whose Host header is not a loopback
-name while it does (so a page elsewhere cannot rebind its own hostname to
-127.0.0.1 and read it), and will not write anything without `--allow-edit`.
+It binds to localhost, refuses any request whose Host header is not one of its
+own names (so a page elsewhere cannot rebind its own hostname to the sensor
+and read it), and will not write anything without `--allow-edit`. Its names
+are the address it is bound to, the loopback names on a loopback bind, and
+each `--allowed-host` (repeatable; `serve` takes it too). Bound to `0.0.0.0`
+or `::` it has no address a browser would use, so it will not start without
+one.
 `--state` points it at the service's state directory, so it shows — and with
 `--allow-edit` changes — the acknowledgements and snoozes the running service
 applies. `--allow-summarise` adds the model-triage button; see *Model triage*.
