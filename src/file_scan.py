@@ -603,7 +603,7 @@ def _extract(name, data, options, notes):
                         with zf.open(info) as f:
                             blob = f.read(min(budget, MAX_MACRO_BYTES))
                         budget -= len(blob)
-                        vba.append(script_rules.vba_source(blob, MAX_MACRO_BYTES))
+                        vba.append(script_rules.vba_source(blob, MAX_MACRO_BYTES, notes=notes))
                         continue
                     if not part.endswith(('.xml', '.rels')):
                         continue
@@ -624,7 +624,7 @@ def _extract(name, data, options, notes):
     if data[:8] == _OLE_MAGIC:
         # an old .doc/.xls: its strings are already in the text; only the
         # compressed macro source needs recovering
-        vba = script_rules.vba_source(data, MAX_MACRO_BYTES, strings=False)
+        vba = script_rules.vba_source(data, MAX_MACRO_BYTES, strings=False, notes=notes)
         text, macro_at = _append(text, vba)
     if '\x00' in text[:4096] and text.count('\x00') > len(text) // 4:
         # UTF-16 text (Windows exports, registry dumps) reads as letter-NUL pairs

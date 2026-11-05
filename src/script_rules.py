@@ -135,16 +135,35 @@ def _printable_share(s):
 
 # ─── Office macros ──────────────────────────────────────────────────────
 
-def vba_source(blob, limit=8 * 1024 * 1024, strings=True):
+# Compressed bytes read while looking for macros, per byte of input, over
+# every module start tried: a real project reads each byte about once.
+VBA_WORK_PER_BYTE = 4
+VBA_WORK_FLOOR = 64 * 1024
+
+
+def vba_source(blob, limit=8 * 1024 * 1024, strings=True, notes=None):
     """
     The VBA source held in a vbaProject.bin or an old-style (OLE) Office
     file, as far as it can be recovered without parsing the OLE container:
     every module's compressed source (found by its 'Attribute VB_Name'
     opening), decompressed, plus (with strings) the readable strings of the
-    rest.
+    rest. Where a limit stopped the search, it says so in `notes`.
+
+    Every opening found is tried, even one inside data an earlier attempt
+    read: that attempt may have been a decoy decoding straight over the real
+    module. But chunks decode independently, so two attempts that reach the
+    same chunk header decode the same from there on, to the same end. Each
+    chunk is therefore read once, and an attempt that meets an earlier one's
+    chunk stops there. Restarting at every opening used to re-read the rest
+    of a chain of chunks each built to look like one, then fail at its last
+    token: quadratic, about 48 minutes a megabyte.
     """
-    parts, total, pos = [], 0, 0
-    while total < limit:
+    parts, total, pos, n = [], 0, 0, len(blob)
+    read_at = {}            # chunk header position -> the attempt that read it
+    failed = []             # per attempt: it ended in a malformed chunk
+    work = min(n * VBA_WORK_PER_BYTE, limit * 2) + VBA_WORK_FLOOR
+    out_of_work = False
+    while total < limit and not out_of_work:
         # A compressed module opens with signature 0x01, a two-byte chunk
         # header, and a flag byte of 0 before the eight literal bytes 'Attribut'.
         i = blob.find(b'\x00Attribut', pos)
@@ -152,15 +171,43 @@ def vba_source(blob, limit=8 * 1024 * 1024, strings=True):
             break
         pos = i + 9
         start = i - 3
-        if start < 0 or blob[start] != 1:
+        if start < 0 or blob[start] != 1 or start + 1 in read_at:
             continue
-        try:
-            source = ovba_decompress(blob, start, limit - total)
-        except (ValueError, IndexError):
-            continue
-        if source:
+        attempt, out, at, ok = len(failed), bytearray(), start + 1, True
+        while len(out) < limit - total:
+            earlier = read_at.get(at)
+            if earlier is not None:
+                # the rest is what that attempt decoded, already kept if it was good
+                ok = not failed[earlier]
+                break
+            if work <= 0:
+                out_of_work, ok = True, False
+                break
+            read_at[at] = attempt
+            span = _ovba_span(blob, at)
+            if span is None:
+                break
+            try:
+                out += _ovba_chunk(blob, at, *span)
+            except (ValueError, IndexError) as e:
+                # charged what it read and no more: openings that fail at once
+                # must not use up the work a real module after them needs
+                work -= getattr(e, 'read_to', span[1]) - at
+                ok = False
+                break
+            work -= min(span[1], n) - at
+            at = span[1]
+        failed.append(not ok)
+        if ok and out:
+            source = bytes(out[:limit - total])
             parts.append(source.decode('latin-1'))
             total += len(source)
+    if notes is not None:
+        if out_of_work:
+            notes.append('macro search stopped at its work limit: '
+                         'macros after that point were not decompressed')
+        elif total >= limit:
+            notes.append(f'macro source past the first {limit // 1024 ** 2} MB was not read')
     if strings:
         found = re.findall(rb'[\x20-\x7e]{6,}', blob[:limit])
         parts.append('\n'.join(s.decode('ascii') for s in found))
@@ -172,45 +219,80 @@ def ovba_decompress(data, start, limit):
     if data[start] != 1:
         raise ValueError('not a compressed container')
     out = bytearray()
-    pos, n = start + 1, len(data)
-    while pos + 2 <= n and len(out) < limit:
-        header = data[pos] | (data[pos + 1] << 8)
-        if (header >> 12) & 0x7 != 0b011:
+    pos = start + 1
+    while len(out) < limit:
+        span = _ovba_span(data, pos)
+        if span is None:
             break
-        chunk_end = min(n, pos + (header & 0x0FFF) + 3)
-        pos += 2
-        if not header & 0x8000:
-            out += data[pos:pos + 4096]
-            pos += 4096
-            continue
-        chunk_start = len(out)
-        while pos < chunk_end:
-            flags = data[pos]
-            pos += 1
-            for bit in range(8):
-                if pos >= chunk_end:
-                    break
-                if not flags & (1 << bit):
-                    out.append(data[pos])
-                    pos += 1
-                    continue
-                if pos + 2 > chunk_end:
-                    raise ValueError('truncated copy token')
-                token = data[pos] | (data[pos + 1] << 8)
-                pos += 2
-                done = len(out) - chunk_start
-                if done <= 0:
-                    raise ValueError('copy token before any data')
-                bits = min(max((done - 1).bit_length(), 4), 12)
-                length = (token & (0xFFFF >> bits)) + 3
-                offset = (token >> (16 - bits)) + 1
-                src = len(out) - offset
-                if src < chunk_start:
-                    raise ValueError('copy token reaches before the chunk')
-                for k in range(length):
-                    out.append(out[src + k])
-        pos = chunk_end
+        out += _ovba_chunk(data, pos, *span)
+        pos = span[1]
     return bytes(out[:limit])
+
+
+def _ovba_span(data, pos):
+    """
+    (compressed, position of the next chunk header) for the chunk whose
+    header is at data[pos], or None if there is no chunk header there.
+    """
+    if pos + 2 > len(data):
+        return None
+    header = data[pos] | (data[pos + 1] << 8)
+    if (header >> 12) & 0x7 != 0b011:
+        return None
+    if not header & 0x8000:
+        return False, pos + 2 + 4096
+    return True, min(len(data), pos + (header & 0x0FFF) + 3)
+
+
+class _BadChunk(ValueError):
+    """A malformed chunk, and the input position it was read to."""
+
+    def __init__(self, reason, read_to):
+        super().__init__(reason)
+        self.read_to = read_to
+
+
+def _ovba_chunk(data, pos, compressed, chunk_end):
+    """
+    The chunk whose header is at data[pos], decompressed. Its copy tokens
+    reach only within it, so it decodes the same whichever container start
+    it was reached from.
+    """
+    pos += 2
+    if not compressed:
+        return data[pos:chunk_end]
+    out = bytearray()
+    while pos < chunk_end:
+        flags = data[pos]
+        pos += 1
+        for bit in range(8):
+            if pos >= chunk_end:
+                break
+            if not flags & (1 << bit):
+                out.append(data[pos])
+                pos += 1
+                continue
+            if pos + 2 > chunk_end:
+                raise _BadChunk('truncated copy token', chunk_end)
+            token = data[pos] | (data[pos + 1] << 8)
+            pos += 2
+            done = len(out)
+            if done <= 0:
+                raise _BadChunk('copy token before any data', pos)
+            bits = min(max((done - 1).bit_length(), 4), 12)
+            length = (token & (0xFFFF >> bits)) + 3
+            offset = (token >> (16 - bits)) + 1
+            src = done - offset
+            if src < 0:
+                raise _BadChunk('copy token reaches before the chunk', pos)
+            # A copy may overlap what it writes ('abc' then 6 from 3 back is
+            # 'abcabc'): the last `offset` bytes, repeated. Slices, not a
+            # byte at a time, so a token's cost does not grow with its length.
+            if offset >= length:
+                out += out[src:src + length]
+            else:
+                out += (out[src:] * (length // offset + 1))[:length]
+    return bytes(out)
 
 
 def macro_findings(vba_text):
