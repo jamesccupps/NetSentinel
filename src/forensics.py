@@ -1782,7 +1782,7 @@ class NetworkForensics:
                         f"{card_type} ****{last4} (ticket {ticket_num})",
                         src, dst, port, ts,
                         extra={
-                            'command': cmd_type, 'last_four': last4,
+                            'command': cmd_type,
                             'card_type': card_type, 'ticket_number': ticket_num,
                             'gate_pc': sender, 'pci_violation': True,
                         },
@@ -1816,12 +1816,16 @@ class NetworkForensics:
                     risk = 'CRITICAL'
                     agency_info = lookup_ezpass_agency(agency)
 
-                # Build human-readable label
+                # The label goes into alerts, the timeline, logs and review bundles,
+                # so it names the tag only by agency and its last two digits: the
+                # full number is a cloneable credential. Only raw_value holds it,
+                # and the vault keeps that only with store_raw_credentials on.
+                masked_tag = f"{agency + ':' if agency else ''}****{tag_id[-2:]}"
                 if agency_info:
                     state, agency_name = agency_info
-                    display_label = f"{cred_type} tag {cred_value} ({state} — {agency_name})"
+                    display_label = f"{cred_type} tag {masked_tag} ({state} — {agency_name})"
                 else:
-                    display_label = f"{cred_type} tag {cred_value}"
+                    display_label = f"{cred_type} tag {masked_tag}"
 
                 # Dedup — only alert once per unique tag, but always log timeline
                 if cred_value not in self._parking_tags_seen:
@@ -1833,9 +1837,8 @@ class NetworkForensics:
 
                     extra_fields = {
                         'command': cmd_type, 'credential_type': cred_type,
-                        'tag_value': cred_value, 'agency_code': agency,
-                        'transponder_id': tag_id, 'ticket_number': ticket_num,
-                        'gate_pc': sender,
+                        'tag_masked': masked_tag, 'agency_code': agency,
+                        'ticket_number': ticket_num, 'gate_pc': sender,
                     }
                     if agency_info:
                         extra_fields['issuing_state'] = agency_info[0]
@@ -1868,7 +1871,7 @@ class NetworkForensics:
                     self._add_credential('Parking/Skidata', 'card_as_ticket',
                         f"Card entry :{last4} (ticket {ticket_num})",
                         src, dst, port, ts,
-                        extra={'last_four': last4, 'command': cmd_type,
+                        extra={'command': cmd_type,
                                'ticket_number': ticket_num, 'gate_pc': sender},
                         raw_value=raw_value, risk='HIGH')
 

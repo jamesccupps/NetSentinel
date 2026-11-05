@@ -146,12 +146,41 @@ class ReviewRecorder:
 _DROP_KEYS = {'value', 'raw', 'value_raw', 'value_masked', 'raw_value', 'payload',
               'packet_capture', 'packet_capture_note', 'cookies', 'headers',
               # UniFi's device names ("Sam's phone"): people's names, local only.
-              'src_name', 'dst_name'}
+              'src_name', 'dst_name',
+              # Card and RFID fields, even masked: a hard rule keeps them out of
+              # anything sent to an AI.
+              'tag_value', 'tag_masked', 'transponder_id', 'last_four', 'card_number',
+              'pan'}
 # Nor any key containing one of these.
 _FORBIDDEN_IN_KEY = ('cookie', 'password', 'passwd', 'secret', 'token', 'credential',
                      'authorization', 'session', 'api_key', 'apikey', 'private_key')
+# Inside a nested dictionary (a finding's `extra`, the verifier's result), text
+# is kept only under these keys. A deny-list there missed `tag_value` and
+# `transponder_id`, and a parser added later can name its fields anything.
+# Numbers and booleans are kept under any key.
+_NESTED_TEXT_KEYS = {
+    'verdict', 'confidence', 'summary', 'reasoning', 'recommendation', 'reason',
+    'note', 'severity', 'category', 'rule', 'rule_id', 'title', 'type', 'kind',
+    'protocol', 'service', 'command', 'card_type', 'agency_code', 'issuing_state',
+    'issuing_agency', 'gate_pc', 'country', 'country_code', 'asn', 'asn_org',
+    'org', 'provider', 'process', 'process_name', 'publisher', 'domain', 'host',
+    'hostname', 'sni', 'tls_sni', 'dns_query', 'query', 'ja3', 'ja4', 'src_ip',
+    'dst_ip', 'ip', 'port', 'vendor', 'direction', 'state', 'status',
+    'url', 'uri', 'path',
+}
+# Fields that hold a URL or a request path. _URL_QUERY only knows URLs that start
+# with a scheme, so "/login?user=x&pw=y" kept its query.
+_URL_KEYS = {'url', 'uri', 'path', 'http_path', 'request_uri'}
 
-_URL_QUERY = re.compile(r'''((?:https?|ftp|wss?)://[^\s?#"'<>]+)[?#][^\s"'<>]*''', re.I)
+
+def _without_query(v):
+    for mark in ('?', '#'):
+        if mark in v:
+            return v.split(mark, 1)[0] + '?[query removed]'
+    return v
+
+_URL_QUERY = re.compile(
+    r'''((?:https?|ftp|wss?)://[^\s?#"'<>]+)[?#](?!\[query removed\])[^\s"'<>]*''', re.I)
 _PROFILE_PATH = [
     (re.compile(r'(?i)([a-z]:\\(?:users|documents and settings)\\)[^\\/\s"\']+'), r'\1<user>'),
     (re.compile(r'(/home/|/Users/)[^/\s"\']+'), r'\1<user>'),
@@ -170,6 +199,10 @@ _AUDIT = [
     re.compile(r'(?i)\b[\w.-]*(?:passw(?:or)?d|pwd|secret|token|api[_-]?key|session|cookie|auth)'
                r'[\w.-]*\s*[:=]\s*(?:"[^"]*"|\'[^\']*\'|[^\s,;&"\'\\]+)'),
     re.compile(r'(?i)\b(?:set-)?cookie:\s*[^\r\n]+'),
+    # The digits a masked card or RFID tag still shows ("Visa ****1234",
+    # "ending 1234", "Card entry :1234", "tag 28:****12"): fine on this PC's own
+    # screen, kept out of a bundle meant for an AI.
+    re.compile(r'(?i)(?:\*{3,}|\bending\s+|\bcard entry\s*:)\d{2,4}\b'),
 ]
 _CARD = re.compile(r'\b(?:\d[ -]?){13,19}\b')
 
@@ -245,6 +278,10 @@ class Pseudonymiser:
         return self._MAC.sub(lambda m: self._label('mac', m.group(0)), s)
 
 
+def _plain_number(v):
+    return v is None or isinstance(v, (int, float, bool))
+
+
 class _Redactor:
     def __init__(self, pseudonymiser=None):
         self.pseudo = pseudonymiser
@@ -276,6 +313,10 @@ class _Redactor:
             name = str(key).lower()
             if name in _DROP_KEYS or any(word in name for word in _FORBIDDEN_IN_KEY):
                 continue
+            if depth and name not in _NESTED_TEXT_KEYS and not _plain_number(v):
+                continue
+            if name in _URL_KEYS and isinstance(v, str):
+                v = _without_query(v)
             out[self.text(key, 100)] = self.value(v, depth)
         return out
 
