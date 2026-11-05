@@ -288,10 +288,9 @@ class AlertVerifier:
         # Reverse DNS check
         rdns = self._reverse_dns(ip)
         if rdns:
+            # Shown, never a reason to trust: whoever controls the address writes
+            # its reverse DNS, and a C2 server's can say anything.
             reasoning.append(f"Reverse DNS: {rdns}")
-            if self.net_env and self.net_env.is_known_cloud_domain(rdns):
-                reasoning.append("Reverse DNS points to known cloud provider")
-                score -= 2
         else:
             reasoning.append("No reverse DNS record — common for malicious infrastructure")
             score += 1
@@ -406,12 +405,14 @@ class AlertVerifier:
             score += 2
 
         # Check against known scanner services
+        # Reverse DNS is the address owner's to write, so a scanner's name there is
+        # shown but lowers nothing (it was a substring match, too).
         rdns = self._reverse_dns(scanner_ip)
         if rdns:
+            name = rdns.lower().rstrip('.')
             for scanner_domain in KNOWN_SCANNER_IPS_DOMAINS:
-                if scanner_domain in rdns.lower():
-                    reasoning.append(f"Known internet scanner service: {rdns}")
-                    score -= 2
+                if name == scanner_domain or name.endswith('.' + scanner_domain):
+                    reasoning.append(f"Reverse DNS names a scanner service: {rdns}")
                     break
 
         # Check scan pattern
@@ -518,12 +519,17 @@ class AlertVerifier:
         mb = evidence.get('megabytes_transferred', 0)
         process = evidence.get('process', '')
 
-        # Get destination domains — try IDS engine first, then evidence fallback
-        dst_domains = set()
+        # Only names that vouch for the address may lower the score: a DNS answer
+        # to a query this side sent, or a TLS name inside its owner's ranges. One
+        # handshake naming drive.google.com used to make malware's upload to its
+        # own server a known transfer service (-3) on a cloud (-2).
+        dst_domains, claimed = set(), set()
         if ids_engine:
-            dst_domains = ids_engine._get_domains_for_ip(dst_ip)
-        # Fallback: check evidence fields
-        if not dst_domains:
+            vouch = getattr(ids_engine, '_vouched_domains_for_ip', None)
+            dst_domains = set(vouch(dst_ip) if vouch else ids_engine._get_domains_for_ip(dst_ip))
+            claimed = set(ids_engine._get_domains_for_ip(dst_ip)) - dst_domains
+        else:
+            # No live engine (offline review): the evidence's names are all there is.
             ev_domains = evidence.get('destination_domains', [])
             if ev_domains and ev_domains != ['No domain — direct IP']:
                 dst_domains = set(ev_domains)
@@ -531,7 +537,7 @@ class AlertVerifier:
         is_known_service = False
         for domain in dst_domains:
             for known in KNOWN_TRANSFER_SERVICES:
-                if domain.endswith(known) or domain == known:
+                if domain == known or domain.endswith('.' + known):
                     is_known_service = True
                     reasoning.append(f"Destination is known service: {domain}")
                     break
@@ -545,7 +551,10 @@ class AlertVerifier:
         if is_known_service:
             score -= 3
 
-        if not dst_domains:
+        if not dst_domains and claimed:
+            reasoning.append("Named only by the client's TLS handshake "
+                             f"({', '.join(sorted(claimed)[:3])}), which proves nothing")
+        elif not dst_domains:
             reasoning.append("No domain associated with destination — direct IP transfer")
             score += 2
 
@@ -961,14 +970,12 @@ class AlertVerifier:
                 reasoning.append(f"Sustained HTTP traffic: {bytes_xfer:,} bytes, {packets} packets")
                 score += 1
 
-            # Check if destination is a known cloud/CDN (redirects are normal)
-            if self.net_env:
-                dst_domains = set()
-                if dst_ip:
-                    rdns = self._reverse_dns(dst_ip)
-                    if rdns and self.net_env.is_known_cloud_domain(rdns):
-                        reasoning.append(f"Destination is known cloud service ({rdns})")
-                        score -= 2
+            # A cloud name in the destination's reverse DNS is shown only: the
+            # address's owner writes it.
+            if self.net_env and dst_ip:
+                rdns = self._reverse_dns(dst_ip)
+                if rdns and self.net_env.is_known_cloud_domain(rdns):
+                    reasoning.append(f"Reverse DNS names a cloud service ({rdns})")
 
         # CRITICAL services (FTP, Telnet, VNC, Redis, MongoDB)
         elif port in (21, 23, 5900, 6379, 27017, 9200):

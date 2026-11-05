@@ -2912,7 +2912,8 @@ class NetworkForensics:
             from src.net_detect import KNOWN_CLOUD_DOMAINS
             for d in domains:
                 for cloud in KNOWN_CLOUD_DOMAINS:
-                    if d.endswith(cloud):
+                    # On a label boundary: "evilgoogle.com" is not google.com.
+                    if d == cloud or d.endswith('.' + cloud):
                         score -= 2
                         reasons.append(f"Domain {d} is a known service")
                         break

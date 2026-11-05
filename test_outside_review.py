@@ -414,5 +414,144 @@ class TestVerdictSubjects(unittest.TestCase):
         self.assertIsNone(store.matches(self.alert('PORT-SCAN', '203.0.113.66', self.PC)))
 
 
+class TestNamesThatVouch(unittest.TestCase):
+    """H5: any TLS server name and any DNS answer, asked for or not, named an
+    address, and the names then lowered its alerts: one handshake naming
+    drive.google.com made a C2 address a "Shared Cloud IP" at LOW."""
+
+    C2 = '203.0.113.66'
+    PC = '192.168.1.5'
+    RESOLVER = '192.168.1.1'
+
+    def engine(self):
+        from src.ids_engine import IDSEngine
+        from src.net_detect import KNOWN_CLOUD_DOMAINS, NetworkEnvironment
+
+        class Intel:
+            def check_ip(inner, ip):
+                return {'feed': 'feodo_c2', 'category': 'Malware',
+                        'description': 'x'} if ip == self.C2 else None
+
+            def check_domain(inner, domain):
+                return None
+
+        env = NetworkEnvironment()
+        env._cloud_domain_set = set(KNOWN_CLOUD_DOMAINS)
+        alerts = []
+        ids = IDSEngine(cfg(), alert_callback=alerts.append, threat_intel=Intel(), net_env=env)
+        if getattr(ids, 'lan', None) is not None:
+            ids.lan.state_path = None
+        return ids, alerts
+
+    def hit(self, alerts):
+        return next(a for a in alerts if a.rule_id == 'THREAT-INTEL-IP')
+
+    def connect(self, ids, sni=''):
+        ids.inspect_packet(pkt(src_ip=self.PC, dst_ip=self.C2, src_port=51000, dst_port=443,
+                               protocol='TCP', flags='PA', tls_sni=sni))
+
+    def query(self, ids, name, port=53001):
+        ids.inspect_packet(pkt(src_ip=self.PC, dst_ip=self.RESOLVER, src_port=port, dst_port=53,
+                               protocol='UDP', dns_query=name))
+
+    def answer(self, ids, name, port=53001, src=None):
+        ids.inspect_packet(pkt(src_ip=src or self.RESOLVER, dst_ip=self.PC, src_port=53,
+                               dst_port=port, protocol='UDP', dns_query=name, dns_rcode=0,
+                               dns_answers=(self.C2,), dns_response=self.C2))
+
+    def test_a_handshake_name_does_not_make_a_c2_address_cloud(self):
+        ids, alerts = self.engine()
+        self.connect(ids, sni='drive.google.com')
+        hit = self.hit(alerts)
+        self.assertNotIn('Shared Cloud', hit.title)
+        self.assertNotEqual(hit.severity, 'LOW')
+        self.assertIn('drive.google.com', ids._get_domains_for_ip(self.C2), 'still shown')
+
+    def test_an_answer_to_this_hosts_own_query_vouches(self):
+        ids, alerts = self.engine()
+        self.query(ids, 'docs.google.com')
+        self.answer(ids, 'docs.google.com')
+        self.assertEqual(ids._vouched_domains_for_ip(self.C2), {'docs.google.com'})
+        self.connect(ids)
+        self.assertIn('Shared Cloud', self.hit(alerts).title)
+
+    def test_an_answer_nobody_asked_for_vouches_for_nothing(self):
+        ids, alerts = self.engine()
+        self.answer(ids, 'docs.google.com')                          # no query
+        self.query(ids, 'mail.google.com', port=53002)
+        self.answer(ids, 'mail.google.com', port=53002, src='192.168.1.77')   # wrong server
+        self.answer(ids, 'www.google.com', port=53002)               # a name not asked
+        self.assertEqual(ids._vouched_domains_for_ip(self.C2), set())
+        self.connect(ids)
+        self.assertNotIn('Shared Cloud', self.hit(alerts).title)
+
+    def test_a_handshake_name_on_its_owners_addresses_vouches(self):
+        from src.cloud_ranges import CloudRanges
+        ids, _ = self.engine()
+        ids.cloud_ranges = CloudRanges(
+            {'providers': {'google': {'kind': 'cloud', 'v4': ['203.0.113.0/24']}}})
+        self.connect(ids, sni='drive.google.com')
+        self.assertEqual(ids._vouched_domains_for_ip(self.C2), {'drive.google.com'})
+        ids.cloud_ranges = CloudRanges(
+            {'providers': {'aws': {'kind': 'cloud', 'v4': ['203.0.113.0/24']}}})
+        self.assertEqual(ids._vouched_domains_for_ip(self.C2), set(),
+                         "a Google name on Amazon's addresses is a claim")
+
+    def test_an_upload_to_a_claimed_name_is_not_a_known_service(self):
+        from src.alert_verify import AlertVerifier
+        from src.ids_engine import Alert
+        ids, _ = self.engine()
+        self.connect(ids, sni='drive.google.com')
+        alert = Alert('DATA-EXFIL', 'HIGH', 't', 'd', src_ip=self.PC, dst_ip=self.C2,
+                      evidence={'destination_ip': self.C2, 'megabytes_transferred': 100})
+        out = AlertVerifier(cfg())._verify_data_exfil(alert, alert.evidence, ids)
+        text = ' '.join(out['reasoning'])
+        self.assertNotIn('known service', text)
+        self.assertIn('Named only by the client', text)
+
+    def test_a_known_service_needs_a_dot_before_it(self):
+        from src.alert_verify import AlertVerifier
+        from src.ids_engine import Alert
+        alert = Alert('DATA-EXFIL', 'HIGH', 't', 'd', src_ip=self.PC, dst_ip=self.C2,
+                      evidence={'destination_ip': self.C2, 'megabytes_transferred': 100,
+                                'destination_domains': ['evildropbox.com']})
+        out = AlertVerifier(cfg())._verify_data_exfil(alert, alert.evidence, None)
+        self.assertNotIn('known service', ' '.join(out['reasoning']))
+
+
+class TestReverseDnsLowersNothing(unittest.TestCase):
+    """M6: the reverse DNS of an alerted address, which its owner writes, lowered
+    the score when it named a cloud (-2) or, by substring, a scanner (-2)."""
+
+    def verdict(self, rule, rdns, **evidence):
+        from unittest import mock
+        from src.alert_verify import AlertVerifier
+        from src.ids_engine import Alert
+        from src.net_detect import KNOWN_CLOUD_DOMAINS, NetworkEnvironment
+        env = NetworkEnvironment()
+        env._cloud_domain_set = set(KNOWN_CLOUD_DOMAINS)
+        verifier = AlertVerifier(cfg(), net_env=env)
+        alert = Alert(rule, 'HIGH', 't', 'd', src_ip='203.0.113.66', dst_ip='192.168.1.5',
+                      evidence=dict(evidence))
+        with mock.patch.object(verifier, '_reverse_dns', return_value=rdns):
+            verifier.verify_alert(alert)
+        v = alert.evidence['alert_verification']
+        return v['verdict'], v.get('confidence'), alert.severity
+
+    def test_a_cloud_name_in_reverse_dns_changes_nothing(self):
+        plain = self.verdict('THREAT-INTEL-IP', 'host.example.org', matched_ip='203.0.113.66',
+                             threat_category='Malware')
+        cloud = self.verdict('THREAT-INTEL-IP', 'ec2-203-0-113-66.compute.amazonaws.com',
+                             matched_ip='203.0.113.66', threat_category='Malware')
+        self.assertEqual(plain, cloud)
+
+    def test_a_scanner_name_in_reverse_dns_changes_nothing(self):
+        plain = self.verdict('PORT-SCAN', 'host.example.org', scanner_ip='203.0.113.66',
+                             ports_scanned=[22, 23, 80, 443, 3389])
+        named = self.verdict('PORT-SCAN', 'scan-7.shodan.io', scanner_ip='203.0.113.66',
+                             ports_scanned=[22, 23, 80, 443, 3389])
+        self.assertEqual(plain, named)
+
+
 if __name__ == '__main__':
     unittest.main()

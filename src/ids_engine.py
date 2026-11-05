@@ -159,6 +159,31 @@ def _domain_matches(domain, domain_set):
             return True
 
 
+# Names each published range belongs to (src/cloud_ranges.py). A TLS server name
+# is the client's own claim, so on its own it may vouch for an address only when
+# the address is inside the ranges of the provider that owns the name: malware
+# that sends "drive.google.com" to its own server is not on Google's addresses.
+# googleusercontent.com is left out: it names customers' machines.
+PROVIDER_NAMES = {
+    'google': frozenset({
+        'google.com', 'googleapis.com', 'gstatic.com', 'googlevideo.com', 'youtube.com',
+        'ytimg.com', 'ggpht.com', 'gvt1.com', 'gvt2.com', 'android.com', 'gmail.com',
+        'doubleclick.net', 'google-analytics.com', 'googletagmanager.com',
+        'googlesyndication.com', 'withgoogle.com'}),
+    'aws': frozenset({'amazonaws.com', 'amazon.com', 'a2z.com'}),
+    'aws-cloudfront': frozenset({'cloudfront.net', 'amazon.com', 'media-amazon.com'}),
+    'cloudflare': frozenset({'cloudflare.com', 'cloudflare-dns.com', 'one.one.one.one'}),
+    'fastly': frozenset({'fastly.net', 'fastly.com', 'fastlylb.net'}),
+    'oracle': frozenset({'oracle.com', 'oraclecloud.com'}),
+    'digitalocean': frozenset({'digitalocean.com'}),
+    'linode': frozenset({'linode.com', 'akamai.com'}),
+}
+
+# How long a DNS query waits for its answer, and how many may wait at once.
+_DNS_PENDING_SEC = 30
+_DNS_PENDING_MAX = 4096
+
+
 def _tld_of(domain):
     """Return the final DNS label, lowercased. Empty for single-label names."""
     if not domain:
@@ -394,6 +419,12 @@ class IDSEngine:
         self._ip_to_domains = defaultdict(set)  # {ip: {domain1, domain2}} - reverse mapping
         self._latest_dns_by_ip = {}  # {src_ip: (domain, timestamp)} - O(1) lookup for inference
         self._ip_to_domains_max = 20  # Max domains to track per IP
+        # The names above, less those only claimed: names a DNS answer to a query
+        # seen from this side gave the address. Only these (and TLS names inside
+        # the owning provider's ranges) may lower an alert (_vouched_domains_for_ip).
+        self._ip_vouched = defaultdict(set)
+        # Queries waiting for their answer: (client, client port, server, name) -> time.
+        self._dns_pending = {}
 
         # Distinct JA4 fingerprints observed, for the dashboard and for spotting a
         # client stack that has never been seen on this network before.
@@ -520,6 +551,11 @@ class IDSEngine:
                                 key=lambda ip: len(self._ip_to_domains[ip]))
             for ip in sorted_ips[:len(sorted_ips) // 4]:
                 del self._ip_to_domains[ip]
+                self._ip_vouched.pop(ip, None)
+        for ip in [ip for ip in self._ip_vouched if ip not in self._ip_to_domains]:
+            del self._ip_vouched[ip]
+        for key in [k for k, ts in self._dns_pending.items() if now - ts > _DNS_PENDING_SEC]:
+            del self._dns_pending[key]
 
         # Prune port_access / conn_failures / dns_queries / icmp trackers
         # — remove IPs not seen in 5 minutes
@@ -578,6 +614,8 @@ class IDSEngine:
                 entry[0] = now
                 entry[1] += 1
 
+        # The TLS server name is what the client says it is connecting to: shown
+        # with the address, but on its own never a reason to trust it.
         if pkt_info.tls_sni and pkt_info.dst_ip:
             known = self._ip_to_domains.get(pkt_info.dst_ip)
             if known is None or len(known) < self._ip_to_domains_max:
@@ -593,15 +631,24 @@ class IDSEngine:
             if is_dns_query:
                 # O(1) index: remember most recent DNS query per source IP
                 self._latest_dns_by_ip[pkt_info.src_ip] = (pkt_info.dns_query, now)
+                self._note_dns_query(pkt_info, now)
             if pkt_info.dns_rcode in (-1, 0):
                 addresses = [a for a in (pkt_info.dns_answers or ()) if _is_address(a)]
                 if not addresses and pkt_info.dns_response and _is_address(pkt_info.dns_response):
                     addresses = [pkt_info.dns_response]
                 if addresses:
                     self._dns_to_ip[pkt_info.dns_query] = (addresses[0], now)
+                # Any host can send an answer nobody asked for, mDNS answers go to
+                # everyone, and the first names bound stay: only an answer to a
+                # query seen going out vouches for the addresses in it.
+                answered = bool(addresses) and pkt_info.dns_rcode == 0 and \
+                    self._answers_a_query(pkt_info)
                 for resp_ip in addresses[:16]:
                     if len(self._ip_to_domains.get(resp_ip, ())) < self._ip_to_domains_max:
                         self._ip_to_domains[resp_ip].add(pkt_info.dns_query)
+                    if answered and \
+                            len(self._ip_vouched.get(resp_ip, ())) < self._ip_to_domains_max:
+                        self._ip_vouched[resp_ip].add(pkt_info.dns_query)
 
         # Manual whitelist = skip everything entirely
         if pkt_info.src_ip in self.whitelist_ips or pkt_info.dst_ip in self.whitelist_ips:
@@ -682,13 +729,16 @@ class IDSEngine:
                     associated_domains = self._get_domains_for_ip(ip_field)
 
                     # Cloud-aware severity: check if this IP is serving known
-                    # legitimate cloud services
+                    # legitimate cloud services. Only vouched names count as cloud:
+                    # one TLS handshake naming docs.google.com made a C2 address
+                    # "Shared Cloud IP... probably a false positive" at LOW.
+                    vouched = self._vouched_domains_for_ip(ip_field)
                     is_cloud_service = False
                     cloud_domains = []
                     non_cloud_domains = []
                     if self.net_env and associated_domains:
                         for d in associated_domains:
-                            if self.net_env.is_known_cloud_domain(d):
+                            if d in vouched and self.net_env.is_known_cloud_domain(d):
                                 is_cloud_service = True
                                 cloud_domains.append(d)
                             else:
@@ -1460,11 +1510,13 @@ class IDSEngine:
         return valid_alerts
 
     def _matches_domain_list(self, pkt_info, domain_set):
-        """True if the query, or any domain known for either endpoint, is in the set."""
+        """True if the query, or any domain vouched for either endpoint, is in the
+        set. A whitelisted name skips every rule, so a name the traffic merely
+        claimed must not reach it."""
         if pkt_info.dns_query and _domain_matches(pkt_info.dns_query, domain_set):
             return True
         for ip in (pkt_info.dst_ip, pkt_info.src_ip):
-            for domain in self._get_domains_for_ip(ip):
+            for domain in self._vouched_domains_for_ip(ip):
                 if _domain_matches(domain, domain_set):
                     return True
         return False
@@ -1557,7 +1609,7 @@ class IDSEngine:
                                       ('not yet valid', info['not_yet_valid'])) if flag]
         if not problems:
             return []
-        names = self._get_domains_for_ip(server)
+        names = self._vouched_domains_for_ip(server)
         if any(self.net_env and self.net_env.is_known_cloud_domain(n) for n in names):
             return []
         rule = "TLS-CERT-SELF-SIGNED" if info['self_signed'] else "TLS-CERT-INVALID"
@@ -1698,8 +1750,40 @@ class IDSEngine:
         return None
 
     def _get_domains_for_ip(self, ip):
-        """Look up what domains have been associated with an IP via DNS."""
+        """Every name seen for an address (DNS answers and TLS server names), for
+        display. Use _vouched_domains_for_ip for anything that lowers an alert."""
         return self._ip_to_domains.get(ip, set())
+
+    def _vouched_domains_for_ip(self, ip):
+        """
+        The names an address may be trusted under: those a DNS answer to a query
+        seen going out gave it, and a TLS server name only where the address is
+        in the published ranges of the provider that owns the name. Everything
+        else in _get_domains_for_ip is a claim: malware names its own server
+        drive.google.com in the handshake for free.
+        """
+        names = set(self._ip_vouched.get(ip, ()))
+        claimed = self._ip_to_domains.get(ip, set()) - names
+        if claimed and self.cloud_ranges:
+            owner = PROVIDER_NAMES.get(self.cloud_ranges.provider(ip) or '')
+            if owner:
+                names |= {n for n in claimed if _domain_matches(n, owner)}
+        return names
+
+    def _note_dns_query(self, pkt_info, now):
+        if not (pkt_info.src_ip and pkt_info.dst_ip):
+            return
+        if len(self._dns_pending) >= _DNS_PENDING_MAX:
+            self._dns_pending.pop(next(iter(self._dns_pending)))
+        self._dns_pending[(pkt_info.src_ip, pkt_info.src_port, pkt_info.dst_ip,
+                           pkt_info.dns_query)] = now
+
+    def _answers_a_query(self, pkt_info):
+        """This response goes back to the address and port a query for the same
+        name went out from, from the server it went to. The query stays until it
+        expires: the A and AAAA answers often share one socket."""
+        key = (pkt_info.dst_ip, pkt_info.dst_port, pkt_info.src_ip, pkt_info.dns_query)
+        return key in self._dns_pending
 
     def _get_connection_context(self, pkt_info):
         """Build a rich context dict for any alert, including domain info."""
