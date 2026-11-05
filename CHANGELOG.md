@@ -1,6 +1,9 @@
 # NetSentinel Changelog
 
-## Unreleased — Fixes from an outside review
+## v1.14.0 — Fixes from an outside review
+
+**2416 unit tests** plus 14 integration checks. From 1.10.x or later this
+installs from the Update button.
 
 An outside review of 1.13.0 (2026-11-05) found these; each was checked against
 the code before it was fixed, and each fix has a test (`test_outside_review.py`).
