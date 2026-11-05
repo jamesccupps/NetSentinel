@@ -707,7 +707,8 @@ class TestCoreRules(_RuleScenario):
             'bacnet_control',
             event('bacnet', src_ip='10.10.60.50', dst_ip='10.10.20.21',
                   dst_port=47808, protocol='udp',
-                  fields={'service': 'WriteProperty', 'object': 'analog-value-3'}))
+                  fields={'service': 'WriteProperty', 'object': 'analog-value-3',
+                          'apdu_type': 'Confirmed-Request'}))
         self.assertEqual(finding.severity, Severity.CRITICAL)
         self.assertEqual(finding.tier, Tier.PUSH)
 
@@ -715,19 +716,22 @@ class TestCoreRules(_RuleScenario):
         self.assertQuiet('bacnet_control',
                          event('bacnet', src_ip='10.10.20.10', dst_ip='10.10.20.21',
                                dst_port=47808, protocol='udp',
-                               fields={'service': 'WriteProperty'}))
+                               fields={'service': 'WriteProperty',
+                                       'apdu_type': 'Confirmed-Request'}))
 
     def test_the_object_scoped_exception_is_honoured(self):
         self.assertQuiet('bacnet_control',
                          event('bacnet', src_ip='10.10.60.50', dst_ip='10.10.20.21',
                                fields={'service': 'WriteProperty',
-                                       'object': 'analog-value-7'}))
+                                       'object': 'analog-value-7',
+                                       'apdu_type': 'Confirmed-Request'}))
 
     def test_the_object_scoped_exception_does_not_cover_other_objects(self):
         self.assertFires('bacnet_control',
                          event('bacnet', src_ip='10.10.60.50', dst_ip='10.10.20.21',
                                fields={'service': 'WriteProperty',
-                                       'object': 'binary-output-1'}))
+                                       'object': 'binary-output-1',
+                                       'apdu_type': 'Confirmed-Request'}))
 
     def test_a_bacnet_read_is_not_a_control_message(self):
         self.assertQuiet('bacnet_control',

@@ -314,6 +314,11 @@
     The only useful question is whether this source is supposed to be doing it.
   when:
     kind: bacnet
+    # The command, not the controller's answer to it. A SimpleACK names the
+    # service it acknowledges, so without this every allowed write raised a
+    # second, critical finding from the reply, with the two ends swapped and
+    # nothing in the allowlist to cover it. All five are confirmed services.
+    apdu_type: Confirmed-Request
     service:
       - WriteProperty
       - WritePropertyMultiple

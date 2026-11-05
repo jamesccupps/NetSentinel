@@ -65,5 +65,57 @@ class TestTheCaptureUnitCanStart(unittest.TestCase):
         self.assertIn('-Z netmon', command)
 
 
+# ─── M19: a BACnet SimpleACK raised a critical push ──────────────────────────
+
+class TestBacnetAcknowledgements(unittest.TestCase):
+    """
+    A SimpleACK names the service it acknowledges, and the rule did not look
+    at the APDU type, so the controller's reply to every allowed write was a
+    critical finding of its own: the reply runs controller to workstation,
+    which no allowlist entry covers.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        from netmon.profile import load_profile
+        from netmon.rules_engine import load_rules
+        cls.profile = load_profile(EXAMPLE)
+        cls.rule = load_rules(RULES).by_id('bacnet_control')
+
+    def fire(self, payload, src, dst):
+        from netmon.events import Event, enrich
+        from netmon.protocols.bacnet import parse
+        event = Event(kind='bacnet', src_ip=src, dst_ip=dst, src_port=47808,
+                      dst_port=47808, protocol='udp', vlan=20)
+        event.fields.update(parse(payload).as_fields())
+        enrich(event, self.profile)
+        return self.rule.evaluate(event)
+
+    @staticmethod
+    def frame(apdu):
+        body = bytes([0x01, 0x04]) + apdu
+        return bytes([0x81, 0x0A]) + (4 + len(body)).to_bytes(2, 'big') + body
+
+    def write_property(self):
+        # Confirmed-Request, invoke 1, WriteProperty to analog-value-3.
+        return self.frame(bytes([0x00, 0x05, 0x01, 15, 0x0C])
+                          + ((2 << 22) | 3).to_bytes(4, 'big') + bytes([0x19, 85]))
+
+    def simple_ack(self):
+        return self.frame(bytes([0x20, 0x01, 15]))
+
+    def test_the_acknowledgement_of_an_allowed_write_is_quiet(self):
+        # 10.10.20.10 may write to 10.10.20.21 in the example profile.
+        self.assertEqual(self.fire(self.write_property(),
+                                   '10.10.20.10', '10.10.20.21'), [])
+        self.assertEqual(self.fire(self.simple_ack(),
+                                   '10.10.20.21', '10.10.20.10'), [])
+
+    def test_a_write_outside_the_allowlist_still_fires(self):
+        findings = self.fire(self.write_property(), '10.10.60.50', '10.10.20.21')
+        self.assertEqual([f.rule_id for f in findings], ['bacnet_control'])
+        self.assertEqual(findings[0].severity, 'critical')
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)
