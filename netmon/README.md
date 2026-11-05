@@ -181,6 +181,13 @@ has acknowledged stays open: it is listed in every digest until a silence
 covers it or it has not been seen for a week, and while it is open it does not
 push again.
 
+**A push that does not get through is tried again.** With ntfy down, the
+finding is kept as a failed push, across restarts and digests, and delivered
+again on later passes — a minute later, then two, doubling to an hour — with
+the packet extract cut the first time, until it gets through, a silence
+answers it, or a week passes. Meanwhile the UI marks it *push failed* and the
+digest's checklist leads with it.
+
 ### The digest
 
 Once a day, by ntfy and by email, whichever are configured. It leads with an

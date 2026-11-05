@@ -708,5 +708,204 @@ class TestDriftSurvivesAnOutage(unittest.TestCase):
         self.assertIn('could not read any', err.getvalue())
 
 
+# ─── H10: a failed push was never retried ────────────────────────────────────
+
+class _Clock:
+    def __init__(self, now=1_790_000_000.0):
+        self.now = now
+
+    def __call__(self):
+        return self.now
+
+
+class _Opener:
+    """Stands in for the POST to ntfy; down until told otherwise."""
+
+    def __init__(self, fail=True):
+        self.fail = fail
+        self.bodies = []
+
+    def __call__(self, url, body, headers, timeout):
+        if self.fail:
+            raise OSError('connection refused')
+        self.bodies.append(body.decode('utf-8'))
+        return 200
+
+
+class _Ring:
+    """Cuts an extract on request and counts how often it was asked."""
+
+    PATH = '/var/lib/netmon/capture/extract-20261105-031400.pcap'
+
+    def __init__(self):
+        self.cuts = 0
+
+    def extract_for_finding(self, finding, seconds=30):
+        self.cuts += 1
+        return {'path': self.PATH, 'packets': 12}
+
+
+def _canary_hit(src='192.168.10.66'):
+    from netmon.events import Event, Finding
+    event = Event(kind='canary', ts=1_790_000_000.0, src_ip=src,
+                  dst_ip='10.10.20.250', dst_port=22)
+    return Finding('canary_hit', 'Something touched the canary',
+                   severity='high', tier='push', device=src, key=f'{src}/ssh',
+                   description=f'{src} connected to the canary on ssh',
+                   event=event)
+
+
+class _ServiceWithNtfy(unittest.TestCase):
+
+    def setUp(self):
+        import shutil
+        import tempfile
+        self.scratch = tempfile.mkdtemp(prefix='netmon-review-push-')
+        self.addCleanup(shutil.rmtree, self.scratch, True)
+        self.clock = _Clock()
+        self.opener = _Opener()
+        self.ring = _Ring()
+
+    def service(self):
+        from netmon.alerting import Notifier, NotifierConfig
+        from netmon.service import Service, ServiceConfig
+        config = ServiceConfig(profile_path=EXAMPLE, notify=False,
+                               state_dir=os.path.join(self.scratch, 'state'))
+        config.web_port = None
+        service = Service(config, clock=self.clock)
+        service.notifier = Notifier(
+            NotifierConfig(server='https://ntfy.example.test', topic='site'),
+            service.profile, opener=self.opener, ring=self.ring,
+            silences=service.silences)
+        service._next['digest'] = float('inf')     # no digest in these
+        return service
+
+    def tick(self, service, seconds):
+        self.clock.now += seconds
+        service.tick(now=self.clock.now)
+
+    def deliver(self, service, finding):
+        with self.assertLogs('netmon', level='WARNING'):
+            service.deliver([finding])
+
+
+class TestFailedPushesAreRetried(_ServiceWithNtfy):
+
+    def test_the_notifier_says_which_pushes_failed(self):
+        from netmon.alerting import Notifier, NotifierConfig
+        notifier = Notifier(NotifierConfig(server='https://ntfy.example.test',
+                                           topic='site'), opener=self.opener,
+                            ring=self.ring)
+        hit = _canary_hit()
+        digest_only = _canary_hit('192.168.10.67')
+        digest_only.tier = 'digest'
+        with self.assertLogs('netmon.alerting', level='ERROR'):
+            delivery = notifier.send([hit, digest_only])
+        sent, skipped = delivery                    # as it always unpacked
+        self.assertEqual(sent, [])
+        self.assertEqual(len(skipped), 2)
+        self.assertEqual(delivery.failed, [(hit, _Ring.PATH)])
+
+    def test_a_retry_delivers_without_a_new_extract(self):
+        from netmon.alerting import Notifier, NotifierConfig
+        notifier = Notifier(NotifierConfig(server='https://ntfy.example.test',
+                                           topic='site'), opener=self.opener,
+                            ring=self.ring)
+        hit = _canary_hit()
+        with self.assertLogs('netmon.alerting', level='ERROR'):
+            failed = notifier.send([hit]).failed
+        self.opener.fail = False
+        delivery = notifier.retry(failed)
+        self.assertEqual(delivery.sent, [hit])
+        self.assertEqual(self.ring.cuts, 1)
+        self.assertIn(_Ring.PATH, self.opener.bodies[0])
+
+    def test_a_canary_hit_during_an_outage_is_pushed_when_ntfy_returns(self):
+        service = self.service()
+        hit = _canary_hit()
+        self.deliver(service, hit)
+        self.assertEqual(service.recent[0].push_status, 'failed')
+        self.assertEqual(service.recent[0].as_dict()['push_status'], 'failed')
+        self.assertEqual(len(service.window.open_items()['failed_pushes']), 1)
+        self.assertIn('Push failed, still retrying (1)', service.digest_body())
+        self.assertIn('[push failed]', service.digest_body())
+
+        self.opener.fail = False
+        self.tick(service, 30)                      # not due yet
+        self.assertEqual(self.opener.bodies, [])
+        self.tick(service, 40)
+        self.assertEqual(len(self.opener.bodies), 1)
+        self.assertIn('canary', self.opener.bodies[0])
+        self.assertEqual(self.ring.cuts, 1)          # the first one, re-used
+        self.assertEqual(service.window.pending, {})
+        self.assertEqual(service.recent[0].push_status, '')
+        self.assertEqual(len(service.window.open_items()['pushes']), 1)
+        self.tick(service, 3600)
+        self.assertEqual(len(self.opener.bodies), 1)  # once
+
+    def test_the_retries_back_off(self):
+        service = self.service()
+        self.deliver(service, _canary_hit())
+        calls = []
+        real = service.notifier.retry
+        service.notifier.retry = lambda due: calls.append(1) or real(due)
+        with self.assertLogs('netmon', level='WARNING'):
+            self.tick(service, 61)                  # second failure: 2 min
+        self.tick(service, 61)
+        self.assertEqual(len(calls), 1)
+        with self.assertLogs('netmon', level='WARNING'):
+            self.tick(service, 60)
+        self.assertEqual(len(calls), 2)
+
+    def test_a_failed_push_survives_a_restart(self):
+        self.deliver(self.service(), _canary_hit())
+        restarted = self.service()
+        self.assertEqual(restarted.recent[0].push_status, 'failed')
+        self.opener.fail = False
+        self.tick(restarted, 61)
+        self.assertEqual(len(self.opener.bodies), 1)
+        self.assertIn(_Ring.PATH, self.opener.bodies[0])
+
+    def test_and_a_digest(self):
+        """The window starts again after a digest; a push still owed does not."""
+        service = self.service()
+        self.deliver(service, _canary_hit())
+        service.window.rollover()
+        self.assertEqual(service.recent, [])
+        self.assertFalse(service.window.admit(_canary_hit()))   # not pushed twice
+        self.opener.fail = False
+        self.tick(service, 61)
+        self.assertEqual(len(self.opener.bodies), 1)
+
+    def test_an_ack_answers_a_failed_push(self):
+        service = self.service()
+        self.deliver(service, _canary_hit())
+        service.silences.add('ack', 'canary_hit', '192.168.10.66',
+                             '192.168.10.66/ssh', reason='our scanner')
+        self.opener.fail = False
+        self.tick(service, 61)
+        self.assertEqual(self.opener.bodies, [])
+        self.assertEqual(service.window.pending, {})
+        self.assertEqual(service.window.open_items()['failed_pushes'], [])
+
+    def test_a_send_that_raises_is_retried_too(self):
+        service = self.service()
+
+        def broken(findings):
+            raise RuntimeError('the notifier fell over')
+
+        retry = service.notifier.retry
+        service.notifier.send = broken
+        self.deliver(service, _canary_hit())
+        self.assertEqual(len(service.window.pending), 1)
+        self.opener.fail = False
+        service.notifier.retry = retry
+        self.tick(service, 61)
+        self.assertEqual(len(self.opener.bodies), 1)
+        # The send never got as far as an extract, so the retry cut one.
+        self.assertEqual(self.ring.cuts, 1)
+        self.assertIn(_Ring.PATH, self.opener.bodies[0])
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)

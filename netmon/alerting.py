@@ -57,8 +57,8 @@ from netmon.redact import ALERT, redact_finding
 
 logger = logging.getLogger("netmon.alerting")
 
-__all__ = ['Notifier', 'NotifierConfig', 'load_config', 'AlertingError',
-           'build_digest', 'EmailConfig', 'load_email_config',
+__all__ = ['Notifier', 'NotifierConfig', 'Delivery', 'load_config',
+           'AlertingError', 'build_digest', 'EmailConfig', 'load_email_config',
            'send_email_digest', 'digest_title']
 
 
@@ -179,6 +179,33 @@ def _read_secrets_file(path):
     return data
 
 
+class Delivery(tuple):
+    """
+    What one `Notifier.send` did. Unpacks as (sent, skipped), as it always
+    has, for callers that only count.
+
+    `skipped` is everything not pushed, and most of it belongs in the digest.
+    `failed` is the part that does not: (finding, pcap) for each push that was
+    attempted and did not get through, with the path of the extract it
+    carried, so a caller can deliver it again without cutting another. Those
+    from the findings passed in are in `skipped` as well; a leak raised while
+    sending is only here.
+    """
+
+    def __new__(cls, sent, skipped, failed=()):
+        delivery = super().__new__(cls, (list(sent), list(skipped)))
+        delivery.failed = list(failed)
+        return delivery
+
+    @property
+    def sent(self):
+        return self[0]
+
+    @property
+    def skipped(self):
+        return self[1]
+
+
 class Notifier:
     """Sends findings. Holds no state beyond what it has already sent."""
 
@@ -213,17 +240,36 @@ class Notifier:
         """
         Push whatever qualifies, and report what was sent.
 
-        Returns (sent, skipped). Skipped is not a failure: most findings belong
-        in the digest, and pushing them is how push gets muted.
+        Returns a Delivery, which unpacks as (sent, skipped). Skipped is not a
+        failure: most findings belong in the digest, and pushing them is how
+        push gets muted. A push that was attempted and did not get through is
+        also in the Delivery's `failed`, which is the part worth trying again.
         """
+        return self._push([(finding, None) for finding in findings])
+
+    def retry(self, pending):
+        """
+        Push again what did not get through before.
+
+        `pending` is (finding, pcap) pairs, the pcap being the extract cut on
+        the first attempt ('' if none could be), or None if that attempt
+        never got as far as cutting one. Only the delivery is repeated: a
+        retry every few minutes through an ntfy outage must not cut a new
+        extract each time. The checks are not skipped, so a push a silence
+        now covers is held.
+        """
+        return self._push(list(pending))
+
+    def _push(self, items):
+        """(finding, pcap) pairs, pcap None to cut an extract for it."""
         if not self.config.enabled:
-            return [], list(findings)
+            return Delivery([], [finding for finding, _ in items])
 
         self.config.validate()
         floor = Severity.rank(self.config.min_push_severity)
 
-        sent, skipped = [], []
-        for finding in findings:
+        sent, skipped, failed = [], [], []
+        for finding, extract in items:
             if finding.tier != Tier.PUSH or Severity.rank(finding.severity) < floor:
                 skipped.append(finding)
                 continue
@@ -235,13 +281,15 @@ class Notifier:
             if record is None:                       # cannot happen for ALERT
                 skipped.append(finding)              # but fail closed anyway
                 continue
-            extract = self._extract(finding)
+            if extract is None:
+                extract = self._extract(finding)
             if extract:
                 record['pcap'] = extract
             if self._deliver(record):
                 sent.append(finding)
             else:
                 skipped.append(finding)
+                failed.append((finding, extract))
 
         for leak in self.leaks:
             if leak.key in self._leak_keys:
@@ -249,8 +297,10 @@ class Notifier:
             self._leak_keys.add(leak.key)
             if self._deliver(redact_finding(leak, self.profile, audience=ALERT)):
                 sent.append(leak)
+            else:
+                failed.append((leak, ''))
         self.leaks = []
-        return sent, skipped
+        return Delivery(sent, skipped, failed)
 
     def send_digest(self, analyzer, title=None, open_items=None, body=None):
         """Send the daily report. One message, whatever it contains."""
@@ -392,13 +442,18 @@ _SILENCE_MARKS = {'ack': 'acknowledged', 'maintenance': 'maintenance',
                   'snooze': 'snoozed'}
 
 
+#: How a push that did not go out is shown against a finding in the digest.
+_PUSH_MARKS = {'failed': '  [push failed]'}
+
+
 def _silence_mark(finding):
+    push = _PUSH_MARKS.get(getattr(finding, 'push_status', '') or '', '')
     silenced = getattr(finding, 'silenced', None)
     if not silenced:
-        return ''
+        return push
     mark = _SILENCE_MARKS.get(silenced.get('kind'), str(silenced.get('kind')))
     reason = str(silenced.get('reason') or '').strip()
-    return f'  [{mark}' + (f': {reason}' if reason else '') + ']'
+    return f'  [{mark}' + (f': {reason}' if reason else '') + ']' + push
 
 
 def _when(ts):
@@ -418,14 +473,27 @@ def _open_items(open_items, limit=20):
     if not open_items:
         return []
     pushes = open_items.get('pushes') or []
+    failed = open_items.get('failed_pushes') or []
     standing = open_items.get('standing') or []
     silences = open_items.get('silences') or []
     lines = ['', 'Open items']
-    if not (pushes or standing or silences):
+    if not (pushes or failed or standing or silences):
         lines.append('  [x] nothing waiting: every push answered, no standing '
                      'configuration problems, nothing silenced')
         return lines
 
+    if failed:
+        # First: these were meant to wake someone and reached nobody.
+        lines.append(f'  Push failed, still retrying ({len(failed)}):')
+        for item in failed[:limit]:
+            attempts = int(item.get('attempts') or 1)
+            lines.append(
+                f'  [ ] {str(item.get("severity", "")).upper()} '
+                f'{item.get("rule")} — {item.get("description")}'
+                f' (first failed {_when(item.get("first_failed"))}, '
+                f'{attempts} attempt{"" if attempts == 1 else "s"})')
+        if len(failed) > limit:
+            lines.append(f'  … and {len(failed) - limit} more')
     if pushes:
         lines.append(f'  Pushed and not yet acknowledged ({len(pushes)}):')
         for item in pushes[:limit]:

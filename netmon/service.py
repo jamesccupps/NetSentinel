@@ -513,8 +513,10 @@ class Service:
         Each finding identity pushes once. A repeat — the same finding in the
         next capture file, or after a restart — adds to the count of the one
         already kept, and an earlier push still waiting for an answer is on
-        the digest's checklist rather than pushed again.
+        the digest's checklist rather than pushed again. A push that does not
+        get through is kept as pending and tried again (retry_pushes).
         """
+        from netmon.events import Tier
         if not findings:
             return
         # A snooze hides a finding entirely. Acks and maintenance only stop the
@@ -532,19 +534,70 @@ class Service:
                     logger.info('[%s] %s', finding.severity, finding.description)
                 return
             try:
-                sent, _ = self.notifier.send(fresh)
+                delivery = self.notifier.send(fresh)
             except Exception as e:
                 logger.warning('could not deliver: %s', e)
                 self.counts['errors'] += 1
+                # Admitted already, so without this none of them would ever
+                # be pushed. The retry sorts out which really qualify.
+                for finding in fresh:
+                    if finding.tier == Tier.PUSH:
+                        self.window.mark_failed(finding)
                 return
-            self.counts['pushed'] += len(sent)
-            fresh_ids = {id(f) for f in fresh}
-            for finding in sent:
-                if id(finding) not in fresh_ids:
-                    # Raised while sending — an extract that found restricted
-                    # frames on disk — so it is kept like any other.
-                    self.window.admit(finding)
-                self.window.mark_pushed(finding)
+            self._record(delivery, fresh)
+        finally:
+            self.window.save()
+
+    def _record(self, delivery, attempted):
+        """Keep what a send did: pushed, or failed and to be tried again."""
+        sent = delivery[0]
+        # A Notifier says which pushes failed; anything else that sends is
+        # taken at its (sent, skipped).
+        failed = getattr(delivery, 'failed', ())
+        self.counts['pushed'] += len(sent)
+        attempted_ids = {id(f) for f in attempted}
+        for finding in sent:
+            if id(finding) not in attempted_ids:
+                # Raised while sending — an extract that found restricted
+                # frames on disk — so it is kept like any other.
+                self.window.admit(finding)
+            self.window.mark_pushed(finding)
+        for finding, pcap in failed:
+            if id(finding) not in attempted_ids:
+                self.window.admit(finding)
+            self.window.mark_failed(finding, pcap)
+            logger.warning('push for %s failed; it will be tried again',
+                           finding.rule_id)
+        return failed
+
+    def retry_pushes(self, now=None):
+        """
+        Deliver again the pushes that did not get through, as each falls due.
+
+        Only the delivery: the extract cut on the first attempt goes with it.
+        One a silence now covers, or that no longer qualifies for push, is
+        dropped from the retries and stays in the day's findings.
+        """
+        retry = getattr(self.notifier, 'retry', None)
+        if retry is None:
+            return
+        due = self.window.due_pushes(now)
+        if not due:
+            return
+        try:
+            try:
+                delivery = retry(due)
+            except Exception as e:
+                logger.warning('could not retry the failed pushes: %s', e)
+                self.counts['errors'] += 1
+                for finding, pcap in due:
+                    self.window.mark_failed(finding, pcap, now)
+                return
+            failed = self._record(delivery, [finding for finding, _ in due])
+            failed_ids = {id(finding) for finding, _ in failed}
+            for finding in delivery[1]:
+                if id(finding) not in failed_ids:
+                    self.window.clear_pending(finding)
         finally:
             self.window.save()
 
@@ -587,6 +640,7 @@ class Service:
         run('pruning', self.prune, schedule='prune')
 
         self.deliver(findings)
+        run('push retries', lambda: self.retry_pushes(now))
 
         if self._due_for_digest(now):
             self.send_digest(now)

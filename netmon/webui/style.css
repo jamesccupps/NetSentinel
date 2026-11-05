@@ -166,6 +166,7 @@ button.small:hover { border-color: var(--accent); }
 button.small:disabled { opacity: .5; cursor: default; }
 .badge.ack, .badge.maintenance { color: var(--ok); }
 .badge.snooze { color: var(--dim); }
+.badge.push-failed { color: var(--critical); }
 .finding.silenced { opacity: .75; }
 
 pre.payload { max-height: 50vh; overflow: auto; }

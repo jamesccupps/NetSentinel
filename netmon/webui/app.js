@@ -18,6 +18,7 @@ const SUMMARISE = document.body.dataset.summarise === 'true';
 
 const SILENCE_LABELS = { ack: 'acknowledged', maintenance: 'maintenance',
                          snooze: 'snoozed' };
+const PUSH_LABELS = { failed: 'push failed' };
 
 const $ = (sel) => document.querySelector(sel);
 const $$ = (sel) => Array.from(document.querySelectorAll(sel));
@@ -117,6 +118,11 @@ function renderFindings() {
       top.append(badge(SILENCE_LABELS[silenced.kind] || silenced.kind,
                        silenced.kind));
       if (silenced.reason) top.append(el('span', 'note', silenced.reason));
+    }
+    // A push that reached nobody: the service is still retrying it.
+    const pushLabel = PUSH_LABELS[finding.push_status];
+    if (typeof pushLabel === 'string') {
+      top.append(badge(pushLabel, 'push-' + finding.push_status));
     }
     node.append(top);
     node.append(el('div', 'desc', finding.description));

@@ -27,6 +27,14 @@ digests, until a silence covers them or they have not been seen for a week.
 While one is open, the same finding does not push again: it is on the
 digest's checklist every morning instead, which is the louder place.
 
+**A push that never went out was lost.** Admission happens before delivery,
+so a finding whose push failed was already "seen" and never pushed again —
+a canary hit during an ntfy outage reached nobody. A failed push is kept as
+pending, with the extract it carried, across digests and restarts, and the
+service delivers it again on later passes, backing off from a minute to an
+hour, until it gets through, a silence answers it, or a week passes. The UI
+and the digest's checklist show it as a failed push meanwhile.
+
 What is kept
 ------------
 Findings and a slimmed copy of their event: addresses, names, VLANs and
@@ -93,6 +101,7 @@ def _finding_to_dict(finding):
             'device': finding.device, 'key': finding.key,
             'next_check': finding.next_check, 'count': finding.count,
             'evidence': finding.evidence or {},
+            'push_status': finding.push_status or '',
             'event': _event_to_dict(finding.event)}
 
 
@@ -107,7 +116,25 @@ def _finding_from_dict(data):
         next_check=str(data.get('next_check') or ''),
         event=_event_from_dict(data.get('event')),
         count=int(data.get('count') or 1),
-        evidence=dict(data.get('evidence') or {}))
+        evidence=dict(data.get('evidence') or {}),
+        push_status=str(data.get('push_status') or ''))
+
+
+#: Retrying a failed push: a minute, doubling, at most an hour apart.
+_RETRY_FIRST = 60.0
+_RETRY_LONGEST = 3600.0
+
+
+def _retry_after(attempts):
+    doublings = min(max(0, int(attempts) - 1), 16)
+    return min(_RETRY_FIRST * 2 ** doublings, _RETRY_LONGEST)
+
+
+def _summary(finding):
+    """What the checklist says about a push."""
+    return {'rule': finding.rule_id, 'device': finding.device,
+            'key': finding.key, 'title': finding.title,
+            'severity': finding.severity, 'description': finding.description}
 
 
 def _identity(finding):
@@ -130,10 +157,12 @@ class FindingWindow:
     request threads, so every method holds one lock.
     """
 
-    def __init__(self, path='', cap=2000, open_days=7, clock=time.time):
+    def __init__(self, path='', cap=2000, open_days=7, clock=time.time,
+                 max_pending=500):
         self.path = path
         self.cap = int(cap)
         self.open_seconds = float(open_days) * 86400
+        self.max_pending = int(max_pending)
         self._clock = clock
         self._lock = threading.RLock()
         self._entries = OrderedDict()   # identity -> {finding, first, last, pushed}
@@ -141,6 +170,9 @@ class FindingWindow:
         self.started = clock()          # when this window opened
         self.standing = []              # the latest configuration check's
         self.open_pushes = {}           # identity -> summary, across digests
+        # identity -> {finding, pcap, attempts, first_failed, next_attempt}:
+        # pushes that did not get through, across digests.
+        self.pending = {}
         self.loaded = self._load()
 
     # ─── Admission ───────────────────────────────────────────────────────
@@ -179,6 +211,12 @@ class FindingWindow:
             self.open_pushes[identity]['count'] = \
                 int(self.open_pushes[identity].get('count', 1)) + int(finding.count or 1)
             return False
+        if identity in self.pending:
+            # Its push failed on an earlier day and is still being retried,
+            # so it is not pushed afresh beside the retry.
+            finding.push_status = 'failed'
+            self.pending[identity]['finding'] = finding
+            return False
         return True
 
     @_locked
@@ -188,11 +226,71 @@ class FindingWindow:
         entry = self._entries.get(identity)
         if entry is not None:
             entry['pushed'] = True
+        self._settle(identity, finding, '')
         self.open_pushes[identity] = {
             'rule': finding.rule_id, 'device': finding.device, 'key': finding.key,
             'title': finding.title, 'severity': finding.severity,
             'description': finding.description, 'first_pushed': now,
             'last_seen': now, 'count': int(finding.count or 1)}
+
+    @_locked
+    def mark_failed(self, finding, pcap=None, now=None):
+        """
+        A push that did not get through: kept, with the extract it carried,
+        and tried again after a delay that doubles with each attempt.
+
+        `pcap` is the extract's path, '' when one was tried and none could be
+        cut, and None when none was tried yet: the retry cuts it then.
+        """
+        now = self._clock() if now is None else now
+        identity = _identity(finding)
+        entry = self._entries.get(identity)
+        kept = entry['finding'] if entry is not None else finding
+        kept.push_status = 'failed'
+        earlier = self.pending.get(identity) or {}
+        if pcap is None:
+            pcap = earlier.get('pcap')
+        attempts = int(earlier.get('attempts') or 0) + 1
+        self.pending[identity] = {
+            'finding': kept, 'pcap': pcap,
+            'attempts': attempts,
+            'first_failed': float(earlier.get('first_failed') or now),
+            'next_attempt': now + _retry_after(attempts)}
+        while len(self.pending) > self.max_pending:
+            oldest = min(self.pending,
+                         key=lambda k: self.pending[k]['first_failed'])
+            del self.pending[oldest]
+
+    @_locked
+    def due_pushes(self, now=None):
+        """
+        The failed pushes due another attempt, as (finding, pcap) pairs.
+
+        One that has failed for a week is given up on: the digest has listed
+        it every morning since, and pushing it now would be news of nothing.
+        """
+        now = self._clock() if now is None else now
+        for identity, item in list(self.pending.items()):
+            if now - float(item.get('first_failed', now)) > self.open_seconds:
+                self._settle(identity, item['finding'], 'failed')
+        return [(item['finding'], item.get('pcap'))
+                for item in sorted(self.pending.values(),
+                                   key=lambda i: i['first_failed'])
+                if float(item.get('next_attempt', 0)) <= now]
+
+    @_locked
+    def clear_pending(self, finding):
+        """No longer to be pushed: a silence answers it, or it stopped
+        qualifying for push. Kept in the day's findings as it is."""
+        self._settle(_identity(finding), finding, '')
+
+    def _settle(self, identity, finding, status):
+        item = self.pending.pop(identity, None)
+        entry = self._entries.get(identity)
+        for kept in (finding, entry and entry['finding'],
+                     item and item['finding']):
+            if kept is not None:
+                kept.push_status = status
 
     @_locked
     def add_events(self, count):
@@ -237,8 +335,12 @@ class FindingWindow:
         active = silences.active(now) if silences is not None else []
         pushes = sorted(self.open_pushes.values(),
                         key=lambda p: p.get('first_pushed', 0))
+        failed = [dict(_summary(item['finding']), attempts=item['attempts'],
+                       first_failed=item['first_failed'])
+                  for item in sorted(self.pending.values(),
+                                     key=lambda i: i['first_failed'])]
         return {'silences': active, 'standing': list(self.standing),
-                'pushes': [dict(p) for p in pushes]}
+                'pushes': [dict(p) for p in pushes], 'failed_pushes': failed}
 
     @_locked
     def prune_open(self, silences=None, now=None):
@@ -254,14 +356,20 @@ class FindingWindow:
                                 key=item.get('key', ''), ts=1.0)
                 if silences.match(probe, now, entries) is not None:
                     del self.open_pushes[identity]
+        # A failed push a silence now covers is answered as surely as a
+        # delivered one.
+        for identity, item in list(self.pending.items()):
+            if entries and silences.match(item['finding'], now,
+                                          entries) is not None:
+                self._settle(identity, item['finding'], '')
 
     # ─── The day boundary ────────────────────────────────────────────────
 
     @_locked
     def rollover(self, now=None):
         """
-        Start a new window after a digest. Open pushes carry over; the day's
-        findings and event count do not.
+        Start a new window after a digest. Open pushes and failed ones still
+        being retried carry over; the day's findings and event count do not.
         """
         now = self._clock() if now is None else now
         self._entries.clear()
@@ -297,11 +405,26 @@ class FindingWindow:
             self.open_pushes = {k: v for k, v in
                                 (data.get('open_pushes') or {}).items()
                                 if isinstance(v, dict) and v.get('rule')}
+            for item in data.get('pending') or []:
+                finding = _finding_from_dict(item['finding'])
+                identity = _identity(finding)
+                entry = self._entries.get(identity)
+                if entry is not None:
+                    finding = entry['finding']      # one object, as in memory
+                finding.push_status = 'failed'
+                pcap = item.get('pcap')
+                self.pending[identity] = {
+                    'finding': finding,
+                    'pcap': None if pcap is None else str(pcap),
+                    'attempts': int(item.get('attempts') or 1),
+                    'first_failed': float(item.get('first_failed') or 0),
+                    'next_attempt': float(item.get('next_attempt') or 0)}
         except (KeyError, TypeError, ValueError) as e:
             logger.warning('%s is damaged (%s); starting an empty window',
                            self.path, type(e).__name__)
             self._entries.clear()
             self.events, self.standing, self.open_pushes = 0, [], {}
+            self.pending = {}
             return False
         while len(self._entries) > self.cap:
             self._entries.popitem(last=False)
@@ -316,7 +439,12 @@ class FindingWindow:
                 'entries': [{'finding': _finding_to_dict(e['finding']),
                              'first': e['first'], 'last': e['last'],
                              'pushed': e['pushed']}
-                            for e in self._entries.values()]}
+                            for e in self._entries.values()],
+                'pending': [{'finding': _finding_to_dict(p['finding']),
+                             'pcap': p['pcap'], 'attempts': p['attempts'],
+                             'first_failed': p['first_failed'],
+                             'next_attempt': p['next_attempt']}
+                            for p in self.pending.values()]}
         try:
             os.makedirs(os.path.dirname(self.path) or '.', exist_ok=True)
             temporary = self.path + '.tmp'

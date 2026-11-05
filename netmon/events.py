@@ -164,6 +164,9 @@ class Finding:
     # Set by netmon.silence when an ack, snooze or maintenance window covers
     # this finding: {'kind', 'id', 'reason'}. None when nothing does.
     silenced: dict | None = None
+    # Set by the service's window when a push for this finding did not go
+    # out: 'failed' while it is being retried. Empty otherwise.
+    push_status: str = ''
 
     def __post_init__(self):
         self.severity = Severity.normalise(self.severity)
@@ -184,6 +187,8 @@ class Finding:
             # Without this the UI cannot say a finding was acknowledged, nor
             # offer to clear the silence that covers it.
             'silenced': dict(self.silenced) if self.silenced else None,
+            # So the UI can say a push did not reach anyone.
+            'push_status': self.push_status,
         }
         if include_event and self.event is not None:
             data['event'] = self.event.as_dict()
