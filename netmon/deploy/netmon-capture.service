@@ -13,9 +13,14 @@ After=network-online.target
 Type=simple
 # Root to open the capture socket; tcpdump's -Z drops to netmon immediately
 # after, before it writes anything.
-ExecStartPre=/bin/mkdir -p /var/lib/netmon/capture
-ExecStartPre=/bin/chown netmon:netmon /var/lib/netmon/capture
-ExecStartPre=/bin/chmod 700 /var/lib/netmon/capture
+#
+# "+" runs these three outside the sandbox below. Inside it they could not
+# work: ProtectSystem=strict leaves /var read-only to mkdir, and the bounding
+# set has no CAP_CHOWN for chown. They make the directory tcpdump then
+# writes to, and nothing else.
+ExecStartPre=+/bin/mkdir -p /var/lib/netmon/capture
+ExecStartPre=+/bin/chown netmon:netmon /var/lib/netmon/capture
+ExecStartPre=+/bin/chmod 700 /var/lib/netmon/capture
 ExecStart=/usr/bin/tcpdump -i mirror0 \
     -w /var/lib/netmon/capture/netmon-%%Y%%m%%d-%%H%%M%%S.pcap \
     -G 900 -s 2048 -n -Z netmon --immediate-mode \
@@ -29,7 +34,10 @@ NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectSystem=strict
 ProtectHome=yes
-ReadWritePaths=/var/lib/netmon/capture
+# "-" because on a fresh install the directory does not exist yet when the
+# namespace is set up for ExecStartPre, and a missing ReadWritePaths entry
+# fails the whole unit. It exists by the time tcpdump starts.
+ReadWritePaths=-/var/lib/netmon/capture
 CapabilityBoundingSet=CAP_NET_RAW CAP_NET_ADMIN CAP_SETUID CAP_SETGID CAP_DAC_OVERRIDE
 
 [Install]
