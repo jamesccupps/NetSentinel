@@ -538,5 +538,62 @@ class TestSyslogNumbers(_SyslogCase):
         self.assertEqual(r.status()['state'], 'failed')
 
 
+from test_headless import _ApiTestCase  # noqa: E402
+
+
+class TestSyslogExport(_ApiTestCase):
+    """M2: the export read a whole day into memory, then encoded it, holding it twice."""
+
+    def setUp(self):
+        super().setUp()
+        self.tmp = tempfile.mkdtemp(prefix='ns_syslog_export_')
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.receiver = syslog_receiver.SyslogReceiver(Settings(), data_dir=self.tmp)
+        self.app.syslog = self.receiver
+        self.day = day_of(T0)
+        record = json.dumps({'src': '192.168.10.40', 'dst': '198.51.100.7',
+                             'client': 'Sensor café', 'raw': 'x' * 900}, ensure_ascii=False)
+        self.content = (record + '\n').encode('utf-8') * 16000        # about 15 MB
+        with open(self.receiver.day_path(self.day), 'wb') as f:
+            f.write(self.content)
+
+    def download(self):
+        import hashlib
+        import urllib.request
+        digest, size = hashlib.sha256(), 0
+        url = f'{self.base}/api/unifi-logs/export?day={self.day}'
+        with urllib.request.urlopen(url, timeout=30) as r:
+            headers = dict(r.headers)
+            while True:
+                chunk = r.read(64 * 1024)
+                if not chunk:
+                    break
+                digest.update(chunk)
+                size += len(chunk)
+        return headers, size, digest.hexdigest()
+
+    def test_a_day_is_sent_whole_and_unchanged(self):
+        import hashlib
+        headers, size, digest = self.download()
+        self.assertEqual((size, digest), (len(self.content), hashlib.sha256(self.content).hexdigest()))
+        self.assertEqual(int(headers['Content-Length']), len(self.content))
+        self.assertIn('ndjson', headers['Content-Type'])
+        self.assertEqual(headers['Cache-Control'], 'no-store')
+        self.assertEqual(headers['X-Content-Type-Options'], 'nosniff')
+
+    def test_a_day_is_not_held_in_memory(self):
+        import tracemalloc
+        tracemalloc.start()
+        self.addCleanup(tracemalloc.stop)
+        self.download()
+        peak = tracemalloc.get_traced_memory()[1]
+        self.assertLess(peak, 4 * 1024 * 1024, f'{peak:,} bytes at the peak')
+
+    def test_a_day_that_is_gone_is_not_found(self):
+        os.remove(self.receiver.day_path(self.day))
+        code, _ = self.request(f'/api/unifi-logs/export?day={self.day}')
+        self.assertEqual(code, 404)
+
+
 if __name__ == '__main__':
     unittest.main()

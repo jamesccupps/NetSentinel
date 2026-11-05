@@ -113,6 +113,16 @@ DEFAULT_PORT = 8737
 LINGER_SECONDS = 2.0
 LINGER_BYTES = 64 * 1024 * 1024
 
+# A file a GET route answers with is sent this much at a time.
+SEND_CHUNK = 256 * 1024
+
+
+class _FileBody:
+    """What a GET route returns to have a file on disk sent as the response."""
+
+    def __init__(self, path):
+        self.path = path
+
 
 def _drain(sock):
     """
@@ -206,7 +216,9 @@ class _Handler(BaseHTTPRequestHandler):
             self._send_json({'error': 'internal error', 'detail': str(e)}, status=500)
             return
 
-        if content_type == 'application/json':
+        if isinstance(body, _FileBody):
+            self._send_file(body.path, content_type)
+        elif content_type == 'application/json':
             self._send_json(body)
         else:
             self._send_text(body, content_type)
@@ -254,18 +266,49 @@ class _Handler(BaseHTTPRequestHandler):
         self._send_bytes(text.encode('utf-8'), content_type, status)
 
     def _send_bytes(self, data, content_type, status, headers=None):
+        self._send_headers(status, content_type, len(data), headers)
+        self.wfile.write(data)
+
+    def _send_file(self, path, content_type):
+        """
+        A file, sent a piece at a time, as long as it was when asked for. A
+        day of the gateway's log can be hundreds of megabytes, and reading it
+        whole, then encoding it, held it in memory twice over.
+        """
+        try:
+            f = open(path, 'rb')
+        except OSError:
+            self._send_json({'error': 'not found'}, status=404)        # gone since the route looked
+            return
+        with f:
+            left = os.fstat(f.fileno()).st_size
+            self._send_headers(200, content_type, left)
+            while left > 0:
+                chunk = f.read(min(SEND_CHUNK, left))
+                if not chunk:
+                    # cut shorter while being sent: the length promised is not
+                    # coming, so the client must see the connection end
+                    self.close_connection = True
+                    return
+                try:
+                    self.wfile.write(chunk)
+                except ConnectionError:
+                    self.close_connection = True       # the download was cancelled
+                    return
+                left -= len(chunk)
+
+    def _send_headers(self, status, content_type, length, headers=None):
         self.send_response(status)
         self.send_header('Content-Type', content_type)
         for name, value in (headers or {}).items():
             self.send_header(name, value)
-        self.send_header('Content-Length', str(len(data)))
+        self.send_header('Content-Length', str(length))
         # This serves captured credentials and device inventory. Nothing should
         # cache it, and no page should be able to frame or script against it.
         self.send_header('Cache-Control', 'no-store')
         self.send_header('X-Content-Type-Options', 'nosniff')
         self.send_header('X-Frame-Options', 'DENY')
         self.end_headers()
-        self.wfile.write(data)
 
 
 class HeadlessServer:
@@ -502,8 +545,7 @@ class HeadlessServer:
         day = _str_param(params, 'day') or ''
         if receiver is None or day not in receiver.days():
             raise RequestRefused('No log stored for that day.', 404)
-        with open(receiver.day_path(day), encoding='utf-8', errors='replace') as f:
-            return f.read(), 'application/x-ndjson; charset=utf-8'
+        return _FileBody(receiver.day_path(day)), 'application/x-ndjson; charset=utf-8'
 
     def _route_history(self, params):
         """Traffic rates for the charts: ?minutes= up to a day (src/metrics_history.py)."""
