@@ -14,6 +14,7 @@ import re
 import shutil
 import sys
 import tempfile
+import threading
 import time
 import unittest
 import zlib
@@ -441,6 +442,71 @@ class TestSyslogDayCap(_SyslogCase):
         self.assertEqual(left, os.path.getsize(path))
         self.assertLessEqual(left, 6000)
         self.assertGreater(left, 6000 - len(max(records, key=len)))
+
+
+class FakeSocket:
+    """recvfrom hands out the datagrams, then stops the receiver; nothing is opened."""
+
+    def __init__(self, receiver, datagrams, then=TimeoutError):
+        self.receiver, self.datagrams, self.then = receiver, list(datagrams), then
+
+    def recvfrom(self, size):
+        if self.datagrams:
+            return self.datagrams.pop(0), (GATEWAY, 514)
+        if self.then is TimeoutError:
+            self.receiver._stop.set()
+        raise self.then('socket gave up')
+
+    def close(self):
+        pass
+
+
+SECRET_WORDS = 'Unnamed-Synth-4417'
+
+
+class TestSyslogLoop(_SyslogCase):
+    """M2: an exception from one message ended the receiver, which went on saying 'waiting'."""
+
+    def choke_on(self, word):
+        real = syslog_receiver.parse
+
+        def parse(text):
+            if word in text:
+                raise KeyError(f'cannot read {text}')
+            return real(text)
+        return mock.patch.object(syslog_receiver, 'parse', parse)
+
+    def test_a_message_that_raises_is_skipped_and_the_next_read(self):
+        r = self.receiver()
+        bad = f'{CEF} msg={SECRET_WORDS}'.encode()
+        r._sock = FakeSocket(r, [bad, bad, CEF.encode()])
+        with self.choke_on(SECRET_WORDS), self.assertLogs('NetSentinel.Syslog', 'WARNING') as logs:
+            r._loop()
+        self.assertEqual((r.received, r.unreadable), (1, 2))
+        self.assertEqual(len(logs.records), 1)              # rate-limited
+        self.assertNotIn(SECRET_WORDS, '\n'.join(logs.output))
+        self.assertIn('KeyError', logs.output[0])
+        self.assertIn('2 could not be read', r.status()['note'])
+
+    def test_a_dead_receiver_is_reported_failed(self):
+        r = self.receiver()
+        r._sock = FakeSocket(r, [], then=ValueError)
+        with self.assertLogs('NetSentinel.Syslog', 'ERROR'):
+            r._thread = threading.Thread(target=r._loop)
+            r._thread.start()
+            r._thread.join(5)
+        status = r.status()
+        self.assertEqual(status['state'], 'failed')
+        self.assertIn('ValueError', status['note'])
+
+    def test_a_thread_that_ended_is_failed_not_waiting(self):
+        r = self.receiver()
+        r._thread = threading.Thread(target=lambda: None)
+        r._thread.start()
+        r._thread.join(5)
+        self.assertEqual(r.status()['state'], 'failed')
+        r.stop()
+        self.assertEqual(r.status()['state'], 'waiting')     # stopped on purpose
 
 
 if __name__ == '__main__':

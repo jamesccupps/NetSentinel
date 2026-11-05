@@ -30,6 +30,7 @@ import re
 import socket
 import threading
 import time
+import traceback
 from collections import OrderedDict
 from datetime import datetime
 
@@ -236,6 +237,8 @@ class SyslogReceiver:
         self._clients = OrderedDict()   # ip -> {'dests': {key: [allow, block, last]}, ...}
         self.received = self.dropped_sender = self.dropped_rate = self.stored = 0
         self.dropped_cap = 0          # today's oldest records, dropped to keep within day_cap
+        self.unreadable = 0           # messages that raised while being handled
+        self._failure_logged = float('-inf')
         self._today, self._today_bytes = None, 0
         self.last_message = None
         self.error = ''
@@ -277,6 +280,14 @@ class SyslogReceiver:
                 pass
 
     def _loop(self):
+        try:
+            self._receive()
+        except Exception as e:
+            # status() reports a dead thread as failed, with this
+            self.error = f'Stopped receiving ({type(e).__name__}).'
+            logger.error("Syslog: %s", self.error)
+
+    def _receive(self):
         while not self._stop.is_set():
             try:
                 data, (sender, *_rest) = self._sock.recvfrom(MAX_MESSAGE + 1)
@@ -285,8 +296,27 @@ class SyslogReceiver:
             except OSError:
                 if self._stop.is_set():
                     return
+                self._stop.wait(0.1)        # a socket that keeps failing must not spin a core
                 continue
-            self.handle(data, sender)
+            # One message the parser chokes on used to end the thread, and the
+            # receiver went on reporting itself as waiting.
+            try:
+                self.handle(data, sender)
+            except Exception as e:
+                self._failed(e)
+
+    def _failed(self, error):
+        self.unreadable += 1
+        now = time.monotonic()
+        if now - self._failure_logged < 60:
+            return
+        self._failure_logged = now
+        # Where, never what: the message, and an exception's text about it, are
+        # untrusted and may hold anything the gateway logged.
+        frame = traceback.extract_tb(error.__traceback__)[-1]
+        logger.warning("Syslog: a message could not be read (%s at %s:%d); %d so far, skipped.",
+                       type(error).__name__, os.path.basename(frame.filename), frame.lineno,
+                       self.unreadable)
 
     def handle(self, data, sender, now=None):
         """One datagram. Returns the parsed record, or None if it was dropped."""
@@ -429,15 +459,20 @@ class SyslogReceiver:
                'description': 'UniFi traffic log, received over syslog',
                'updated': self.last_message, 'entries': self.received, 'refresh_hours': None,
                'dropped_sender': self.dropped_sender, 'dropped_rate': self.dropped_rate,
-               'dropped_cap': self.dropped_cap}
+               'dropped_cap': self.dropped_cap, 'unreadable': self.unreadable}
         if not self.enabled:
             return dict(row, state='off', note='Off in settings (syslog.enabled).')
         if self.error and self._thread is None:
             return dict(row, state='failed', note=self.error)
+        if self._thread is not None and not self._thread.is_alive() and not self._stop.is_set():
+            return dict(row, state='failed', note=(
+                f'{self.error or "Stopped receiving."} Nothing is being received; '
+                'restart NetSentinel to listen again.'))
+        unreadable = f' {self.unreadable} could not be read, skipped.' if self.unreadable else ''
         if not self.received:
             return dict(row, state='waiting', note=(
                 f'Listening on {self.bind}:{self.port} for {", ".join(sorted(self.allowed))}; '
-                'nothing received yet.'))
+                'nothing received yet.' + unreadable))
         days = len(self.days())
         note = f'{days} day{"" if days == 1 else "s"} kept on disk.'
         if self.dropped_sender:
@@ -447,4 +482,4 @@ class SyslogReceiver:
         if self.dropped_cap:
             note += (f" {self.dropped_cap} of the day's oldest dropped to keep it within "
                      f"{self.day_cap / 1024 ** 2:g} MB.")
-        return dict(row, state='ok', note=note)
+        return dict(row, state='ok', note=note + unreadable)
