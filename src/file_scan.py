@@ -643,18 +643,47 @@ def _pdf_streams(data, notes):
     # that each inflate to the per-file limit would otherwise cost a thousand
     # times that.
     inflated, budget = [], MAX_PDF_BYTES
-    for m in re.finditer(rb'stream\r?\n(.*?)endstream', data, re.S):
+    for body in _iter_pdf_streams(data):
         if budget <= 0:
             notes.append(f'PDF streams past the first {MAX_PDF_BYTES // 1024 ** 2} MB '
                          'inflated were not read')
             break
         try:
-            out = zlib.decompressobj().decompress(m.group(1), budget)
+            out = zlib.decompressobj().decompress(body, budget)
         except zlib.error:
             continue
         budget -= len(out)
         inflated.append(out.decode('latin-1'))
     return inflated
+
+
+def _iter_pdf_streams(data):
+    """
+    The bodies rb'stream\\r?\\n(.*?)endstream' (re.S) would match, in one pass.
+
+    The regex retried its lazy search to the end of the file from every
+    'stream' with no 'endstream' after it: quadratic, and a search holds the
+    GIL, so 256 KB of 'stream\\n' stopped capture, the GUI and the dashboard
+    for minutes. With no 'endstream' left, no later 'stream' can match either.
+    """
+    pos = 0
+    while True:
+        start = data.find(b'stream', pos)
+        if start < 0:
+            return
+        body = start + 6
+        if data[body:body + 2] == b'\r\n':
+            body += 2
+        elif data[body:body + 1] == b'\n':
+            body += 1
+        else:
+            pos = body
+            continue
+        end = data.find(b'endstream', body)
+        if end < 0:
+            return
+        yield data[body:end]
+        pos = end + 9
 
 
 _EVT_DATA = re.compile(r'<Data Name="([^"<>]{1,80})"\s*>([^<]*)</Data>')
