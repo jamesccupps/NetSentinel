@@ -256,7 +256,7 @@ All runtime data is stored locally in `~/.netsentinel/`:
 | `data/learned_devices.json` | Passive device inventory |
 | `data/incidents.json` | Correlated incident history |
 | `data/feature_history/` | Daily CSV feature vectors for ML training |
-| `models/` | Trained Isolation Forest + scaler (pickle) |
+| `models/` | Empty: the model is retrained from the feature history at each start, never saved |
 | `captures/` | Exported PCAP files and recordings |
 | `captures/alerts/` | The traffic behind each alert, kept for good |
 | `review/snippets/` | The same, in review mode, kept for good |

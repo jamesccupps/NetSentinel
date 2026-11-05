@@ -474,27 +474,25 @@ class TestForensicsVault(unittest.TestCase):
 # S4 — authenticated model files
 # ══════════════════════════════════════════════════════════════════════
 class TestModelIntegrity(unittest.TestCase):
-    """S4: pickle.load() from a user-writable directory in an elevated process."""
+    """S4: pickle.load() from a user-writable directory in an elevated process.
+    The HMAC that guarded it kept its key beside it, so since the 2026-11-05
+    review the model is not saved at all (test_outside_review.py)."""
 
     def test_tampered_model_is_refused(self):
+        from src.config import MODELS_DIR
         from src.ml_engine import AnomalyDetector
         import pickle
-        det = AnomalyDetector(fresh_config())
 
         class Evil:
             def __reduce__(self):
                 return (os.system, ('echo pwned',))
 
-        os.makedirs(os.path.dirname(det.model_path), exist_ok=True)
-        with open(det.model_path, 'wb') as f:
-            f.write(b'\x00' * 32 + pickle.dumps(Evil()))
-        with open(det.scaler_path, 'wb') as f:
-            f.write(b'\x00' * 32 + pickle.dumps(Evil()))
-
-        det.isolation_forest = None
-        det.is_trained = False
-        det._load_model()
-        self.assertFalse(det.is_trained, "unauthenticated pickle must not be loaded")
+        os.makedirs(MODELS_DIR, exist_ok=True)
+        for name in ('isolation_forest.pkl', 'scaler.pkl'):
+            with open(os.path.join(MODELS_DIR, name), 'wb') as f:
+                f.write(b'\x00' * 32 + pickle.dumps(Evil()))
+        det = AnomalyDetector(fresh_config())
+        self.assertFalse(det.is_trained, "a pickle on disk must never be loaded")
         self.assertIsNone(det.isolation_forest)
 
 

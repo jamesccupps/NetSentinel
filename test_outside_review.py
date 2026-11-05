@@ -253,5 +253,57 @@ class TestProgramsByAbsolutePath(unittest.TestCase):
             self.assertIsNone(pcap_analyzer.find_tshark())
 
 
+class TestModelNotPickled(unittest.TestCase):
+    """H3: the HMAC that guarded the pickled model kept its key in the same
+    user-writable folder, so any program running as the owner could sign a
+    pickle that the elevated process then unpickled."""
+
+    def test_a_signed_pickle_is_never_loaded_and_the_old_files_go(self):
+        import hashlib
+        import hmac
+        import pickle
+        from unittest import mock
+        from src.config import APP_DIR, MODELS_DIR
+        from src.ml_engine import AnomalyDetector
+
+        class Evil:
+            def __reduce__(self):
+                return (Evil._ran.append, (True,))
+        Evil._ran = []
+
+        key = os.urandom(32)
+        os.makedirs(MODELS_DIR, exist_ok=True)
+        with open(os.path.join(APP_DIR, '.model_key'), 'wb') as f:
+            f.write(key)
+        blob = pickle.dumps(Evil())
+        for name in ('isolation_forest.pkl', 'scaler.pkl'):
+            with open(os.path.join(MODELS_DIR, name), 'wb') as f:
+                f.write(hmac.new(key, blob, hashlib.sha256).digest() + blob)
+
+        with mock.patch('pickle.loads', side_effect=AssertionError('unpickled')) as loads:
+            det = AnomalyDetector(cfg())
+        loads.assert_not_called()
+        self.assertEqual(Evil._ran, [])
+        self.assertFalse(det.is_trained)
+        for path in (os.path.join(MODELS_DIR, 'isolation_forest.pkl'),
+                     os.path.join(MODELS_DIR, 'scaler.pkl'), os.path.join(APP_DIR, '.model_key')):
+            self.assertFalse(os.path.exists(path), path)
+
+    def test_training_writes_no_model_file(self):
+        import numpy as np
+        from src.config import MODELS_DIR
+        from src.ml_engine import AnomalyDetector, SKLEARN_AVAILABLE
+        if not SKLEARN_AVAILABLE:
+            self.skipTest('needs scikit-learn')
+        det = AnomalyDetector(cfg())
+        width = len(det.feature_extractor.feature_names)
+        rng = np.random.default_rng(1)
+        for row in rng.normal(size=(max(det.min_samples, 50), width)):
+            det._training_buffer.append(row)
+        det._train_model()
+        self.assertTrue(det.is_trained)
+        self.assertFalse([n for n in os.listdir(MODELS_DIR) if n.endswith('.pkl')])
+
+
 if __name__ == '__main__':
     unittest.main()

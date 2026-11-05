@@ -6,13 +6,9 @@ to detect anomalous network behavior.
 """
 
 import os
-import hmac
-import stat
 import time
 import json
 import math
-import pickle
-import hashlib
 import logging
 import ipaddress
 import numpy as np
@@ -417,11 +413,10 @@ class AnomalyDetector:
         # Feature history store (persistent feature vectors)
         self.feature_store = feature_store
 
-        # Feature extraction (must exist before _load_model validates model shape)
+        # Feature extraction
         self.feature_extractor = TrafficFeatureExtractor()
 
         # Models
-        self._hmac_key = None
         self.isolation_forest = None
         self.scaler = StandardScaler() if SKLEARN_AVAILABLE else None
         self.is_trained = False
@@ -434,11 +429,8 @@ class AnomalyDetector:
         # Training data buffer (in-memory session data)
         self._training_buffer = deque(maxlen=5000)
 
-        # Model persistence
-        from src.config import MODELS_DIR
-        self.model_path = os.path.join(MODELS_DIR, "isolation_forest.pkl")
-        self.scaler_path = os.path.join(MODELS_DIR, "scaler.pkl")
-        self._load_model()
+        # The model lives in memory only (see _forget_saved_model).
+        self._forget_saved_model()
 
         # If we have historical data and no trained model, bootstrap from history
         if self.feature_store and not self.is_trained:
@@ -757,9 +749,6 @@ class AnomalyDetector:
             self.is_trained = True
             self._last_train_time = time.time()
 
-            # Save model
-            self._save_model()
-
             # Save baseline
             self.baseline.save()
 
@@ -768,102 +757,29 @@ class AnomalyDetector:
         except Exception as e:
             logger.error("Model training failed: %s", e)
 
-    def _model_hmac_key(self):
+    def _forget_saved_model(self):
         """
-        Key for authenticating model files.
+        Delete the model files older versions saved. Nothing reads them any more.
 
-        pickle.load() executes arbitrary code. NetSentinel runs elevated and the model
-        directory is user-writable, so an unauthenticated pickle there is a privilege
-        escalation primitive. The key lives outside the data directory and is created
-        0600, so an attacker who can only write into models/ cannot forge a valid tag.
+        They were pickles, and pickle.load() runs code: in an elevated process,
+        reading one that a program running as the owner had written meant
+        Administrator. The HMAC that guarded them kept its key in the same
+        user-writable folder, so that program could sign its own. The model
+        is cheap to rebuild: startup trains from the feature history
+        (_bootstrap_from_history) within seconds, which also ends a stored
+        model from an older scikit-learn meeting a newer exe.
         """
-        if self._hmac_key is not None:
-            return self._hmac_key
-        from src.config import APP_DIR
-        key_path = os.path.join(APP_DIR, ".model_key")
-        try:
-            if os.path.exists(key_path):
-                with open(key_path, 'rb') as f:
-                    key = f.read()
-                if len(key) == 32:
-                    self._hmac_key = key
-                    return key
-            key = os.urandom(32)
-            with open(key_path, 'wb') as f:
-                f.write(key)
+        from src.config import APP_DIR, MODELS_DIR
+        for path in (os.path.join(MODELS_DIR, 'isolation_forest.pkl'),
+                     os.path.join(MODELS_DIR, 'scaler.pkl'),
+                     os.path.join(APP_DIR, '.model_key')):
             try:
-                os.chmod(key_path, stat.S_IRUSR | stat.S_IWUSR)
-            except OSError:
+                os.remove(path)
+                logger.info("Removed %s: the model is no longer saved.", os.path.basename(path))
+            except FileNotFoundError:
                 pass
-            self._hmac_key = key
-            return key
-        except OSError as e:
-            logger.warning("Could not establish model signing key: %s", e)
-            return None
-
-    def _save_model(self):
-        """Persist trained model to disk with an authentication tag."""
-        key = self._model_hmac_key()
-        if key is None:
-            logger.warning("No signing key available — not persisting model.")
-            return
-        try:
-            for obj, path in ((self.isolation_forest, self.model_path),
-                              (self.scaler, self.scaler_path)):
-                if obj is None:
-                    continue
-                blob = pickle.dumps(obj, protocol=pickle.HIGHEST_PROTOCOL)
-                tag = hmac.new(key, blob, hashlib.sha256).digest()
-                tmp = f"{path}.tmp"
-                with open(tmp, 'wb') as f:
-                    f.write(tag + blob)
-                    f.flush()
-                    os.fsync(f.fileno())
-                os.replace(tmp, path)
-        except Exception as e:
-            logger.error("Failed to save model: %s", e)
-
-    def _load_one_model(self, path, key):
-        """Verify and load a single signed pickle. Returns None if it fails."""
-        with open(path, 'rb') as f:
-            data = f.read()
-        if len(data) <= 32:
-            raise ValueError(f"{os.path.basename(path)} is truncated")
-        tag, blob = data[:32], data[32:]
-        if not hmac.compare_digest(tag, hmac.new(key, blob, hashlib.sha256).digest()):
-            raise ValueError(
-                f"{os.path.basename(path)} failed integrity check — refusing to unpickle"
-            )
-        return pickle.loads(blob)
-
-    def _load_model(self):
-        """Load a previously trained model, if it is intact and still compatible."""
-        if not (os.path.exists(self.model_path) and os.path.exists(self.scaler_path)):
-            return
-        key = self._model_hmac_key()
-        if key is None:
-            return
-        try:
-            forest = self._load_one_model(self.model_path, key)
-            scaler = self._load_one_model(self.scaler_path, key)
-
-            # A model trained on a different feature vector silently produces garbage
-            # (or throws inside analyze_window, where the error is swallowed), so the
-            # shape is checked here rather than discovered later.
-            expected = len(self.feature_extractor.feature_names)
-            actual = getattr(scaler, 'n_features_in_', expected)
-            if actual != expected:
-                logger.warning(
-                    "Stored model expects %d features but this build produces %d. "
-                    "Discarding it; a new model will be trained.", actual, expected)
-                return
-
-            self.isolation_forest = forest
-            self.scaler = scaler
-            self.is_trained = True
-            logger.info("Loaded pre-trained model from disk.")
-        except Exception as e:
-            logger.warning("Could not load model (%s). A new one will be trained.", e)
+            except OSError as e:
+                logger.debug("Could not remove %s: %s", path, e)
 
     def get_status(self):
         """Return current ML engine status."""
