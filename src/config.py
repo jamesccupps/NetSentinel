@@ -5,6 +5,7 @@ Configuration management for NetSentinel.
 import os
 import json
 import copy
+import math
 import stat
 import logging
 
@@ -48,6 +49,57 @@ def atomic_write_json(path, data, secure=True, **dump_kwargs):
         except OSError:
             pass
     os.replace(tmp, path)
+
+
+_warned_settings = set()
+
+
+def _setting(value, default, lo, hi, name, kind):
+    try:
+        if isinstance(value, bool) or value is None:
+            raise ValueError
+        if isinstance(value, str):
+            value = value.strip()
+        number = float(value)
+        if not math.isfinite(number):
+            raise ValueError
+        if kind is int:
+            if not number.is_integer():
+                raise ValueError
+            number = int(number)
+    except (TypeError, ValueError, OverflowError):
+        if name and (name, repr(value)) not in _warned_settings:
+            _warned_settings.add((name, repr(value)))
+            logger.warning("Setting %s is not a number (%r); using %s.", name, value, default)
+        return default
+    clamped = number
+    if lo is not None:
+        clamped = max(lo, clamped)
+    if hi is not None:
+        clamped = min(hi, clamped)
+    if clamped != number and name and (name, repr(value)) not in _warned_settings:
+        _warned_settings.add((name, repr(value)))
+        logger.warning("Setting %s is out of range (%r); using %s.", name, value, clamped)
+    return clamped
+
+
+def as_int(value, default, lo=None, hi=None, name=''):
+    """
+    A setting as a whole number within [lo, hi], or default if it is not one.
+
+    Settings are typed by hand, in config.json or the Settings dialog, and a typo
+    such as '15x' used to reach the code as a string. A constructor's int() then
+    raised and NetSentinel would not start; a threshold compared as a string raised
+    TypeError on every SYN, which the packet loop logged at DEBUG, so the IDS rules
+    after it silently stopped running.
+    """
+    return _setting(value, default, lo, hi, name, int)
+
+
+def as_float(value, default, lo=None, hi=None, name=''):
+    """A setting as a finite number within [lo, hi], or default. See as_int."""
+    return _setting(value, default, lo, hi, name, float)
+
 
 DEFAULT_CONFIG = {
     "capture": {
