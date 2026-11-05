@@ -10,7 +10,6 @@ every name is made up.
 """
 
 import os
-import re
 import sys
 import unittest
 
