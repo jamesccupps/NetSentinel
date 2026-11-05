@@ -2986,7 +2986,7 @@ class NetSentinelGUI:
                           font=('Consolas', 22, 'bold'), fill='#00ccff')
         canvas.create_text(w//2, 150, text="Network Monitor & Intrusion Detection System",
                           font=('Segoe UI', 10), fill='#6688aa')
-        canvas.create_text(w//2, 172, text="Version 1.0.0",
+        canvas.create_text(w//2, 172, text=f"Version {__version__}",
                           font=('Consolas', 9), fill='#445566')
 
         # Separator
@@ -3021,7 +3021,7 @@ class NetSentinelGUI:
         t.insert('end', 'DETECTION ENGINES\n', 'h1')
         t.insert('end', '\n')
         t.insert('end', '  IDS Engine', 'h2')
-        t.insert('end', ' — 12 signature rules\n')
+        t.insert('end', ' — signature and behaviour rules\n')
         t.insert('end', '  Port scans, brute force, SYN floods, DNS tunneling, ARP spoofing,\n', 'bullet')
         t.insert('end', '  data exfiltration, threat intel IP/domain matching, and more.\n\n', 'bullet')
 
@@ -3031,9 +3031,9 @@ class NetSentinelGUI:
         t.insert('end', '  Detects beaconing, unusual port diversity, traffic spikes.\n\n', 'bullet')
 
         t.insert('end', '  Threat Intelligence', 'h2')
-        t.insert('end', ' — 6 free feeds, auto-updated\n')
-        t.insert('end', '  Feodo Tracker, SSL Blacklist, URLhaus, Emerging Threats,\n', 'bullet')
-        t.insert('end', '  DShield, blocklist.de. Cloud-aware to reduce false positives.\n\n', 'bullet')
+        t.insert('end', ' — free feeds, downloaded and matched here\n')
+        t.insert('end', '  Feodo Tracker, SSL Blacklist, URLhaus, Emerging Threats, DShield,\n', 'bullet')
+        t.insert('end', '  blocklist.de and more (the Threat data page lists them all).\n\n', 'bullet')
 
         t.insert('end', '  Network Forensics', 'h2')
         t.insert('end', ' — credential & protocol scanner\n')

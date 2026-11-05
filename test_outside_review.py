@@ -678,5 +678,17 @@ class TestReleaseWorkflow(unittest.TestCase):
             self.assertGreaterEqual(text.count('--hash=sha256:'), len(lines), lock)
 
 
+class TestAboutDialog(unittest.TestCase):
+    """The About dialog said "Version 1.0.0", "12 signature rules" and "6 free feeds"."""
+
+    def test_it_shows_the_running_version_and_no_stale_counts(self):
+        import inspect
+        from src import gui
+        source = inspect.getsource(gui.NetSentinelGUI._show_about)
+        self.assertIn('{__version__}', source)
+        for stale in ('Version 1.0.0', '12 signature rules', '6 free feeds'):
+            self.assertNotIn(stale, source)
+
+
 if __name__ == '__main__':
     unittest.main()
