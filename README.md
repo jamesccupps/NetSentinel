@@ -282,6 +282,36 @@ keeps before you run it on a network you care about.
 Data files are created `0700`/`0600` where the platform supports it. See
 [SECURITY.md](SECURITY.md).
 
+## Uninstalling
+
+NetSentinel has no installer. It adds no service, scheduled task, startup entry
+or registry key, and it never changes the firewall. To remove it:
+
+1. Quit it from the tray icon's **Quit**: closing the window only hides it
+   there. The exe runs as two processes; check Task Manager that neither is
+   left.
+2. Delete `NetSentinel.exe`, with any `NetSentinel.exe.old` or
+   `NetSentinel.update.exe` an interrupted update left beside it.
+3. Delete `~/.netsentinel` (`%USERPROFILE%\.netsentinel` on Windows). It holds
+   your settings, alert history, device list, captures, credential vault and
+   logs; copy out `captures/alerts/` first if you want the traffic behind past
+   alerts. If you ran review mode with `--review DIR`, delete that folder too.
+4. The exe unpacks itself into `%TEMP%\_MEI…` each time it starts and removes
+   that folder when it exits, so a crash or a forced stop leaves one behind.
+   NetSentinel's hold a `src` folder (other programs built the same way use the
+   same name), and they are safe to delete while it isn't running.
+5. If you ran it listening off localhost (the syslog receiver, or `--host`),
+   Windows may have added inbound firewall rules for it when it asked whether
+   to allow it. They are under Windows Defender Firewall → Advanced settings →
+   Inbound Rules, listed by the exe's file name.
+6. Npcap has its own uninstaller in Settings → Apps. Wireshark and Nmap use it
+   too, so keep it if you use either.
+
+Run from source, delete the clone and the `NetSentinel.bat` that `setup.bat`
+put on the desktop. If you installed `requirements.txt` outside a virtual
+environment, `pip uninstall -r requirements.txt` removes those packages; skip
+any another program needs.
+
 ## Known scope limits
 
 Worth knowing before you rely on a detector:
