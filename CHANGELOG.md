@@ -1,5 +1,33 @@
 # NetSentinel Changelog
 
+## v1.14.1 — A scan is one alert, and one owner is one network
+
+**2435 unit tests** plus 14 integration checks. From 1.10.x or later this
+installs from the Update button. Two false alarms from a few days of 1.14.0,
+each fixed with tests that fail on 1.14.0.
+
+- **SNMP's default community is one alert per sender, not one per device.** A
+  building-controls scanner on this PC sent the community `public` to 310
+  addresses. No device answered, and that was 159 CRITICAL "Plaintext
+  Credential (SNMP)" alerts, each saying to change a password; analysing the
+  same traffic from a capture gave 262. The default community is no secret, so
+  what matters is who sends it and which devices answer to it:
+  - Sending it is one MEDIUM a day per sender (HIGH for a write), saying it is
+    a scan or a monitoring tool, and verification no longer marks it
+    "[CONFIRMED]".
+  - A device that answers to it is its own alert, once a day per device: HIGH
+    for `public`, CRITICAL for `private`, which is often the write community.
+  - The community is read from the SNMP header. It used to count anywhere in
+    the packet, so a device description containing "public" matched.
+  - Captures you analyse get the same once-a-day rule as live monitoring.
+- **Fast-flux counts a network's owner, not its address blocks.** A name only
+  looks like fast-flux when its short-lived addresses span four unrelated
+  networks, and networks were counted by /16. An ad network's cookie-sync name
+  gave 23 addresses in six /16s, all one company's (AS25751), and was HIGH.
+  With GeoIP on, addresses now count by their owner (ASN), and the alert names
+  the owners it counted. Addresses GeoIP doesn't know, and every address with
+  GeoIP off, still count by /16.
+
 ## v1.14.0 — Fixes from an outside review
 
 **2416 unit tests** plus 14 integration checks. From 1.10.x or later this
