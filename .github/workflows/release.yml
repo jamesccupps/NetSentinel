@@ -3,15 +3,32 @@ name: release
 # Builds NetSentinel.exe on Windows. Pushing a v* tag publishes it, with a
 # SHA-256 checksum and the updater's signature, on that tag's GitHub release; a
 # manual run only keeps it as a workflow artifact, for trying a build without
-# releasing it.
+# releasing it. A tag vX.Y.Z-signtest.N (X.Y.Z the version in src/__init__.py)
+# runs build, authenticode and verify only: for trying a change to code signing.
+# Nothing is published or given the updater's signature. Delete the tag after.
 #
-# Three jobs, so the signing key and the write token never share a job with
-# third-party code. build installs every dependency, pinned by hash, with no
-# secret and a read-only token; sign installs only cryptography, pinned by hash,
-# and is the one job that sees the key; publish has the write token and installs
-# nothing. The key signs every one-click update of an Administrator exe, so a
-# compromised package must not be able to read it, and actions are pinned by
-# commit for the same reason.
+# Two signatures, and neither is ever made next to third-party code:
+# - Authenticode, as James Cupps (Azure Artifact Signing: the account and
+#   certificate Slate, NoteForge, PingerPlot, UniFi Stock Watcher, Protect
+#   Panes and HVAC Network Scanner sign with), so Windows and its UAC prompt
+#   name the publisher. Azure accepts GitHub's OIDC token for it only from this
+#   repository's "release" environment, which admits v* tags only: no password
+#   or key is stored. But while the job is signed in, anything running in it
+#   could sign whatever it liked, so authenticode runs only pinned actions,
+#   Microsoft's ArtifactSigning module and tools/authenticode.ps1: nothing from
+#   PyPI, and never the program. Tags only; a manual run builds unsigned.
+# - The updater's Ed25519 signature (NetSentinel.exe.sig), from the
+#   NETSENTINEL_SIGNING_KEY secret. sign installs only cryptography, pinned by
+#   hash, and is the one job that sees the key. The key signs every one-click
+#   update of an Administrator exe, so a compromised package must not be able
+#   to read it. It signs the Authenticode-signed exe: signing changes the file.
+#
+#   build         installs every dependency, pinned by hash; no secret, read-only token
+#   authenticode  signs the exe (above)
+#   verify        the exe as it ships: its signature, that it starts, its SHA-256
+#   sign          the updater's signature
+#   publish       has the write token and installs nothing
+# Actions are pinned by commit for the same reasons.
 #
 # Refresh the locks with pip-tools on Windows, Python 3.12:
 #   pip-compile --allow-unsafe --generate-hashes --strip-extras --no-emit-index-url -o requirements-build.lock requirements.txt
@@ -44,24 +61,112 @@ jobs:
         shell: cmd
         run: call build_exe.bat
 
-      - name: Check the build and write its checksum
+      - name: Check the build
         shell: pwsh
         run: |
           if (-not (Test-Path dist\NetSentinel.exe)) { throw "the build produced no dist\NetSentinel.exe" }
-          $hash = (Get-FileHash dist\NetSentinel.exe -Algorithm SHA256).Hash.ToLower()
-          "$hash  NetSentinel.exe" | Out-File -Encoding ascii dist\NetSentinel.exe.sha256
           Get-Item dist\NetSentinel.exe | Format-Table Name, Length
 
       - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6
         with:
           name: unsigned
+          path: dist/NetSentinel.exe
+          if-no-files-found: error
+
+  authenticode:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: windows-latest
+    environment: release
+    permissions:
+      contents: read
+      id-token: write  # the OIDC token Azure signs in with
+    steps:
+      # For tools/authenticode.ps1. Nothing from PyPI is installed here, and the
+      # program is never run.
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53  # v6
+        with:
+          name: unsigned
+          path: dist
+
+      - name: Sign in to Azure (OIDC)
+        uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906  # v3.1.0
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      # The version tools/authenticode.ps1 imports
+      - name: Install the ArtifactSigning module
+        shell: pwsh
+        run: Install-Module -Name ArtifactSigning -RequiredVersion 0.1.8 -Repository PSGallery -Scope CurrentUser -Force
+
+      - name: Sign NetSentinel.exe
+        shell: pwsh
+        run: ./tools/authenticode.ps1 -File dist\NetSentinel.exe
+
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6
+        with:
+          name: authenticode-signed
+          path: dist/NetSentinel.exe
+          if-no-files-found: error
+
+  verify:
+    needs: [build, authenticode]
+    # A manual run has no authenticode job: it checks the unsigned build instead.
+    if: ${{ !cancelled() && needs.build.result == 'success' && contains(fromJSON('["success", "skipped"]'), needs.authenticode.result) }}
+    runs-on: windows-latest
+    permissions:
+      contents: read
+    env:
+      SIGNED: ${{ needs.authenticode.result == 'success' }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53  # v6
+        with:
+          name: ${{ needs.authenticode.result == 'success' && 'authenticode-signed' || 'unsigned' }}
+          path: dist
+
+      - name: Signed by James Cupps, and timestamped
+        if: env.SIGNED == 'true'
+        shell: pwsh
+        run: ./tools/check_signatures.ps1 -Publisher 'CN=James Cupps, O=James Cupps' -Path dist\NetSentinel.exe
+
+      # --version is read before anything else (admin checks, the GUI, Npcap),
+      # so this proves the one-file exe still unpacks and starts once signed.
+      - name: It starts
+        shell: pwsh
+        run: |
+          $p = Start-Process -FilePath dist\NetSentinel.exe -ArgumentList '--version' -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "NetSentinel.exe --version exited with $($p.ExitCode)" }
+          'NetSentinel.exe --version: ok'
+
+      # Of the exe as it ships: Authenticode signing changes the file.
+      - name: Write its checksum
+        shell: pwsh
+        run: |
+          $hash = (Get-FileHash dist\NetSentinel.exe -Algorithm SHA256).Hash.ToLower()
+          "$hash  NetSentinel.exe" | Out-File -Encoding ascii dist\NetSentinel.exe.sha256
+          "SHA-256: $hash"
+
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6
+        with:
+          name: verified
           path: |
             dist/NetSentinel.exe
             dist/NetSentinel.exe.sha256
           if-no-files-found: error
 
   sign:
-    needs: build
+    needs: verify
+    if: ${{ !cancelled() && needs.verify.result == 'success' && !contains(github.ref_name, '-signtest') }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -76,7 +181,7 @@ jobs:
 
       - uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53  # v6
         with:
-          name: unsigned
+          name: verified
           path: dist
 
       - name: Install the signing tool's one dependency (pinned by hash)
@@ -114,7 +219,7 @@ jobs:
 
   publish:
     needs: sign
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: ${{ !cancelled() && needs.sign.result == 'success' && startsWith(github.ref, 'refs/tags/v') && !contains(github.ref_name, '-signtest') }}
     runs-on: ubuntu-latest
     permissions:
       contents: write

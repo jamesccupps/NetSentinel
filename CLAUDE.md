@@ -68,11 +68,32 @@ releasing. Publishing a release is the owner's call: ask before pushing a tag.
 The signing key's private half never goes in the repo, a prompt or a log;
 `PUBLIC_KEY` in `src/updater.py` is its public half.
 
-The workflow builds from `requirements-build.lock` (hash-pinned), signs in a
-separate job that installs only `tools/sign-requirements.lock`, and publishes in
-a third; actions are pinned by commit. After changing `requirements.txt`,
-regenerate the lock (the command is at the top of `release.yml`), or the exe is
-built without the change.
+The workflow builds from `requirements-build.lock` (hash-pinned), then:
+`authenticode` signs the exe for Windows (below), `verify` checks that
+signature, starts the exe (`--version`) and writes the SHA-256, `sign` adds the
+updater's signature in a job that installs only `tools/sign-requirements.lock`,
+and `publish` releases; actions are pinned by commit. The SHA-256 and the
+updater's signature are of the Authenticode-signed exe, since signing changes
+the file. After changing `requirements.txt`, regenerate the lock (the command is
+at the top of `release.yml`), or the exe is built without the change.
+
+Code signing (Authenticode, from 1.14.2; earlier releases were unsigned):
+Azure Artifact Signing as James Cupps, the account and certificate Slate,
+NoteForge, PingerPlot, UniFi Stock Watcher, Protect Panes and HVAC Network
+Scanner use (account `SlateAccount`, profile `Slate`, endpoint
+`https://eus.codesigning.azure.net/`). The exe asks for elevation, so this is
+what the UAC prompt shows as the verified publisher. The app registration
+"Slate signing" has a federated credential for
+`repo:jamesccupps/NetSentinel:environment:release`; the `release` environment
+admits `v*` tags only, and the `AZURE_CLIENT_ID`, `AZURE_TENANT_ID` and
+`AZURE_SUBSCRIPTION_ID` secrets name the app registration. No password or key
+is stored. `authenticode` runs only pinned actions, Microsoft's ArtifactSigning
+module and `tools/authenticode.ps1`: nothing from PyPI, never the program
+(`test_authenticode.py` holds the rules). A tag `vX.Y.Z-signtest.N` (the version
+in `src/__init__.py`) runs build, authenticode and verify only, for trying a
+signing change; delete it after. Before signing, VirusTotal had the unsigned
+1.14.1 exe at 2/64 (Bkav's hash-named generic and DeepInstinct's ML verdict;
+Microsoft and the major engines clean; Kaspersky timed out on the 81 MB file).
 
 NetSentinel is also in the owner's Scoop bucket (`jamesccupps/scoop-bucket`,
 `bucket/netsentinel.json`). Its manifest updates itself from the latest GitHub
