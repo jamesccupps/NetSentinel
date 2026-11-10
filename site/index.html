@@ -34,6 +34,7 @@
   "operatingSystem": "Windows",
   "softwareRequirements": "Npcap; Administrator rights for live capture",
   "image": "https://jamesccupps.github.io/NetSentinel/images/social-preview.png",
+  "screenshot": "https://jamesccupps.github.io/NetSentinel/images/dashboard-dark.png",
   "license": "https://opensource.org/licenses/MIT",
   "isAccessibleForFree": true,
   "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" },
@@ -77,14 +78,15 @@
   /* One command a line; a long one wraps with a hanging indent, so the URL reads as part of it. */
   .scoop code { display: block; background: none; color: #e3f1fb; padding: 0 0 0 2ch; text-indent: -2ch;
                 font: 13.5px/1.6 Consolas, "DejaVu Sans Mono", monospace; }
-  .watch { background: rgba(255,255,255,.05); border: 1px solid rgba(255,255,255,.12); border-radius: 10px; padding: 20px 22px; }
-  .watch h2 { font-size: 15px; font-weight: 600; text-transform: uppercase; letter-spacing: .06em; color: #8fb3d6; margin: 0 0 12px; }
-  .watch ul { list-style: none; margin: 0; padding: 0; }
-  .watch li { padding: 8px 0 8px 22px; border-top: 1px solid rgba(255,255,255,.08); position: relative; color: #dbe6f2; font-size: 15px; }
-  .watch li:first-child { border-top: 0; }
-  .watch li::before { content: ""; position: absolute; left: 2px; top: 15px; width: 8px; height: 8px; border-radius: 50%; background: #4cc9f0; }
-  .watch li strong { color: #fff; font-weight: 600; }
+  .demo { margin: 0; }
+  .demo img { width: 100%; height: auto; display: block; border-radius: 8px; box-shadow: 0 18px 50px rgba(0,0,0,.45); }
+  .demo figcaption { color: #8fa7c2; font-size: 13px; margin-top: 10px; }
   section { padding: 44px 0 8px; }
+  .watch .card h3 { font-size: 16px; }
+  .shots { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(420px, 100%), 1fr)); gap: 20px; }
+  .shots figure { margin: 0; }
+  .shots img { width: 100%; height: auto; border-radius: 8px; border: 1px solid var(--line); display: block; }
+  .shots figcaption { color: var(--muted); font-size: 14px; margin-top: 6px; }
   h2 { font-size: 26px; margin: 0 0 18px; }
   .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 16px; }
   .grid.four { grid-template-columns: repeat(auto-fit, minmax(min(220px, 100%), 1fr)); }
@@ -127,22 +129,28 @@
       </div>
       <p class="sub"><span id="version">Free and open source (MIT).</span> Windows; live capture needs <a href="https://npcap.com/">Npcap</a> and Administrator. <a href="https://github.com/jamesccupps/NetSentinel/releases">All releases</a></p>
     </div>
-    <div class="watch">
-      <h2>What it watches for</h2>
-      <ul>
-        <li><strong>Beaconing:</strong> traffic that keeps a schedule, even with the jitter C2 frameworks add</li>
-        <li><strong>Attacks:</strong> port scans, brute force, SYN and ICMP floods</li>
-        <li><strong>DNS abuse:</strong> tunnelling, domain-generation bursts, fast-flux hosting</li>
-        <li><strong>LAN threats:</strong> ARP spoofing, rogue DHCP and router adverts, LLMNR poisoning, lateral movement</li>
-        <li><strong>Data leaving:</strong> uploads far above a host's baseline</li>
-        <li><strong>Known-bad hosts:</strong> botnet C2s, malware URLs and attackers from public threat lists</li>
-        <li><strong>The unusual:</strong> anything far from the baseline it learned for your network</li>
-      </ul>
-    </div>
+    <figure class="demo">
+      <img src="images/dashboard-dark.png" width="1800" height="1000" alt="NetSentinel's dashboard while monitoring: packets, bandwidth, active flows and alert counts, traffic and bandwidth charts, the protocol breakdown, and recent alerts for DGA domains, DNS tunnelling, a known malicious IP, ARP spoofing and a port scan">
+      <figcaption>Made-up traffic on a demo network; the alerts are the real detectors' output.</figcaption>
+    </figure>
   </div>
 </header>
 
 <main class="wrap">
+  <section class="watch">
+    <h2>What it watches for</h2>
+    <div class="grid four">
+      <div class="card"><h3>Beaconing</h3><p>Traffic that keeps a schedule, even with the jitter C2 frameworks add.</p></div>
+      <div class="card"><h3>Attacks</h3><p>Port scans, brute force, SYN and ICMP floods.</p></div>
+      <div class="card"><h3>DNS abuse</h3><p>Tunnelling, domain-generation bursts and fast-flux hosting.</p></div>
+      <div class="card"><h3>LAN threats</h3><p>ARP spoofing, rogue DHCP and router adverts, LLMNR poisoning, lateral movement.</p></div>
+      <div class="card"><h3>Data leaving</h3><p>Uploads far above a host's baseline.</p></div>
+      <div class="card"><h3>Known-bad hosts</h3><p>Botnet C2s, malware URLs and attackers from public threat lists.</p></div>
+      <div class="card"><h3>Insecure services</h3><p>Unencrypted SMB and printing, default SNMP communities, credentials sent in plaintext.</p></div>
+      <div class="card"><h3>The unusual</h3><p>Anything far from the baseline it learned for your network.</p></div>
+    </div>
+  </section>
+
   <section>
     <h2>See what's on your network, and what it's doing</h2>
     <div class="grid">
@@ -156,6 +164,17 @@
       <div class="card"><h3>Network audit, when you ask</h3><p>Off until you turn it on: finds the devices on your own networks, checks 83 common ports at a limited rate, reads TLS certificates and shows what changed. A gentle mode for building and industrial controllers. It never tries a password.</p></div>
       <div class="card"><h3>Scan files for leaks</h3><p>Drop logs, configs, documents, zips or packet captures on the dashboard: every address, domain and URL in them, anything on the threat lists, and any password, key or card number that looks leaked, masked.</p></div>
     </div>
+  </section>
+
+  <section>
+    <h2>A closer look</h2>
+    <div class="shots">
+      <figure><img src="images/alerts.png" width="1800" height="1000" alt="The Alerts tab with an ARP spoofing alert opened: the connection, a likely-threat verdict, how to fix it, and the evidence" loading="lazy"><figcaption>Alerts open to their evidence: what happened, the verdict, and how to fix it.</figcaption></figure>
+      <figure><img src="images/incidents.png" width="1800" height="1000" alt="The Incidents tab: a multi-vector incident of five alerts, a threat-intelligence hit, a man-in-the-middle alert and two lower-severity groups" loading="lazy"><figcaption>Incidents: related alerts grouped into one story.</figcaption></figure>
+      <figure><img src="images/devices.png" width="1800" height="1000" alt="The Devices tab: nine devices on the demo network with their addresses, type (gateway, camera, printer, server, workstation, IoT), confidence and services" loading="lazy"><figcaption>Devices found and classified passively, from their own traffic.</figcaption></figure>
+      <figure><img src="images/browser-dashboard.png" width="1800" height="1490" alt="The browser dashboard: traffic and bandwidth charts over time, protocols, top talkers, the engine's own CPU and memory, and recent alerts with Real, False positive and Acknowledge buttons" loading="lazy"><figcaption>The browser dashboard at <code>127.0.0.1:8737</code>, which <code>--headless</code> serves too: mark an alert real or a false positive right there.</figcaption></figure>
+    </div>
+    <p class="note">All pictures are NetSentinel 1.14.1 on made-up traffic: a demo network with documentation addresses and example names. The alerts are its real detectors' output on that traffic.</p>
   </section>
 
   <section>
