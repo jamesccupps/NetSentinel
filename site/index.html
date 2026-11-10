@@ -1,0 +1,235 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NetSentinel: network monitor and intrusion detection for Windows</title>
+<meta name="description" content="NetSentinel is a free, open source network monitor and intrusion detection system for Windows. It captures your traffic, learns what normal looks like and alerts on beaconing, port scans, ARP spoofing, DNS tunnelling, exfiltration and known-bad hosts, with TLS fingerprints, a browser dashboard and PCAP evidence. Everything is analysed on your own machine.">
+<link rel="canonical" href="https://jamesccupps.github.io/NetSentinel/">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="James Cupps">
+<meta property="og:title" content="NetSentinel: network monitor and intrusion detection for Windows">
+<meta property="og:description" content="Free and open source: captures your traffic, learns what normal looks like, and alerts on beaconing, scans, spoofing, DNS tunnelling and known-bad hosts. Analysed on your own machine.">
+<meta property="og:url" content="https://jamesccupps.github.io/NetSentinel/">
+<meta property="og:image" content="https://jamesccupps.github.io/NetSentinel/images/social-preview.png">
+<meta property="og:image:width" content="1280">
+<meta property="og:image:height" content="640">
+<meta property="og:image:alt" content="NetSentinel: network monitor and intrusion detection for Windows">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="icon" type="image/png" href="images/icon.png">
+<link rel="apple-touch-icon" href="images/icon.png">
+<meta name="color-scheme" content="light dark">
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "SoftwareApplication",
+  "name": "NetSentinel",
+  "description": "A network monitor and intrusion detection system for Windows: packet capture with protocol, flow and process views, TLS SNI and JA3/JA4 fingerprints, machine-learning anomaly detection on a learned baseline, beaconing detection, rule-based detectors for scans, brute force, floods, DNS tunnelling and exfiltration, LAN threats such as ARP spoofing and rogue DHCP, threat-intelligence feeds matched locally, alert correlation into incidents, PCAP evidence, a browser dashboard and a headless sensor mode.",
+  "url": "https://jamesccupps.github.io/NetSentinel/",
+  "codeRepository": "https://github.com/jamesccupps/NetSentinel",
+  "downloadUrl": "https://github.com/jamesccupps/NetSentinel/releases/latest",
+  "applicationCategory": "SecurityApplication",
+  "applicationSubCategory": "Intrusion detection",
+  "operatingSystem": "Windows",
+  "softwareRequirements": "Npcap; Administrator rights for live capture",
+  "image": "https://jamesccupps.github.io/NetSentinel/images/social-preview.png",
+  "license": "https://opensource.org/licenses/MIT",
+  "isAccessibleForFree": true,
+  "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" },
+  "author": { "@type": "Person", "name": "James Cupps", "url": "https://jamesccupps.github.io/" }
+}
+</script>
+<style>
+  :root {
+    --bg: #f4f7fa; --panel: #ffffff; --text: #17202b; --muted: #536173; --line: #d9e1ea;
+    --accent: #0a74a6; --code: #e9eff5; --hero: linear-gradient(160deg, #13233a 0%, #0d1117 100%);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #0f141b; --panel: #171e27; --text: #e3e9f0; --muted: #96a4b5; --line: #263140; --accent: #4cc9f0; --code: #1f2834; }
+  }
+  * { box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 16px/1.55 "Segoe UI", system-ui, -apple-system, Ubuntu, "DejaVu Sans", sans-serif; }
+  a { color: var(--accent); }
+  code { background: var(--code); border-radius: 4px; padding: 1px 5px; font: 14px Consolas, "DejaVu Sans Mono", monospace; overflow-wrap: anywhere; }
+  .wrap { max-width: 1080px; margin: 0 auto; padding: 0 20px; }
+  header.hero { background: var(--hero); color: #fff; padding: 56px 0 44px; }
+  .hero-grid { display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr); gap: 44px; align-items: center; }
+  .brand { display: flex; align-items: center; gap: 16px; }
+  .brand img { width: 64px; height: 64px; }
+  .brand h1 { margin: 0; font-size: 42px; font-weight: 600; letter-spacing: -0.5px; line-height: 1.1; }
+  .tagline { font-size: 22px; margin: 18px 0 6px; }
+  .facts { color: #b4c9e2; margin: 0 0 26px; }
+  .actions { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; }
+  .btn { display: inline-flex; align-items: center; gap: 10px; padding: 12px 22px; border-radius: 8px; font-weight: 600;
+         text-decoration: none; background: #fff; color: #13233a; font-size: 17px; }
+  .btn:hover { background: #e2eef9; }
+  .btn.ghost { background: transparent; color: #fff; border: 1px solid rgba(255,255,255,.45); font-weight: 500; font-size: 15px; padding: 10px 16px; }
+  .btn.ghost:hover { background: rgba(255,255,255,.1); }
+  .btn small { font-weight: 400; opacity: .75; font-size: 13px; }
+  .sub { color: #b4c9e2; font-size: 14px; margin-top: 12px; }
+  .sub a { color: #dcebf9; }
+  .scoop { margin-top: 18px; }
+  .scoop p { color: #b4c9e2; font-size: 14px; margin: 0 0 6px; }
+  .scoop a { color: #dcebf9; }
+  .scoop .cmds { padding: 10px 14px; border-radius: 8px; background: rgba(0,0,0,.3); border: 1px solid rgba(255,255,255,.14); }
+  /* One command a line; a long one wraps with a hanging indent, so the URL reads as part of it. */
+  .scoop code { display: block; background: none; color: #e3f1fb; padding: 0 0 0 2ch; text-indent: -2ch;
+                font: 13.5px/1.6 Consolas, "DejaVu Sans Mono", monospace; }
+  .watch { background: rgba(255,255,255,.05); border: 1px solid rgba(255,255,255,.12); border-radius: 10px; padding: 20px 22px; }
+  .watch h2 { font-size: 15px; font-weight: 600; text-transform: uppercase; letter-spacing: .06em; color: #8fb3d6; margin: 0 0 12px; }
+  .watch ul { list-style: none; margin: 0; padding: 0; }
+  .watch li { padding: 8px 0 8px 22px; border-top: 1px solid rgba(255,255,255,.08); position: relative; color: #dbe6f2; font-size: 15px; }
+  .watch li:first-child { border-top: 0; }
+  .watch li::before { content: ""; position: absolute; left: 2px; top: 15px; width: 8px; height: 8px; border-radius: 50%; background: #4cc9f0; }
+  .watch li strong { color: #fff; font-weight: 600; }
+  section { padding: 44px 0 8px; }
+  h2 { font-size: 26px; margin: 0 0 18px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 16px; }
+  .grid.four { grid-template-columns: repeat(auto-fit, minmax(min(220px, 100%), 1fr)); }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 18px 20px; }
+  .card h3 { margin: 0 0 6px; font-size: 17px; }
+  .card p { margin: 0; color: var(--muted); font-size: 15px; }
+  .card p + p { margin-top: 8px; }
+  .note { color: var(--muted); font-size: 14px; margin: 14px 0 0; }
+  .install { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 16px; }
+  .install ol { margin: 6px 0 0; padding-left: 20px; color: var(--muted); font-size: 15px; }
+  .install li { margin: 0 0 4px; }
+  footer { color: var(--muted); font-size: 14px; padding: 40px 0 50px; border-top: 1px solid var(--line); margin-top: 44px; }
+  footer p { margin: 0 0 6px; }
+  @media (max-width: 860px) {
+    .hero-grid { grid-template-columns: 1fr; }
+  }
+  @media (max-width: 600px) {
+    header.hero { padding: 36px 0 28px; }
+    .brand h1 { font-size: 32px; }
+    .brand img { width: 52px; height: 52px; }
+    .tagline { font-size: 19px; }
+  }
+</style>
+</head>
+<body>
+<header class="hero">
+  <div class="wrap hero-grid">
+    <div>
+      <div class="brand"><img src="images/icon.png" width="64" height="64" alt=""><h1>NetSentinel</h1></div>
+      <p class="tagline">Network monitoring and intrusion detection for Windows.</p>
+      <p class="facts">NetSentinel captures your PC's traffic, learns what normal looks like for your network, and alerts you when something isn't: malware calling home on a schedule, port scans, ARP spoofing, DNS tunnelling, data leaving the network, hosts on threat lists. Everything is analysed on your own machine, and nothing about your traffic is sent anywhere.</p>
+      <div class="actions">
+        <a class="btn" id="primary" href="https://github.com/jamesccupps/NetSentinel/releases/latest/download/NetSentinel.exe">Download for Windows <small id="primary-note">NetSentinel.exe</small></a>
+        <a class="btn ghost" href="https://npcap.com/">Get Npcap</a>
+        <a class="btn ghost" href="https://github.com/jamesccupps/NetSentinel">Source on GitHub</a>
+      </div>
+      <div class="scoop">
+        <p>Or with <a href="https://scoop.sh">Scoop</a> (Npcap is still a separate install):</p>
+        <div class="cmds"><code>scoop bucket add jamesccupps https://github.com/jamesccupps/scoop-bucket</code><code>scoop install jamesccupps/netsentinel</code></div>
+      </div>
+      <p class="sub"><span id="version">Free and open source (MIT).</span> Windows; live capture needs <a href="https://npcap.com/">Npcap</a> and Administrator. <a href="https://github.com/jamesccupps/NetSentinel/releases">All releases</a></p>
+    </div>
+    <div class="watch">
+      <h2>What it watches for</h2>
+      <ul>
+        <li><strong>Beaconing:</strong> traffic that keeps a schedule, even with the jitter C2 frameworks add</li>
+        <li><strong>Attacks:</strong> port scans, brute force, SYN and ICMP floods</li>
+        <li><strong>DNS abuse:</strong> tunnelling, domain-generation bursts, fast-flux hosting</li>
+        <li><strong>LAN threats:</strong> ARP spoofing, rogue DHCP and router adverts, LLMNR poisoning, lateral movement</li>
+        <li><strong>Data leaving:</strong> uploads far above a host's baseline</li>
+        <li><strong>Known-bad hosts:</strong> botnet C2s, malware URLs and attackers from public threat lists</li>
+        <li><strong>The unusual:</strong> anything far from the baseline it learned for your network</li>
+      </ul>
+    </div>
+  </div>
+</header>
+
+<main class="wrap">
+  <section>
+    <h2>See what's on your network, and what it's doing</h2>
+    <div class="grid">
+      <div class="card"><h3>Traffic, flows and processes</h3><p>Full packet capture with live bandwidth charts, protocol breakdown, two-way flow tracking and the process behind each connection.</p></div>
+      <div class="card"><h3>Inside encrypted connections</h3><p>The TLS handshake gives the destination's name (SNI), even when DNS goes over HTTPS, and a JA3/JA4 fingerprint of the client software, so malware with its own TLS stack stands out.</p></div>
+      <div class="card"><h3>Learns your network</h3><p>For the first hours it records what's normal here: destinations, ports, schedules. Then an Isolation Forest flags what's far from that. Learning stops when the window closes, so nothing an attacker does later can whitelist itself.</p></div>
+      <div class="card"><h3>Incidents, not alert floods</h3><p>Related alerts are grouped into incidents, and escalation chains such as reconnaissance then attack, or a threat-list hit then exfiltration, read as one story.</p></div>
+      <div class="card"><h3>Evidence you can open</h3><p>A ring buffer of raw packets: save the last five minutes on demand, or record continuously. Serious alerts keep the traffic that raised them, narrowed to the hosts involved, ready for Wireshark.</p></div>
+      <div class="card"><h3>Every device, passively</h3><p>Devices on your network are found and classified from ARP, DHCP, mDNS and their traffic, with their vendor. With a UniFi console it uses your own device names, and software versions they announce are checked against CISA's list of exploited vulnerabilities.</p></div>
+      <div class="card"><h3>A browser dashboard, or headless</h3><p>A dashboard at <code>127.0.0.1:8737</code> shows traffic, alerts with their evidence, devices and incidents. <code>--headless</code> runs the same engine with no window, as a sensor on a server or a Raspberry Pi on a mirror port.</p></div>
+      <div class="card"><h3>Network audit, when you ask</h3><p>Off until you turn it on: finds the devices on your own networks, checks 83 common ports at a limited rate, reads TLS certificates and shows what changed. A gentle mode for building and industrial controllers. It never tries a password.</p></div>
+      <div class="card"><h3>Scan files for leaks</h3><p>Drop logs, configs, documents, zips or packet captures on the dashboard: every address, domain and URL in them, anything on the threat lists, and any password, key or card number that looks leaked, masked.</p></div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Private by design</h2>
+    <div class="grid four">
+      <div class="card"><h3>Analysed here</h3><p>Threat lists (abuse.ch, Spamhaus, Emerging Threats, CISA KEV and more) are downloaded whole and matched on your machine. Nothing about your traffic is sent out.</p></div>
+      <div class="card"><h3>Careful with what it finds</h3><p>Credentials seen in plaintext protocols are stored masked by default, in an encrypted vault you can lock with your own passphrase, or not scanned for at all.</p></div>
+      <div class="card"><h3>A dashboard only you can drive</h3><p>The dashboard binds to localhost by default, refuses requests for other host names, and its controls need a token only the page carries.</p></div>
+      <div class="card"><h3>Updates you can trust</h3><p>It checks GitHub once a day, sending only its version. An update installs on your click, and only if the release carries the Ed25519 signature built into NetSentinel and the download matches its signed hash.</p></div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Install</h2>
+    <div class="install">
+      <div class="card" id="windows">
+        <h3>Windows</h3>
+        <ol>
+          <li>Install <a href="https://npcap.com/">Npcap</a>, ticking <em>WinPcap API-compatible mode</em>.</li>
+          <li><a href="https://github.com/jamesccupps/NetSentinel/releases/latest/download/NetSentinel.exe">Download NetSentinel.exe</a> and run it. It asks for Administrator, which packet capture needs.</li>
+          <li>Click <strong>Start monitoring</strong>. It learns your network for two hours, then anomaly detection turns on by itself.</li>
+        </ol>
+        <p class="note">NetSentinel.exe isn't code-signed yet, so Windows may show <em>Windows protected your PC</em>: <strong>More info → Run anyway</strong>. Each release lists its SHA-256 in <code>NetSentinel.exe.sha256</code>.</p>
+      </div>
+      <div class="card" id="scoop">
+        <h3>Scoop</h3>
+        <p><code>scoop bucket add jamesccupps https://github.com/jamesccupps/scoop-bucket</code>, then <code>scoop install jamesccupps/netsentinel</code>. Scoop doesn't install Npcap, and NetSentinel still asks for Administrator. Your data stays in <code>%USERPROFILE%\.netsentinel</code>.</p>
+      </div>
+      <div class="card" id="source">
+        <h3>From source, or as a sensor</h3>
+        <p>Python 3.10 or newer: clone the repository, <code>pip install -r requirements.txt</code>, then <code>python main.py</code>, or <code>python main.py --headless</code> for the dashboard with no window. See the <a href="https://github.com/jamesccupps/NetSentinel#quick-start">README</a>.</p>
+      </div>
+    </div>
+    <p class="note">A desktop mostly sees its own traffic. To watch traffic between other machines, run it on a mirror (SPAN) port. The <a href="https://github.com/jamesccupps/NetSentinel#known-scope-limits">scope limits</a> say what each detector can and can't see.</p>
+  </section>
+
+  <section>
+    <h2>Feedback</h2>
+    <p>Found a bug or have an idea? <a href="https://github.com/jamesccupps/NetSentinel/issues">Open an issue</a> on GitHub. Security problems go privately: see <a href="https://github.com/jamesccupps/NetSentinel/blob/main/SECURITY.md">SECURITY.md</a>.</p>
+  </section>
+</main>
+
+<footer>
+  <div class="wrap">
+    <p>NetSentinel is free and open source under the MIT license, made by <a href="https://jamesccupps.github.io/">James Cupps</a>. <a href="https://github.com/jamesccupps/NetSentinel">github.com/jamesccupps/NetSentinel</a></p>
+    <p>It runs with Administrator rights and can see credentials sent in plaintext on your network: treat it as privileged software, and run it only on networks you own or are allowed to monitor.</p>
+  </div>
+</footer>
+
+<script>
+(function () {
+  // The big button is for a Windows PC. Elsewhere it says so, and a phone gets the release page to send to a PC.
+  var ua = navigator.userAgent || "";
+  var platform = (navigator.userAgentData && navigator.userAgentData.platform) || navigator.platform || "";
+  // (an iPad says it's a Mac, but has a touch screen)
+  var phone = /Android|iPhone|iPad|iPod/i.test(ua) || (navigator.userAgentData && navigator.userAgentData.mobile) ||
+    (/Mac/i.test(platform) && navigator.maxTouchPoints > 1);
+  var windows = /Win/i.test(platform + " " + ua) && !phone;
+  var primary = document.getElementById("primary"), note = document.getElementById("primary-note");
+  if (phone) {
+    primary.href = "https://github.com/jamesccupps/NetSentinel/releases/latest";
+    primary.firstChild.nodeValue = "Get it for your PC ";
+    note.textContent = "Windows";
+  } else if (!windows) {
+    primary.href = "https://github.com/jamesccupps/NetSentinel#quick-start";
+    primary.firstChild.nodeValue = "Run from source ";
+    note.textContent = "Python 3.10+";
+  }
+  // The latest version, from GitHub (the page works without it).
+  try {
+    fetch("https://api.github.com/repos/jamesccupps/NetSentinel/releases/latest").then(function (r) { return r.ok ? r.json() : null; }).then(function (d) {
+      if (d && d.tag_name) document.getElementById("version").textContent = "Version " + d.tag_name.replace(/^v/, "") + ", free and open source (MIT).";
+    }).catch(function () {});
+  } catch (e) {}
+})();
+</script>
+</body>
+</html>

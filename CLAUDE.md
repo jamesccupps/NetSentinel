@@ -90,6 +90,15 @@ release every 4 hours, so a release needs no Scoop work as long as these hold:
 - If a file name or the packaging must change, update `bucket/netsentinel.json`
   in jamesccupps/scoop-bucket in the same change.
 
+The project page is `site/index.html` (plus `site/images/`), published to
+https://jamesccupps.github.io/NetSentinel/ by `.github/workflows/pages.yml` when
+`site/` changes on main (Settings → Pages → Source: GitHub Actions). It fetches
+the latest version from the GitHub API and links `releases/latest/download/...`,
+so a release needs no deploy. `site/images/social-preview.png` (1280x640) is also
+the repository's Settings → Social preview, uploaded by hand. Keep the page's
+claims in step with the README, and pictures free of real addresses, hosts and
+device names (the hard rules below).
+
 ## Conventions
 
 - The owner works on `main` and has allowed pushing to it directly.
