@@ -1037,6 +1037,20 @@ class AlertVerifier:
                     'reasoning': [f"{protocol}: the vendor's own key, sent by design, "
                                   "not a login of yours"],
                     'summary': 'Vendor telemetry key, by design'}
+        # SNMP's default community is no secret. Sending it is a scan or a
+        # monitoring tool; a device answering to it is the exposure.
+        if '(Default Community)' in protocol:
+            if (evidence.get('extra') or {}).get('answered'):
+                return {'verdict': AlertVerdict.VERIFIED_THREAT, 'confidence': 0.9,
+                        'reasoning': ["The device answered a request made with SNMP's "
+                                      "default community",
+                                      "Anyone who can reach it can read it the same way"],
+                        'summary': 'Device accepts the default SNMP community'}
+            return {'verdict': AlertVerdict.INCONCLUSIVE, 'confidence': 0.4,
+                    'reasoning': ["SNMP's default community, sent to find devices that "
+                                  "accept it",
+                                  "No secret is exposed; a device that answers is its own alert"],
+                    'summary': 'Default SNMP community sent: a scan or a monitoring tool'}
         if 'digest' in cred_type.lower() or 'hash' in cred_type.lower():
             return {'verdict': AlertVerdict.LIKELY_THREAT, 'confidence': 0.7,
                     'reasoning': [f"Hashed {protocol} {cred_type} captured from network traffic",

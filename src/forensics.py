@@ -365,8 +365,49 @@ IMAP_LOGIN_RE = re.compile(rb'LOGIN\s+"?(\S+?)"?\s+"?(\S+?)"?', re.IGNORECASE)
 TELNET_LOGIN_RE = re.compile(rb'(?:login|username)[\s:]+(\S+)', re.IGNORECASE)
 TELNET_PASS_RE = re.compile(rb'(?:password|passwd)[\s:]+(\S+)', re.IGNORECASE)
 
-# SNMP community strings
-SNMP_COMMUNITY_RE = re.compile(rb'(public|private|community)', re.IGNORECASE)
+# SNMP v1/v2c messages: a BER SEQUENCE of version, community and PDU. The
+# community is the only password those versions have, in every message. Only
+# the well-known defaults are recognised, and they are no secret.
+SNMP_DEFAULT_COMMUNITIES = (b'public', b'private')
+SNMP_PDUS = {0xa0: 'GetRequest', 0xa1: 'GetNextRequest', 0xa2: 'Response',
+             0xa3: 'SetRequest', 0xa4: 'Trap', 0xa5: 'GetBulkRequest',
+             0xa6: 'InformRequest', 0xa7: 'SNMPv2-Trap'}
+SNMP_NOTIFICATIONS = ('Trap', 'SNMPv2-Trap', 'InformRequest')
+
+
+def _ber_length(data, i):
+    """(length, index after it) for the BER length at data[i]; (None, i) if bad."""
+    if i >= len(data):
+        return None, i
+    first = data[i]
+    if first < 0x80:
+        return first, i + 1
+    count = first & 0x7f
+    if count == 0 or count > 2 or i + 1 + count > len(data):
+        return None, i
+    return int.from_bytes(data[i + 1:i + 1 + count], 'big'), i + 1 + count
+
+
+def parse_snmp(payload):
+    """
+    (version, community, PDU name) of an SNMP v1 or v2c message, or None. The
+    PDU itself may be cut off: only the header is read. v3 has no community.
+    """
+    if not payload or len(payload) < 7 or payload[0] != 0x30:
+        return None
+    length, i = _ber_length(payload, 1)
+    if length is None or bytes(payload[i:i + 3]) not in (b'\x02\x01\x00', b'\x02\x01\x01'):
+        return None
+    version = 'v1' if payload[i + 2] == 0 else 'v2c'
+    i += 3
+    if i >= len(payload) or payload[i] != 0x04:
+        return None
+    size, i = _ber_length(payload, i + 1)
+    if size is None or i + size > len(payload):
+        return None
+    community = bytes(payload[i:i + size])
+    pdu = SNMP_PDUS.get(payload[i + size]) if i + size < len(payload) else None
+    return version, community, pdu
 
 # SQL connection strings in plaintext
 SQL_CONN_RE = re.compile(
@@ -904,9 +945,10 @@ def credential_alert(cred):
     return Alert(
         rule_id='FORENSICS-CREDENTIAL',
         severity=cred.get('risk', 'CRITICAL'),
-        title=f"{title_prefix} ({cred['protocol']})",
-        description=(f"{cred['protocol']} {cred['credential_type']} "
-                     f"transmitted unencrypted{desc_suffix}"),
+        title=cred.get('title') or f"{title_prefix} ({cred['protocol']})",
+        description=cred.get('description') or (
+            f"{cred['protocol']} {cred['credential_type']} "
+            f"transmitted unencrypted{desc_suffix}"),
         src_ip=cred.get('source_ip', ''),
         dst_ip=cred.get('destination_ip', ''),
         dst_port=cred.get('port', 0),
@@ -918,8 +960,9 @@ def credential_alert(cred):
             'connection': f"{cred.get('source_ip', '')} → "
                           f"{cred.get('destination_ip', '')}:{cred.get('port', 0)}",
             'extra': cred.get('extra', {}),
-            'description': (f"A {cred['credential_type']} for {cred['protocol']} "
-                            f"was found in network traffic{desc_suffix}"),
+            'description': cred.get('description') or (
+                f"A {cred['credential_type']} for {cred['protocol']} "
+                f"was found in network traffic{desc_suffix}"),
             'recommendation': cred.get('recommendation') or (
                 'Switch to the encrypted version of this protocol.' if is_digest else
                 'Change this password immediately. Switch to the encrypted version '
@@ -1235,6 +1278,58 @@ class NetworkForensics:
         self._seen_on[key] = ts
         return False
 
+    def _snmp_default_community(self, parsed, src, dst, port, sport, ts):
+        """
+        A default community on the wire. The default is no secret, so the news is
+        who sends it (once a day per sender, not per host it went to) and, apart
+        from that, any device that answers to it: anyone who can reach that
+        device can read it, and "private" is the usual write default.
+        """
+        version, community, pdu = parsed
+        name = community.decode('ascii')
+        if sport == 161 and pdu == 'Response':
+            if self._seen_today(('snmp-default-answer', src, name), ts):
+                return
+            writes = (", and 'private' is often its write community too"
+                      if name == 'private' else '')
+            # Asker to device, so the device is the alert's destination.
+            self._add_credential(
+                'SNMP (Default Community)', 'community_string', name, dst, src, 161, ts,
+                extra={'version': version, 'pdu': pdu, 'answered': True},
+                raw_value=name, risk='CRITICAL' if name == 'private' else 'HIGH',
+                title=f"Device answers SNMP's default community '{name}'",
+                description=(
+                    f"{src} answered an SNMP {version} request made with the default "
+                    f"community '{name}'. Anyone who can reach it can read its "
+                    f"configuration that way{writes}."),
+                recommendation=(
+                    f"Give {src} a community of its own, or turn SNMP v1/v2c off and use "
+                    f"SNMPv3 with authentication and encryption."))
+            return
+        if pdu == 'Response':
+            return
+        if self._seen_today(('snmp-default-sent', src, name), ts):
+            return
+        if pdu in SNMP_NOTIFICATIONS:
+            description = (f"{src} sends SNMP {pdu}s to {dst} with the default community "
+                           f"'{name}'.")
+            recommendation = (f"Set a community of its own on {src}, or move it to SNMPv3. "
+                              f"The default is no secret, so nothing was given away.")
+        else:
+            description = (f"{src} sent an SNMP {pdu or 'request'} with the default "
+                           f"community '{name}' to {dst}:{port}, which is how scanners and "
+                           f"monitoring tools find devices that still accept it.")
+            recommendation = (
+                "The default is no secret, so nothing was given away. If this host is not "
+                "a scanner or monitoring tool you run, find out what is probing. A device "
+                "that answers to it is reported on its own.")
+        self._add_credential(
+            'SNMP (Default Community)', 'community_string', name, src, dst, port, ts,
+            extra={'version': version, 'pdu': pdu or '', 'answered': False},
+            raw_value=name, risk='HIGH' if pdu == 'SetRequest' else 'MEDIUM',
+            title=f"Default SNMP community '{name}' sent",
+            description=description, recommendation=recommendation)
+
     def _odd_port_http(self, pkt_info, port):
         """
         The service entry for HTTP on a port INSECURE_PROTOCOLS does not name,
@@ -1534,12 +1629,15 @@ class NetworkForensics:
                     f"{user}:{self._mask(passwd)}", src, dst, port, ts,
                     raw_value=f"{user}:{passwd}")
 
-        # ─── SNMP Community Strings ──────────────────────────
-        if port == 161 or port == 162:
-            if b'public' in payload.lower() or b'private' in payload.lower():
-                community = 'public' if b'public' in payload.lower() else 'private'
-                self._add_credential('SNMP', 'community_string',
-                    community, src, dst, port, ts, raw_value=community)
+        # ─── SNMP default communities ────────────────────────
+        # Read from the message's header: "public" anywhere in the payload used
+        # to count, and every match was a CRITICAL per destination. A scanner
+        # sent "public" to 310 hosts, no device answered, and that was 159
+        # alerts saying to change a password.
+        if port in (161, 162) or sport == 161:
+            parsed = parse_snmp(payload)
+            if parsed and parsed[1] in SNMP_DEFAULT_COMMUNITIES:
+                self._snmp_default_community(parsed, src, dst, port, sport, ts)
 
         # ─── Redis AUTH ──────────────────────────────────────
         if port == 6379 or sport == 6379:
@@ -2595,8 +2693,9 @@ class NetworkForensics:
 
     def _add_credential(self, protocol, cred_type, value, src, dst, port, ts,
                          extra=None, raw_length=0, raw_value=None, risk='CRITICAL',
-                         recommendation=None):
-        """Record a found credential. value=masked for display, raw_value=full for storage."""
+                         recommendation=None, title=None, description=None):
+        """Record a found credential. value=masked for display, raw_value=full for storage.
+        title and description replace the alert's generic ones."""
         finding = {
             'timestamp': ts,
             'time_str': datetime.fromtimestamp(ts).strftime('%Y-%m-%d %H:%M:%S') if ts else '',
@@ -2610,6 +2709,10 @@ class NetworkForensics:
             'extra': extra or {},
             'recommendation': recommendation,
         }
+        if title:
+            finding['title'] = title
+        if description:
+            finding['description'] = description
         self.credentials_found.append(finding)
         self._add_timeline_event(ts, 'credential',
             f"CREDENTIAL EXPOSED: {protocol} {cred_type} found — "
