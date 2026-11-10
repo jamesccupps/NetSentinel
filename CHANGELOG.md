@@ -1,5 +1,20 @@
 # NetSentinel Changelog
 
+## v1.14.2 — Signed by James Cupps
+
+`NetSentinel.exe` is now code-signed, so Windows, and the administrator prompt
+it raises at every start, name the publisher, James Cupps, instead of "Unknown
+publisher". Nothing else changes. From 1.10.x or later this installs from the
+Update button.
+
+- **Authenticode signature.** Signed in Azure Artifact Signing, with the
+  certificate James Cupps's other Windows apps carry, by a release job that
+  installs nothing from PyPI and never runs the program. The checksum
+  (`NetSentinel.exe.sha256`) and the updater's signature are of the signed exe.
+  The built-in updater still checks its own Ed25519 signature before it
+  installs anything, as before.
+- Four new tests keep the release workflow to those rules.
+
 ## v1.14.1 — A scan is one alert, and one owner is one network
 
 **2435 unit tests** plus 14 integration checks. From 1.10.x or later this

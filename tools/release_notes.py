@@ -9,7 +9,8 @@ INSTALL = """
 
 **Installing.** Install [Npcap](https://npcap.com) first (tick "WinPcap API-compatible
 mode"), then run `NetSentinel.exe`. It asks for administrator rights because packet
-capture needs them. `NetSentinel.exe.sha256` holds the checksum to verify the download,
+capture needs them; from 1.14.2 the prompt names the publisher, James Cupps, since
+the exe is code-signed. `NetSentinel.exe.sha256` holds the checksum to verify the download,
 and `NetSentinel.exe.sig` the signature the built-in updater checks before installing.
 """
 
