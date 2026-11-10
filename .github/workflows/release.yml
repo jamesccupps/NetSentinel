@@ -139,5 +139,8 @@ jobs:
           python3 tools/release_notes.py "$TAG" > notes.md
           gh release view "$TAG" >/dev/null 2>&1 || \
             gh release create "$TAG" --title "NetSentinel $TAG" --notes-file notes.md
+          # No --clobber: once a release is out, Scoop has its hash and installs
+          # have its signature, so a re-run on a released tag must fail rather
+          # than swap in a rebuilt exe. A bad release gets a new version.
           gh release upload "$TAG" dist/NetSentinel.exe dist/NetSentinel.exe.sha256 \
-            dist/NetSentinel.exe.sig --clobber
+            dist/NetSentinel.exe.sig

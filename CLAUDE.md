@@ -74,6 +74,22 @@ a third; actions are pinned by commit. After changing `requirements.txt`,
 regenerate the lock (the command is at the top of `release.yml`), or the exe is
 built without the change.
 
+NetSentinel is also in the owner's Scoop bucket (`jamesccupps/scoop-bucket`,
+`bucket/netsentinel.json`). Its manifest updates itself from the latest GitHub
+release every 4 hours, so a release needs no Scoop work as long as these hold:
+- Tag releases `vX.Y.Z` and publish them as the latest release, never a
+  pre-release.
+- Keep the file names: `NetSentinel.exe`, shipped bare (not zipped), with
+  `NetSentinel.exe.sha256` beside it (`<hash>  NetSentinel.exe`, which the
+  bucket reads its hash from) and `NetSentinel.exe.sig` (which the updater needs).
+- Sign before publishing (the workflow's sign job does), and never replace a
+  file on a release that is out: Scoop (and winget, if NetSentinel goes there)
+  has recorded its hash, and every install's updater has seen its signature.
+  Fix a bad release with a new version. That is why the publish step uploads
+  without `--clobber`: re-running it on a released tag fails instead.
+- If a file name or the packaging must change, update `bucket/netsentinel.json`
+  in jamesccupps/scoop-bucket in the same change.
+
 ## Conventions
 
 - The owner works on `main` and has allowed pushing to it directly.

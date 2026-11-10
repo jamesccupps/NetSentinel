@@ -80,7 +80,24 @@ TLS stack stands out even when everything it sends is encrypted.
 
 The easy way: download `NetSentinel.exe` from the
 [latest release](https://github.com/jamesccupps/NetSentinel/releases/latest), install
-Npcap, and run it. Or from source:
+Npcap, and run it.
+
+### Install with Scoop
+
+With [Scoop](https://scoop.sh) (follow the link to install Scoop itself first):
+
+```powershell
+scoop bucket add jamesccupps https://github.com/jamesccupps/scoop-bucket
+scoop install jamesccupps/netsentinel
+```
+
+Scoop installs the same `NetSentinel.exe` as the release, checked against its
+SHA-256, and adds it to the Start menu. It does not install Npcap, which live
+capture needs, and NetSentinel still asks to run as Administrator. Update with
+`scoop update netsentinel`. The in-app **Update** button works too, but Scoop
+doesn't see that and keeps listing the version it installed.
+
+### From source
 
 ```bash
 git clone https://github.com/jamesccupps/NetSentinel.git
@@ -291,7 +308,9 @@ or registry key, and it never changes the firewall. To remove it:
    there. The exe runs as two processes; check Task Manager that neither is
    left.
 2. Delete `NetSentinel.exe`, with any `NetSentinel.exe.old` or
-   `NetSentinel.update.exe` an interrupted update left beside it.
+   `NetSentinel.update.exe` an interrupted update left beside it. Installed
+   with Scoop, run `scoop uninstall netsentinel` instead: it removes the exe
+   and its Start menu shortcut, and leaves your data for the next step.
 3. Delete `~/.netsentinel` (`%USERPROFILE%\.netsentinel` on Windows). It holds
    your settings, alert history, device list, captures, credential vault and
    logs; copy out `captures/alerts/` first if you want the traffic behind past

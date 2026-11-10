@@ -654,6 +654,14 @@ class TestReleaseWorkflow(unittest.TestCase):
         self.assertNotIn('pip install', self.runs('publish'))
         self.assertIn('--require-hashes -r requirements-build.lock', self.runs('build'))
 
+    def test_a_published_file_is_never_replaced(self):
+        # The Scoop bucket records each release's hash, and installs have seen
+        # its signature; a re-run with --clobber would swap in a rebuilt exe.
+        commands = '\n'.join(line for line in self.runs('publish').splitlines()
+                             if not line.strip().startswith('#'))
+        self.assertIn('gh release upload', commands)
+        self.assertNotIn('--clobber', commands)
+
     def test_actions_are_pinned_by_commit_and_keep_no_credentials(self):
         import re
         for name, job in self.jobs.items():
