@@ -442,7 +442,7 @@ class IDSEngine:
 
         # DNS response analysis: NXDOMAIN bursts (DGA) and fast-flux hosting.
         # Queries alone cannot see either — both live in the answer section.
-        self.dns_monitor = DnsResponseMonitor(config)
+        self.dns_monitor = DnsResponseMonitor(config, owner_of=self._address_owner)
 
         # DNS tunnelling: long encoded names, many names under one domain, and
         # TXT-heavy query rates, per host and registered domain.
@@ -1543,6 +1543,17 @@ class IDSEngine:
             return True
         return is_private(ip)
 
+    def _address_owner(self, ip):
+        """'AS25751 Conversant, Inc.' from the local GeoIP files, or None when
+        GeoIP is off or does not know the address."""
+        geoip = getattr(self, 'geoip', None)
+        if geoip is None:
+            return None
+        info = geoip.lookup(ip)
+        if info.get('asn') is None:
+            return None
+        return f"AS{info['asn']} {info.get('as_org', '')}".strip()
+
     def _dns_trusted(self, name):
         """Names the DNS heuristics leave alone: first-party cloud services and
         domains learned during the baseline period."""
@@ -1749,6 +1760,7 @@ class IDSEngine:
                     'domain': finding['domain'],
                     'distinct_addresses': finding['address_count'],
                     'distinct_networks': finding.get('network_count'),
+                    'network_owners': finding.get('network_owners') or [],
                     'ttl_seconds': finding['min_ttl'],
                     'window_seconds': finding['window_sec'],
                     'sample_addresses': finding['sample_addresses'],

@@ -228,6 +228,42 @@ class TestFastFlux(unittest.TestCase):
                                       60, T0 + i * 10)
         self.assertTrue(findings)
 
+    def _flux(self, owner_of, addresses, name='flux.example.net', ttl=60):
+        m = DnsResponseMonitor(owner_of=owner_of)
+        findings = []
+        for i, address in enumerate(addresses):
+            findings += m.observe_response('192.168.1.50', name, 0, [address], ttl,
+                                           T0 + i * 10)
+        return findings
+
+    def test_one_owner_across_many_blocks_is_not_flux(self):
+        """An ad network's cookie-sync name gave 23 addresses in six /16s with a
+        28s TTL, and was HIGH: every address was the same company's ASN."""
+        blocks = ['45.10', '45.20', '62.30', '62.40', '77.50', '77.60']
+        addresses = [f'{blocks[i % 6]}.{i}.{i}' for i in range(23)]
+        self.assertTrue(self._flux(None, addresses, 'sync.ads.example.com', 28),
+                        'counted by /16, the six blocks look unrelated')
+        self.assertEqual(
+            self._flux(lambda a: 'AS64500 Example Ads', addresses,
+                       'sync.ads.example.com', 28), [])
+
+    def test_many_owners_still_fire_and_are_named(self):
+        owners = {f'{60 + i}.184.{i}.{i}': f'AS{64496 + i % 6} ISP {i % 6}'
+                  for i in range(20)}
+        findings = self._flux(owners.get, list(owners))
+        self.assertEqual(len(findings), 1)
+        self.assertGreaterEqual(findings[0]['network_count'], 4)
+        self.assertIn('AS64496 ISP 0', findings[0]['network_owners'])
+
+    def test_unknown_owners_fall_back_to_the_slash16(self):
+        def broken(address):
+            raise RuntimeError('database closed')
+        addresses = [f'{60 + i}.184.{i}.{i}' for i in range(20)]
+        for owner_of in (lambda a: None, broken):
+            findings = self._flux(owner_of, addresses)
+            self.assertEqual(len(findings), 1)
+            self.assertEqual(findings[0]['network_owners'], [])
+
 
 class TestMonitorHousekeeping(unittest.TestCase):
 
@@ -294,6 +330,32 @@ class TestIdsIntegration(unittest.TestCase):
             self.ids.inspect_packet(self._response(
                 'flux.example.net', 0, [f'{60 + i}.184.{i}.{i}'], 60, T0 + i * 10))
         self.assertIn('DNS-FAST-FLUX', self._rules())
+
+    def _flux_with_geoip(self, lookup):
+        class FakeGeoIP:
+            def __init__(self, fn):
+                self.lookup = fn
+        self.ids.geoip = FakeGeoIP(lookup)
+        for i in range(20):
+            self.ids.inspect_packet(self._response(
+                'flux.example.net', 0, [f'{60 + i}.184.{i}.{i}'], 60, T0 + i * 10))
+
+    def test_flux_counts_owners_when_geoip_is_on(self):
+        self._flux_with_geoip(lambda ip: {'asn': 64500, 'as_org': 'Example Ads'})
+        self.assertNotIn('DNS-FAST-FLUX', self._rules())
+        self.assertEqual(self.ids._address_owner('60.184.0.0'), 'AS64500 Example Ads')
+
+    def test_flux_evidence_names_the_owners(self):
+        def lookup(ip):
+            n = int(ip.split('.')[0]) % 6
+            return {'asn': 64496 + n, 'as_org': f'ISP {n}'}
+        self._flux_with_geoip(lookup)
+        alert = next(a for a in self.alerts if a.rule_id == 'DNS-FAST-FLUX')
+        self.assertIn('AS64496 ISP 0', alert.evidence['network_owners'])
+
+    def test_no_geoip_means_no_owner(self):
+        self.ids.geoip = None
+        self.assertIsNone(self.ids._address_owner('60.184.0.0'))
 
     def test_normal_dns_traffic_raises_nothing(self):
         for i in range(30):

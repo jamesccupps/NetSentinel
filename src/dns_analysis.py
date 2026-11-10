@@ -65,10 +65,13 @@ DGA_MIN_LABEL_LEN = 7
 FLUX_MIN_ADDRESSES = 8
 FLUX_TTL_CEILING = 300
 FLUX_WINDOW_SEC = 900
-# And spread across this many unrelated networks (/16 for IPv4, /32 for IPv6).
-# Fast-flux rotates through compromised home machines all over the internet; a
-# CDN answers from a few blocks of its own. Akamai gave api.weather.gov 8
-# addresses in two /16s, and that was HIGH every five minutes all night.
+# And spread across this many unrelated networks: the address's owner (its
+# ASN) when GeoIP knows it, else its /16 (/32 for IPv6). Fast-flux rotates
+# through compromised home machines all over the internet; a CDN answers from a
+# few blocks of its own. Akamai gave api.weather.gov 8 addresses in two /16s,
+# and that was HIGH every five minutes all night. /16s alone still overcount a
+# company with many blocks: an ad network's sync name gave 23 addresses in six
+# /16s, every one of them AS25751, and was HIGH.
 FLUX_MIN_NETWORKS = 4
 # A name reported once is not reported again for this long.
 FLUX_REPORT_HOLD_SEC = 3600
@@ -129,7 +132,7 @@ class DnsResponseMonitor:
     directly, and because this is per-response state rather than per-packet.
     """
 
-    def __init__(self, config=None, cdn_check=None):
+    def __init__(self, config=None, cdn_check=None, owner_of=None):
         self.config = config
         # Read directly rather than through a helper: a lambda wrapper hides the
         # key from the check that every DEFAULT_CONFIG entry is actually consulted.
@@ -146,6 +149,9 @@ class DnsResponseMonitor:
         # shape; without this, every busy CDN hostname was reported.
         self.cdn_check = cdn_check if cdn_check is not None else _default_cdn_check
         self.flux_cdn_exempted = 0
+        # address -> who owns it ('AS25751 Conversant, Inc.'), or None when that
+        # is not known. Without one, networks are counted by /16.
+        self.owner_of = owner_of
 
         # {src_ip: deque[(timestamp, queried_name)]}
         self._failures = defaultdict(lambda: deque(maxlen=512))
@@ -273,7 +279,16 @@ class DnsResponseMonitor:
         if entry['ttl'] > FLUX_TTL_CEILING:
             # Many addresses with a long TTL is ordinary load balancing.
             return None
-        networks = {_network_of(a) for a in live}
+        owners = {}
+        for a in live:
+            owner = None
+            if self.owner_of is not None:
+                try:
+                    owner = self.owner_of(a)
+                except Exception as e:
+                    logger.debug("Owner lookup failed for %s: %s", a, e)
+            owners[a] = owner
+        networks = {owner or _network_of(a) for a, owner in owners.items()}
         if len(networks) < FLUX_MIN_NETWORKS:
             return None
         if name in self._reported_flux and now - self._reported_flux[name] < FLUX_REPORT_HOLD_SEC:
@@ -293,6 +308,7 @@ class DnsResponseMonitor:
             'domain': name,
             'address_count': len(live),
             'network_count': len(networks),
+            'network_owners': sorted({o for o in owners.values() if o})[:10],
             'min_ttl': entry['ttl'],
             'window_sec': FLUX_WINDOW_SEC,
             'sample_addresses': sorted(live)[:10],
