@@ -673,6 +673,35 @@ class TestReleaseWorkflow(unittest.TestCase):
                 if uses.startswith('actions/checkout@'):
                     self.assertIs((step.get('with') or {}).get('persist-credentials'), False)
 
+    # A major of each action checked to run on Node 24 (runs.using in its
+    # action.yml at the pinned commit). GitHub warns on Node 20 actions and is
+    # retiring them: download-artifact v6 still ran on Node 20 and warned on
+    # every release run. Add an action here once its pin has been checked.
+    NODE24_FROM = {
+        'actions/checkout': 5,
+        'actions/setup-python': 6,
+        'actions/upload-artifact': 6,
+        'actions/download-artifact': 7,
+        'actions/upload-pages-artifact': 5,     # composite, of Node 24 actions
+        'actions/deploy-pages': 5,
+        'azure/login': 3,
+    }
+
+    def test_every_action_runs_on_node_24(self):
+        import glob
+        import re
+        root = os.path.dirname(os.path.abspath(__file__))
+        pins = []
+        for path in glob.glob(os.path.join(root, '.github', 'workflows', '*.yml')):
+            with open(path, encoding='utf-8') as f:
+                pins += re.findall(r'uses:\s*([\w.-]+/[\w./-]+)@[0-9a-f]{40}(?:\s+#\s*v(\d+))?',
+                                   f.read())
+        self.assertTrue(pins)
+        for action, major in pins:
+            self.assertIn(action, self.NODE24_FROM, f'{action}: check its Node version')
+            self.assertTrue(major, f'{action}: say its release in a "# vX" comment')
+            self.assertGreaterEqual(int(major), self.NODE24_FROM[action], action)
+
     def test_the_locks_pin_every_package_by_hash(self):
         root = os.path.dirname(os.path.abspath(__file__))
         for lock in ('requirements-build.lock', os.path.join('tools', 'sign-requirements.lock')):

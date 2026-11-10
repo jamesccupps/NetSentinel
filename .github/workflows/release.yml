@@ -88,7 +88,7 @@ jobs:
         with:
           persist-credentials: false
 
-      - uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53  # v6
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
         with:
           name: unsigned
           path: dist
@@ -129,7 +129,7 @@ jobs:
         with:
           persist-credentials: false
 
-      - uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53  # v6
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
         with:
           name: ${{ needs.authenticode.result == 'success' && 'authenticode-signed' || 'unsigned' }}
           path: dist
@@ -179,7 +179,7 @@ jobs:
         with:
           python-version: '3.12'
 
-      - uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53  # v6
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
         with:
           name: verified
           path: dist
@@ -228,7 +228,7 @@ jobs:
         with:
           persist-credentials: false
 
-      - uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53  # v6
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
         with:
           name: NetSentinel-exe
           path: dist
