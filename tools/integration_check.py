@@ -22,6 +22,8 @@ import numpy as np
 
 # Repo root, so `src` is importable when run from tools/
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# tests/, where the shared test support lives
+sys.path.insert(1, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'tests'))
 
 # Isolated HOME + real Scapy where available. Must precede any src import.
 import _test_support  # noqa: E402,F401

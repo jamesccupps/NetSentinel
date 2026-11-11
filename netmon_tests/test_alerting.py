@@ -194,7 +194,7 @@ class _SendCase(unittest.TestCase):
         self.profile = load_profile(EXAMPLE)
         self.recorder = _Recorder()
         self.config = NotifierConfig(server='https://ntfy.internal',
-                                     topic='occ-alerts')
+                                     topic='site-alerts')
         self.notifier = Notifier(self.config, self.profile, opener=self.recorder)
 
 
@@ -208,7 +208,7 @@ class TestSending(_SendCase):
     def test_the_url_is_the_server_and_topic(self):
         self.notifier.send([finding()])
         self.assertEqual(self.recorder.calls[0]['url'],
-                         'https://ntfy.internal/occ-alerts')
+                         'https://ntfy.internal/site-alerts')
 
     def test_a_digest_finding_is_not_pushed(self):
         """A notification for something that can wait is how push gets muted."""

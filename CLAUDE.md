@@ -26,7 +26,7 @@ and what is left. Keep it current during long work (the owner asked for that).
   certificates) are one entry per device and issue, alerted once and capped at
   HIGH; the app's gateway folds repeats in. **Uploads** (`src/upload_history.py`):
   DATA-EXFIL judged per program and destination against 30 days of its history.
-- **Detection corpus** (`test_detection_corpus.py`): the attacks each rule exists
+- **Detection corpus** (`tests/test_detection_corpus.py`): the attacks each rule exists
   for must still alert, and every false alarm fixed so far must stay quiet.
 - **Network audit** (`src/audit.py`): the one active feature, opt-in, see the rules.
 - **Updater** (`src/updater.py`, `tools/sign_release.py`): finds a newer GitHub
@@ -40,7 +40,7 @@ and what is left. Keep it current during long work (the owner asked for that).
 
 ```
 pip install scapy psutil scikit-learn numpy cryptography pyyaml maxminddb "py7zr>=1.0" python-evtx
-python -m unittest discover -s . -p "test_*.py"    # all tests (~2,400, ~1 min, ~65 skips)
+python -m unittest discover -s . -p "test_*.py"    # all tests in tests/ and netmon_tests/ (~2,500, ~1 min, ~65 skips)
 python tools/integration_check.py                  # 14 integration checks
 ruff check --select E9,F63,F7,F82 .                # what CI fails on
 python main.py                                     # GUI + dashboard
@@ -98,7 +98,7 @@ admits `v*` tags only, and the `AZURE_CLIENT_ID`, `AZURE_TENANT_ID` and
 `AZURE_SUBSCRIPTION_ID` secrets name the app registration. No password or key
 is stored. `authenticode` runs only pinned actions, Microsoft's ArtifactSigning
 module and `tools/authenticode.ps1`: nothing from PyPI, never the program
-(`test_authenticode.py` holds the rules). A tag `vX.Y.Z-signtest.N` (the version
+(`tests/test_authenticode.py` holds the rules). A tag `vX.Y.Z-signtest.N` (the version
 in `src/__init__.py`) runs build, authenticode and verify only, for trying a
 signing change; delete it after. Before signing, VirusTotal had the unsigned
 1.14.1 exe at 2/64 (Bkav's hash-named generic and DeepInstinct's ML verdict;
@@ -138,7 +138,7 @@ device names (the hard rules below).
 - Commit messages: a plain subject, then a body that says what was wrong and why
   the change is right. Comments explain why, not what; match the file you are in.
 - Every fix gets a test that would have caught it. Run the full suite before pushing.
-- Quieting a false alarm? Add it to `test_detection_corpus.py`'s false alarms, and
+- Quieting a false alarm? Add it to `tests/test_detection_corpus.py`'s false alarms, and
   check the attacks there still alert. A new rule adds its attack there.
 - Changing a default in `DEFAULT_CONFIG`? Every saved `config.json` keeps the old
   one: add it to `config.STALE_DEFAULTS` if existing installs should get the new.

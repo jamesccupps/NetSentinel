@@ -953,7 +953,7 @@ import. Verified in isolation, in order, and in reverse order.
 
 ## v1.5.0 — Audit remediation
 
-A full review of the codebase (see `AUDIT.md`) found one exploitable security bug,
+A full review of the codebase (see `docs/AUDIT.md`) found one exploitable security bug,
 several defects that silently defeated the detection logic, and a set of documented
 features that were not actually wired up. This release fixes all of them and adds
 regression tests so they stay fixed.

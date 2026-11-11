@@ -4,13 +4,13 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>NetSentinel: network intrusion detection for Windows</title>
-<meta name="description" content="Free, open source network monitor and intrusion detection for Windows: learns your traffic and alerts on beaconing, scans, ARP spoofing and DNS tunnelling.">
+<meta name="description" content="Free, open source network monitor and intrusion detection for Windows: learns your traffic and alerts on beaconing, scans, ARP spoofing and DNS tunneling.">
 <meta name="theme-color" content="#13233a">
 <link rel="canonical" href="https://jamesccupps.github.io/NetSentinel/">
 <meta property="og:type" content="website">
 <meta property="og:site_name" content="James Cupps">
 <meta property="og:title" content="NetSentinel: network monitor and intrusion detection for Windows">
-<meta property="og:description" content="Free and open source: captures your traffic, learns what normal looks like, and alerts on beaconing, scans, spoofing, DNS tunnelling and known-bad hosts. Analysed on your own machine.">
+<meta property="og:description" content="Free and open source: captures your traffic, learns what normal looks like, and alerts on beaconing, scans, spoofing, DNS tunneling and known-bad hosts. Analyzed on your own machine.">
 <meta property="og:url" content="https://jamesccupps.github.io/NetSentinel/">
 <meta property="og:image" content="https://jamesccupps.github.io/NetSentinel/images/social-preview.png">
 <meta property="og:image:width" content="1280">
@@ -109,6 +109,14 @@
     .brand img { width: 52px; height: 52px; }
     .tagline { font-size: 19px; }
   }
+
+  /* More tools from James Cupps */
+  .jc-more-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; }
+  .jc-more-grid a { display: block; text-decoration: none; background: var(--panel, var(--card, transparent)); border: 1px solid var(--line, rgba(127,127,127,.3));
+                    border-radius: 10px; padding: 14px 16px; color: var(--text, inherit); }
+  .jc-more-grid a:hover { border-color: var(--accent, currentColor); }
+  .jc-more-grid b { display: block; color: var(--accent, inherit); }
+  .jc-more-grid span { color: var(--muted, inherit); font-size: 14px; }
 </style>
 </head>
 <body>
@@ -117,7 +125,7 @@
     <div>
       <div class="brand"><img src="images/icon.png" width="64" height="64" alt=""><h1>NetSentinel</h1></div>
       <p class="tagline">Network monitoring and intrusion detection for Windows.</p>
-      <p class="facts">NetSentinel captures your PC's traffic, learns what normal looks like for your network, and alerts you when something isn't: malware calling home on a schedule, port scans, ARP spoofing, DNS tunnelling, data leaving the network, hosts on threat lists. Everything is analysed on your own machine, and nothing about your traffic is sent anywhere.</p>
+      <p class="facts">NetSentinel captures your PC's traffic, learns what normal looks like for your network, and alerts you when something isn't: malware calling home on a schedule, port scans, ARP spoofing, DNS tunneling, data leaving the network, hosts on threat lists. Everything is analyzed on your own machine, and nothing about your traffic is sent anywhere.</p>
       <div class="actions">
         <a class="btn" id="primary" href="https://github.com/jamesccupps/NetSentinel/releases/latest/download/NetSentinel.exe">Download for Windows <small id="primary-note">NetSentinel.exe</small></a>
         <a class="btn ghost" href="https://npcap.com/">Get Npcap</a>
@@ -130,7 +138,7 @@
       <p class="sub"><span id="version">Free and open source (MIT).</span> Windows; live capture needs <a href="https://npcap.com/">Npcap</a> and Administrator. <a href="https://github.com/jamesccupps/NetSentinel/releases">All releases</a></p>
     </div>
     <figure class="demo">
-      <img src="images/dashboard-dark.png" width="1800" height="1000" alt="NetSentinel's dashboard while monitoring: packets, bandwidth, active flows and alert counts, traffic and bandwidth charts, the protocol breakdown, and recent alerts for DGA domains, DNS tunnelling, a known malicious IP, ARP spoofing and a port scan">
+      <img src="images/dashboard-dark.png" width="1800" height="1000" alt="NetSentinel's dashboard while monitoring: packets, bandwidth, active flows and alert counts, traffic and bandwidth charts, the protocol breakdown, and recent alerts for DGA domains, DNS tunneling, a known malicious IP, ARP spoofing and a port scan">
       <figcaption>Made-up traffic on a demo network; the alerts are the real detectors' output.</figcaption>
     </figure>
   </div>
@@ -142,7 +150,7 @@
     <div class="grid four">
       <div class="card"><h3>Beaconing</h3><p>Traffic that keeps a schedule, even with the jitter C2 frameworks add.</p></div>
       <div class="card"><h3>Attacks</h3><p>Port scans, brute force, SYN and ICMP floods.</p></div>
-      <div class="card"><h3>DNS abuse</h3><p>Tunnelling, domain-generation bursts and fast-flux hosting.</p></div>
+      <div class="card"><h3>DNS abuse</h3><p>Tunneling, domain-generation bursts and fast-flux hosting.</p></div>
       <div class="card"><h3>LAN threats</h3><p>ARP spoofing, rogue DHCP and router adverts, LLMNR poisoning, lateral movement.</p></div>
       <div class="card"><h3>Data leaving</h3><p>Uploads far above a host's baseline.</p></div>
       <div class="card"><h3>Known-bad hosts</h3><p>Botnet C2s, malware URLs and attackers from public threat lists.</p></div>
@@ -180,7 +188,7 @@
   <section>
     <h2>Private by design</h2>
     <div class="grid four">
-      <div class="card"><h3>Analysed here</h3><p>Threat lists (abuse.ch, Spamhaus, Emerging Threats, CISA KEV and more) are downloaded whole and matched on your machine. Nothing about your traffic is sent out.</p></div>
+      <div class="card"><h3>Analyzed here</h3><p>Threat lists (abuse.ch, Spamhaus, Emerging Threats, CISA KEV and more) are downloaded whole and matched on your machine. Nothing about your traffic is sent out.</p></div>
       <div class="card"><h3>Careful with what it finds</h3><p>Credentials seen in plaintext protocols are stored masked by default, in an encrypted vault you can lock with your own passphrase, or not scanned for at all.</p></div>
       <div class="card"><h3>A dashboard only you can drive</h3><p>The dashboard binds to localhost by default, refuses requests for other host names, and its controls need a token only the page carries.</p></div>
       <div class="card"><h3>Updates you can trust</h3><p>It checks GitHub once a day, sending only its version. An update installs on your click, and only if the release carries the Ed25519 signature built into NetSentinel and the download matches its signed hash.</p></div>
@@ -214,6 +222,17 @@
   <section>
     <h2>Feedback</h2>
     <p>Found a bug or have an idea? <a href="https://github.com/jamesccupps/NetSentinel/issues">Open an issue</a> on GitHub. Security problems go privately: see <a href="https://github.com/jamesccupps/NetSentinel/blob/main/SECURITY.md">SECURITY.md</a>.</p>
+  </section>
+
+  <section aria-labelledby="jc-more">
+    <h2 id="jc-more">More tools from James Cupps</h2>
+    <div class="jc-more-grid">
+      <a href="https://jamesccupps.github.io/PingerPlot/"><b>PingerPlot</b><span>Continuous traceroute: where on the path it goes wrong</span></a>
+      <a href="https://jamesccupps.github.io/HVAC-Network-Scanner/"><b>HVAC Network Scanner</b><span>Find and identify every device on a building automation network</span></a>
+      <a href="https://jamesccupps.github.io/Light-Beam/"><b>Light Beam</b><span>A self-hosted messenger for your own devices</span></a>
+      <a href="https://jamesccupps.github.io/HW-Blackbox/"><b>HW Blackbox</b><span>Why did the PC switch off? A black box for Windows</span></a>
+      <a href="https://jamesccupps.github.io/"><b>Everything else</b><span>Every project, on one page</span></a>
+    </div>
   </section>
 </main>
 

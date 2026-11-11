@@ -15,6 +15,8 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+# The shared test support lives in tests/ with the app's own tests.
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'tests'))
 import _test_support  # noqa: E402,F401
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))

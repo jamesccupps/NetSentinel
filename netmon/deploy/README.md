@@ -81,7 +81,7 @@ will tell you if it ever transmits anyway.
 ```json
 {
   "ntfy_server": "https://ntfy.your-server.example",
-  "ntfy_topic": "occ-alerts",
+  "ntfy_topic": "site-alerts",
   "ntfy_token": "tk_...",
 
   "smtp_host": "smtp.your-provider.example",

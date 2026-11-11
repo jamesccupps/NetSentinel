@@ -1,12 +1,14 @@
 # NetSentinel
 
-**AI-Powered Network Monitor & Intrusion Detection System**
+**Network monitor and intrusion detection for Windows, with machine-learning anomaly detection**
 
 NetSentinel is a desktop network security application that monitors all traffic on your machine, detects anomalies using machine learning, and alerts you to suspicious activity in real time. It learns your network automatically — no configuration required.
 
 **[⬇ Download NetSentinel.exe](https://github.com/jamesccupps/NetSentinel/releases/latest/download/NetSentinel.exe)** (Windows; live capture needs [Npcap](https://npcap.com/)) · [All releases](https://github.com/jamesccupps/NetSentinel/releases) · [Website](https://jamesccupps.github.io/NetSentinel/)
 
 ![Python](https://img.shields.io/badge/python-3.10+-blue) ![Platform](https://img.shields.io/badge/platform-Windows-lightgrey) ![License](https://img.shields.io/badge/license-MIT-green) [![Tests](https://github.com/jamesccupps/NetSentinel/actions/workflows/test.yml/badge.svg)](https://github.com/jamesccupps/NetSentinel/actions/workflows/test.yml)
+
+![NetSentinel's dashboard while monitoring: packets, bandwidth, active flows and alert counts, traffic and bandwidth charts, the protocol breakdown, and recent alerts for DGA domains, DNS tunneling, a known malicious IP, ARP spoofing and a port scan](site/images/dashboard-dark.png)
 
 ## Key Features
 
@@ -22,7 +24,7 @@ TLS stack stands out even when everything it sends is encrypted.
 
 **Beaconing Detection** — Scores how scheduled a destination's traffic is using quartile skew, median absolute deviation and payload-size consistency. Survives the jitter every C2 framework enables by default, which a coefficient-of-variation test does not.
 
-**Intrusion Detection** — Rule-based detectors: port scans, brute force, SYN/ICMP floods, suspicious DNS and DNS tunnelling, data exfiltration, threat intelligence feeds, and more. Since v1.9.0 they also run on the monitoring PC's own traffic, which they used to skip.
+**Intrusion Detection** — Rule-based detectors: port scans, brute force, SYN/ICMP floods, suspicious DNS and DNS tunneling, data exfiltration, threat intelligence feeds, and more. Since v1.9.0 they also run on the monitoring PC's own traffic, which they used to skip.
 
 **LAN threats** — ARP spoofing (with the gateway's MAC pinned), rogue DHCP and IPv6 router advertisements, LLMNR/NBT-NS/mDNS poisoning, lateral movement over SMB, RDP, WinRM and RPC, uploads far above a host's baseline, new devices with their vendor, cryptocurrency mining, and self-signed or expired certificates.
 
@@ -139,7 +141,7 @@ in a browser or over HTTP.
 The overview's traffic and bandwidth charts cover the last 15 minutes to 24
 hours, kept by NetSentinel itself, so they are full the moment the page opens.
 Point at either one for the time, the average and the peak. Alerts open to their
-evidence as labelled fields with the advice first, devices sort by any column,
+evidence as labeled fields with the advice first, devices sort by any column,
 and the browser tab shows how many alerts are open.
 
 | Endpoint | Returns |
@@ -200,7 +202,9 @@ from source, NetSentinel only says a new version is out.
 
 ## Screenshots
 
-<img width="1897" height="1033" alt="image" src="https://github.com/user-attachments/assets/ced27cca-5803-4f50-b0ed-73edd7dbd627" />
+<img width="1897" height="1033" alt="NetSentinel's desktop window while monitoring" src="https://github.com/user-attachments/assets/ced27cca-5803-4f50-b0ed-73edd7dbd627" />
+
+![The Alerts tab with an ARP spoofing alert opened: the connection, a likely-threat verdict, how to fix it, and the evidence](site/images/alerts.png)
 
 ## Architecture
 
@@ -368,32 +372,32 @@ Worth knowing before you rely on a detector:
 ## Testing
 
 ```bash
-# Everything (about 2,400 tests, NetSentinel and netmon; no network access)
+# Everything (about 2,500 tests: tests/ and netmon_tests/; no network access)
 python -m unittest discover -s . -p "test_*.py"
 
 # Review mode, live detection, LAN threats, file scans, the network audit
-python -m unittest test_review test_live_detection test_lan_threats test_scan_secrets test_audit -v
+python -m unittest tests/test_review.py tests/test_live_detection.py tests/test_lan_threats.py tests/test_scan_secrets.py tests/test_audit.py -v
 
 # Regression tests for the v1.5.0 audit fixes
-python -m unittest test_regressions -v
+python -m unittest tests/test_regressions.py -v
 
 # Coverage for modules the original suite never reached
-python -m unittest test_coverage -v
+python -m unittest tests/test_coverage.py -v
 
 # TLS ClientHello parsing, fingerprinting and hostile input
-python -m unittest test_tls -v
+python -m unittest tests/test_tls.py -v
 
 # Presentation logic (formatting, thresholds, filtering)
-python -m unittest test_presentation -v
+python -m unittest tests/test_presentation.py -v
 
 # Beaconing detection, including the jitter calibration
-python -m unittest test_beaconing -v
+python -m unittest tests/test_beaconing.py -v
 
 # DNS response analysis and its false-positive calibration
-python -m unittest test_dns_analysis -v
+python -m unittest tests/test_dns_analysis.py -v
 
 # Headless mode and the HTTP API
-python -m unittest test_headless -v
+python -m unittest tests/test_headless.py -v
 
 # End-to-end integration checks (real code paths, no capture required)
 python tools/integration_check.py
@@ -441,9 +445,9 @@ NetSentinel/
 │   ├── ipcache.py            # Cached IP address classification
 │   ├── config.py             # Configuration management
 │   └── gui.py                # tkinter dashboard (11 tabs)
-├── test_unit.py              # Core unit tests
-├── test_v140.py              # v1.4.0 module tests
-├── test_regressions.py       # Regression tests for the v1.5.0 audit fixes
+├── tests/                    # Unit and regression tests (test_*.py) and their shared support
+├── netmon_tests/             # Tests for netmon, the site-wide sensor
+├── docs/                     # AUDIT.md (the v1.5.0 audit) and REVIEW.md (the second-pass review)
 ├── tools/
 │   ├── integration_check.py  # End-to-end checks against real code paths
 │   └── simulate_attacks.py   # Traffic generator for manual verification
@@ -460,7 +464,7 @@ Please report vulnerabilities privately — see [SECURITY.md](SECURITY.md).
 NetSentinel runs with Administrator/root privileges and stores captured
 credentials, so treat it as privileged software.
 
-`AUDIT.md` documents a full review of the codebase and the fixes applied in
+`docs/AUDIT.md` documents a full review of the codebase and the fixes applied in
 v1.5.0.
 
 ## License

@@ -153,7 +153,7 @@ the clear; a test fixture must be synthetic, and every fixture in
 
 ```
 export NETMON_NTFY_SERVER=https://ntfy.your-server.example
-export NETMON_NTFY_TOPIC=occ-alerts
+export NETMON_NTFY_TOPIC=site-alerts
 export NETMON_NTFY_TOKEN=tk_...          # or omit, for a server only you can reach
 
 python -m netmon.analyze --profile my-site.yaml --pcap capture.pcapng \
