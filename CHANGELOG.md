@@ -1,12 +1,17 @@
 # NetSentinel Changelog
 
-## Unreleased — Fewer false alarms, and nothing real missed
+## v1.15.0 — Fewer false alarms, and nothing real missed
 
-**2515 unit tests** plus 14 integration checks. A week of 1.14 on the owner's
-network raised 277 alerts for 62 distinct things, nearly all of them routine.
-This release reports each thing once, says why it alerted, and adds a test
+**2515 unit tests** plus 14 integration checks. From 1.10.x or later this
+installs from the Update button. A week of 1.14 on the owner's network raised
+277 alerts for 62 distinct things, nearly all of them routine. This release
+reports each thing once, says why it alerted, and adds a test
 (`test_detection_corpus.py`) that replays the attacks each rule exists for: a
 change that quiets a false alarm and an attack with it fails there.
+
+In the first days after updating, each exposure already on your network is
+alerted once more as it is listed, and each routine upload is reported once
+while its history builds up.
 
 - **Exposures, kept apart from alerts.** A plaintext login, an unencrypted
   service, a device answering SNMP's default community, software with a known
