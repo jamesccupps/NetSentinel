@@ -1,5 +1,38 @@
 # NetSentinel Changelog
 
+## Unreleased — The gateway's threat detections, and two more false alarms
+
+**2544 unit tests** plus 14 integration checks.
+
+- **UniFi's IDS/IPS detections are NetSentinel alerts.** The gateway already
+  sent each "Threat Detected" and "Threat Detected and Blocked" event over the
+  syslog NetSentinel receives, and NetSentinel stored them and did nothing
+  more: the owner learnt of a block from the UniFi phone app. Each is now a
+  **UNIFI-IPS** alert with the signature and its number, the policy, UniFi's
+  risk and action, and what NetSentinel adds:
+  - when the gateway's "incoming" is a reply (from a remote service port to an
+    ephemeral one here), it says this side most likely sent first;
+  - NetSentinel's own alerts about the same address, at the same time;
+  - its check rates a reputation-list hit on a shared Cloudflare, Akamai or
+    Fastly address as likely someone else's listing (LOW), and an attack
+    signature as a likely threat.
+  - A threat event keeps its whole message: the first 400 characters, all
+    that was kept, stopped before the signature.
+- **Discord testing its voice servers is not a known malicious IP.** It pinged
+  25 Cloudflare addresses once each; two are on the CINS Army list of hosts
+  seen attacking sensors, and NetSentinel raised two HIGH alerts. Attacker
+  lists were already skipped for this PC reaching a published cloud or CDN
+  range, but 104.29.0.0/16 is Cloudflare's own and not in its CDN list. With
+  GeoIP on, an address in Cloudflare's, Akamai's or Fastly's own network now
+  counts as shared too. C2 lists still alert there, and so does a listed
+  attacker connecting in.
+- **ICMP Flood is one target hit hard.** It counted ICMP per source across all
+  destinations, so Tailscale timing its 29 relay servers at a few pings a
+  second each was 160 HIGH alerts in four minutes. It now counts per source
+  and target, over 50 in ten seconds, one alert per pair per five minutes. A
+  host pinging 20 or more local addresses in 30 seconds is its own MEDIUM
+  **PING-SWEEP** alert, which the old count caught as a "flood".
+
 ## v1.15.0 — Fewer false alarms, and nothing real missed
 
 **2515 unit tests** plus 14 integration checks. From 1.10.x or later this

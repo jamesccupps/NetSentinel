@@ -161,6 +161,12 @@ class NetSentinelApp:
         from src.upload_history import STATE_FILE as UPLOADS_FILE
         self.ids_engine.uploads.attach(os.path.join(DB_DIR, UPLOADS_FILE))
 
+        # The gateway's IDS/IPS detections, which arrive over syslog, as alerts
+        # (src/gateway_threats.py). Set once the IDS engine exists: their check
+        # asks it who owns the remote address.
+        self._gateway_threats_seen = {}
+        self.syslog.on_threat = self._gateway_threat
+
         # Feature history store (persistent feature vectors for ML training)
         from src.feature_store import FeatureStore
         self.feature_store = FeatureStore(self.config)
@@ -418,6 +424,45 @@ class NetSentinelApp:
             if seen is not None and not seen['report']:
                 return
         self._emit_alert(alert)
+
+    def _gateway_threat(self, record, now=None):
+        """
+        One IDS/IPS detection from the UniFi gateway, as a UNIFI-IPS alert. The
+        same signature between the same two addresses is one alert per ten
+        minutes: a blocked scan arrives as one event per packet.
+        """
+        from src.gateway_threats import sides, threat_alert
+        local, _, remote, _ = sides(record)
+        key = (record.get('rule', ''), record.get('signature_id') or record.get('signature', ''),
+               remote, local)
+        now = now or time.time()
+        seen = self._gateway_threats_seen
+        if now - seen.get(key, 0) < 600:
+            return None
+        seen[key] = now
+        if len(seen) > 2000:
+            for k in sorted(seen, key=seen.get)[:1000]:
+                del seen[k]
+        alert = threat_alert(record)
+        also = self._own_alerts_about(remote, alert.timestamp)
+        if also:
+            alert.evidence['netsentinel_also_saw'] = also
+        self._alert_gateway(alert)
+        return alert
+
+    def _own_alerts_about(self, ip, when, within=600):
+        """NetSentinel's own alerts naming this address within ten minutes, for a gateway event."""
+        manager = getattr(self, 'alert_manager', None)
+        if manager is None or not ip:
+            return []
+        out = []
+        for a in manager.get_alerts(limit=300):
+            if a.rule_id == 'UNIFI-IPS' or abs(a.timestamp - when) > within:
+                continue
+            if ip in (a.src_ip, a.dst_ip, (a.evidence or {}).get('matched_ip')):
+                out.append(f"{a.rule_id} at {time.strftime('%H:%M:%S', time.localtime(a.timestamp))}"
+                           f" ({a.severity})")
+        return out[:5]
 
     def _during_own_audit(self, alert):
         """Whether an audit from this computer is running, or just finished, and

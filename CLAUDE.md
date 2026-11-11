@@ -26,6 +26,8 @@ and what is left. Keep it current during long work (the owner asked for that).
   certificates) are one entry per device and issue, alerted once and capped at
   HIGH; the app's gateway folds repeats in. **Uploads** (`src/upload_history.py`):
   DATA-EXFIL judged per program and destination against 30 days of its history.
+- **Gateway IPS** (`src/gateway_threats.py`): the UniFi gateway's IDS/IPS events,
+  received over syslog (`src/syslog_receiver.py`), become UNIFI-IPS alerts.
 - **Detection corpus** (`tests/test_detection_corpus.py`): the attacks each rule exists
   for must still alert, and every false alarm fixed so far must stay quiet.
 - **Network audit** (`src/audit.py`): the one active feature, opt-in, see the rules.

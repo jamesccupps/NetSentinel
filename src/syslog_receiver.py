@@ -68,7 +68,26 @@ FIELDS = {
     # Seen in real UniFi 10.6 messages: what kind of event, and its own words.
     'category': ('UNIFIcategory',),
     'message': ('msg',),
+    # Seen in UniFi 10.6 and 11.0 IDS/IPS messages ("Threat Detected and Blocked").
+    'risk': ('UNIFIrisk',),
+    'policy_type': ('UNIFIpolicyType',),
+    'direction': ('UNIFIdirection',),
+    'subcategory': ('UNIFIsubCategory',),
+    'gateway': ('UNIFIdeviceName', 'UNIFIhost'),
 }
+
+# The signature's name and number. UniFi's phone app shows both for an IPS
+# event; their CEF key names are not in any message kept so far (RAW_KEPT cut
+# them off), so any key naming a signature counts, and CEF's labelled custom
+# strings (cs1Label=Signature cs1=...) too.
+_SIGNATURE_ID = re.compile(r'(?i)sig(?:nature)?[\W_]?id$|^sid$')
+_SIGNATURE = re.compile(r'(?i)signature')
+# A reverse-DNS zone is not a destination's name: UniFi put "29.104.in-addr.arpa"
+# in the domain of an IPS event about an address in 104.29.0.0/16.
+_REVERSE_ZONE = re.compile(r'(?i)\.(in-addr|ip6)\.arpa\.?$')
+# An IDS/IPS event keeps this much of its message, not RAW_KEPT: they are rare,
+# and the signature comes late in the line.
+RAW_KEPT_THREAT = 2000
 
 
 def parse(text):
@@ -118,8 +137,35 @@ def parse(text):
         out['action'] = 'block' if re.search(r'(?i)block|drop|deny|reject', action) else 'allow'
     if program and program != '-':
         out['program'] = program[:60]
-    out['raw'] = text[:RAW_KEPT]
+    if out.get('domain') and _REVERSE_ZONE.search(out['domain']):
+        del out['domain']
+    out.update(_signature(fields))
+    out['raw'] = text[:RAW_KEPT_THREAT if is_threat(out) else RAW_KEPT]
     return out
+
+
+def _signature(fields):
+    """The IPS signature's name and number from a CEF extension, by key name or label."""
+    out = {}
+    named = dict(fields)
+    for n in range(1, 7):                       # CEF custom strings: csN with csNLabel
+        label = fields.get(f'cs{n}Label', '')
+        if label and fields.get(f'cs{n}'):
+            named[label] = fields[f'cs{n}']
+    for key, value in named.items():
+        if not value or key.endswith('Label'):
+            continue
+        if _SIGNATURE_ID.search(key):
+            out.setdefault('signature_id', str(value)[:20])
+        elif _SIGNATURE.search(key):
+            out.setdefault('signature', str(value)[:200])
+    return out
+
+
+def is_threat(record):
+    """An IDS/IPS detection: UniFi's "Threat Detected" events, by name or policy type."""
+    return (str(record.get('event', '')).startswith('Threat Detected')
+            or bool(re.search(r'(?i)\bIDS\b|\bIPS\b', str(record.get('policy_type', '')))))
 
 
 def _cef_extension(ext):
@@ -240,6 +286,10 @@ class SyslogReceiver:
         self.data_dir = data_dir
         self._clock = clock
         self._names = names           # callable(ip) -> name, e.g. the UniFi inventory's
+        # callable(record), for each IDS/IPS detection: the app raises it as an
+        # alert. They were stored here and nothing more, so the gateway's own
+        # threat detections never reached NetSentinel's alerts.
+        self.on_threat = None
         self._lock = threading.Lock()
         self._clients = OrderedDict()   # ip -> {'dests': {key: [allow, block, last]}, ...}
         self.received = self.dropped_sender = self.dropped_rate = self.stored = 0
@@ -351,6 +401,11 @@ class SyslogReceiver:
         self.last_message = now
         self._count(record)
         self._store(record, now)
+        if self.on_threat is not None and is_threat(record):
+            try:
+                self.on_threat(record)
+            except Exception as e:                  # never let it stop receiving
+                logger.debug("Gateway threat event not raised: %s", e)
         return record
 
     # ─── Per device ─────────────────────────────────────────────────────────

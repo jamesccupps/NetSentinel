@@ -208,6 +208,8 @@ class AlertVerifier:
                 verdict_info = self._verify_arp_spoof(alert, evidence)
             elif rule in ('SYN-FLOOD', 'ICMP-FLOOD'):
                 verdict_info = self._verify_flood(alert, evidence)
+            elif rule == 'UNIFI-IPS':
+                verdict_info = self._verify_gateway_threat(alert, evidence, ids_engine)
             elif rule in ('BAD-PORT', 'BL-PORT'):
                 verdict_info = self._verify_bad_port(alert, evidence)
             elif rule in ('BL-IP-SRC', 'BL-IP-DST'):
@@ -978,6 +980,64 @@ class AlertVerifier:
         return {'verdict': AlertVerdict.LIKELY_THREAT, 'confidence': min(score/4, 1.0),
                 'reasoning': reasoning,
                 'summary': 'Flood attack pattern detected'}
+
+    # ═══════════════════════════════════════════════════════════════
+    # THE GATEWAY'S OWN IDS/IPS (src/gateway_threats.py)
+    # ═══════════════════════════════════════════════════════════════
+    def _verify_gateway_threat(self, alert, evidence, ids_engine):
+        """
+        What the gateway matched, weighed with what NetSentinel knows of the
+        address. A reputation list is a bad name, not an attack in this
+        traffic; on a shared edge address (Cloudflare, Akamai, Fastly) the
+        name is likely someone else's; and a reply to this side's own packet
+        is not someone reaching in. An attack signature stays a likely threat.
+        """
+        reasoning = []
+        score = 1
+        remote = evidence.get('remote_ip', '')
+        what = evidence.get('signature') or evidence.get('policy') or 'a signature'
+        reasoning.append(f"The gateway's IPS matched {what} "
+                         f"({evidence.get('gateway_action', 'action unknown')})")
+        shared = None
+        if ids_engine is not None and remote:
+            ranges = getattr(ids_engine, 'cloud_ranges', None)
+            if ranges is not None and ranges.is_cdn(remote):
+                shared = ranges.provider(remote)
+            elif hasattr(ids_engine, 'edge_network'):
+                shared = ids_engine.edge_network(remote)
+        if evidence.get('reputation_list'):
+            reasoning.append("A reputation list: the address has a bad name; no attack "
+                             "pattern was matched in this traffic")
+            score -= 1
+            if shared:
+                reasoning.append(f"{remote} is {shared}'s, shared by many of its customers: "
+                                 f"the list's entry is likely about someone else")
+                score -= 2
+            if evidence.get('looks_like_a_reply'):
+                reasoning.append("Most likely the reply to a packet this side sent first")
+                score -= 1
+        else:
+            reasoning.append("An attack signature, not a list of addresses")
+            score += 1
+        if self.threat_intel and remote:
+            listed = self.threat_intel.check_ip(remote)
+            if listed and not listed.get('attacker_feed'):
+                reasoning.append(f"Also in NetSentinel's feeds as {listed.get('category')}")
+                score += 2
+        if evidence.get('netsentinel_also_saw'):
+            reasoning.append("NetSentinel saw this address too: "
+                             + ', '.join(evidence['netsentinel_also_saw'][:3]))
+        if score <= -2:
+            verdict, summary = (AlertVerdict.LIKELY_FALSE_POSITIVE,
+                                "A reputation-list hit on a shared address, most likely harmless")
+        elif score <= 1:
+            verdict, summary = (AlertVerdict.INCONCLUSIVE,
+                                "Reported by the gateway; check what this side was doing")
+        else:
+            verdict, summary = (AlertVerdict.LIKELY_THREAT,
+                                "The gateway matched an attack pattern")
+        return {'verdict': verdict, 'confidence': min(abs(score) / 4, 1.0),
+                'reasoning': reasoning, 'summary': summary}
 
     # ═══════════════════════════════════════════════════════════════
     # BAD PORT

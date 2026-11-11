@@ -275,7 +275,7 @@ class TestPacketTime(unittest.TestCase):
             ids.inspect_packet(pkt(ts=base + i * 10, src_ip='203.0.113.70',
                                    dst_ip='192.168.1.5', protocol='ICMP'))
         self.assertNotIn('ICMP-FLOOD', rules(alerts))
-        for i in range(40):
+        for i in range(80):         # a flood is over 50 to one host in 10 seconds
             ids.inspect_packet(pkt(ts=base + 1000 + i * 0.1, src_ip='203.0.113.70',
                                    dst_ip='192.168.1.5', protocol='ICMP'))
         self.assertIn('ICMP-FLOOD', rules(alerts))

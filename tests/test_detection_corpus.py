@@ -26,6 +26,7 @@ import _test_support  # noqa: E402,F401
 from _test_support import reset_config  # noqa: E402
 
 from test_dns_tunnel import encoded, query  # noqa: E402
+from test_gateway_threats import EDGE, _GeoIP, cef  # noqa: E402
 from test_lan_threats import arp, dhcp_payload, name_query, name_response, pkt  # noqa: E402
 from test_snmp_community import snmp, sweep  # noqa: E402
 from test_third_review import T0, DAY, http_get, tcp, udp  # noqa: E402
@@ -96,6 +97,41 @@ class _Pipeline:
             self.forensics.analyze_packet(p)
         self.app._check_forensics_alerts()
         return self.raised
+
+
+def gateway_app(geoip=None):
+    """The app's gateway with the real checker, for the UniFi gateway's IPS events."""
+    from src.alert_verify import AlertVerifier
+    from src.app import NetSentinelApp
+    from src.exposures import ExposureRegistry
+    from src.ids_engine import IDSEngine
+
+    class _Manager:
+        def get_alerts(self, limit=300):
+            return []
+
+    app = NetSentinelApp.__new__(NetSentinelApp)
+    app.raised = []
+    app.ids_engine = IDSEngine(reset_config())
+    app.ids_engine.geoip = geoip
+    app.alert_verifier = AlertVerifier(reset_config())
+    app.baseline_whitelist, app.alert_manager = None, _Manager()
+    app.exposures = ExposureRegistry()
+    app._gateway_threats_seen = {}
+    app._emit_alert = app.raised.append
+    app._alert_gateway = app._verified_alert_gateway
+    return app
+
+
+def ping_engine():
+    from src.ids_engine import IDSEngine
+    alerts = []
+    return IDSEngine(reset_config(), alert_callback=alerts.append), alerts
+
+
+def ping(ids, src, dst, ts):
+    ids.inspect_packet(pkt(ts=ts, src_ip=src, dst_ip=dst, protocol='ICMP', icmp_type=8,
+                           payload_size=56))
 
 
 def ha_token_request():
@@ -219,6 +255,47 @@ class TestAttacksStillAlert(unittest.TestCase):
                                      title="Device answers SNMP's default community")
         self.assertEqual(answer.evidence['severity_before_exposure_cap'], 'CRITICAL')
 
+    def test_a_ping_flood_at_one_host(self):
+        ids, alerts = ping_engine()
+        for i in range(1500):
+            ping(ids, '198.51.100.9', PC, T0 + i * 0.005)
+        self.assertRaised(alerts, 'ICMP-FLOOD', 'HIGH')
+
+    def test_a_ping_sweep_of_the_network(self):
+        ids, alerts = ping_engine()
+        for i in range(2, 100):
+            ping(ids, EVIL, f'192.168.10.{i}', T0 + i * 0.02)
+        self.assertRaised(alerts, 'PING-SWEEP', 'MEDIUM')
+
+    def test_an_exploit_the_gateway_caught(self):
+        from src.syslog_receiver import parse
+        app = gateway_app(geoip=_GeoIP())
+        app._gateway_threat(parse(cef(
+            event='Threat Detected', act='allowed', risk='high', policy='Exploits',
+            src='5.5.5.5', dst=NAS, spt=54012, dpt=8080, proto='TCP',
+            signature=('UNIFIipsSignature', 'ET EXPLOIT Example RCE Attempt'),
+            signature_id=('UNIFIipsSignatureId', '2034647'))))
+        [alert] = self.assertRaised(app.raised, 'UNIFI-IPS', 'HIGH')
+        self.assertEqual(alert.evidence['alert_verification']['verdict'], 'LIKELY_THREAT')
+
+    def test_a_listed_attacker_on_a_shared_edge_reaching_in(self):
+        from src.ids_engine import IDSEngine
+
+        class Intel:
+            def check_ip(self, ip):
+                return ({'feed': 'cins_army', 'category': 'Active Attacker',
+                         'description': 'x', 'attacker_feed': True} if ip == EDGE else None)
+
+            def check_domain(self, domain):
+                return None
+
+        alerts = []
+        ids = IDSEngine(reset_config(), alert_callback=alerts.append, threat_intel=Intel())
+        ids.geoip = _GeoIP()
+        ids.inspect_packet(pkt(src_ip=EDGE, src_port=50000, dst_ip=PC, dst_port=3389,
+                               protocol='TCP', flags='S'))
+        self.assertRaised(alerts, 'THREAT-INTEL-IP', 'HIGH')
+
     def test_an_exposure_back_after_it_was_marked_fixed(self):
         pipeline = _Pipeline()
         pipeline.feed(ha_token_request())
@@ -279,6 +356,41 @@ class TestFalseAlarmsStayQuiet(unittest.TestCase):
                                  server=80, ts=T0 + i))
         self.assertEqual([d for d in f.sensitive_data
                           if d['data_type'] == 'Suspicious User Agent'], [])
+
+    def test_tailscale_timing_its_relay_servers(self):
+        """160 HIGH "ICMP Flood" alerts on 11-10: 29 relays, a few pings a second each."""
+        ids, alerts = ping_engine()
+        relays = [f'45.{i}.{i}.10' for i in range(1, 30)]
+        for tick in range(240 * 5):
+            ping(ids, PC, relays[tick % 29], T0 + tick * 0.2)
+        self.assertEqual([a.rule_id for a in alerts if a.rule_id in ('ICMP-FLOOD', 'PING-SWEEP')],
+                         [])
+
+    def test_discord_testing_its_voice_servers(self):
+        """Two HIGH "Known Malicious IP" on 11-11 and the gateway blocking a reply:
+        Cloudflare addresses on the CINS list, outside Cloudflare's published ranges."""
+        from src.ids_engine import IDSEngine
+        from src.syslog_receiver import parse
+
+        class Intel:
+            def check_ip(self, ip):
+                return ({'feed': 'cins_army', 'category': 'Active Attacker',
+                         'description': 'x', 'attacker_feed': True} if ip == EDGE else None)
+
+            def check_domain(self, domain):
+                return None
+
+        alerts = []
+        ids = IDSEngine(reset_config(), alert_callback=alerts.append, threat_intel=Intel())
+        ids.geoip = _GeoIP()
+        ids.inspect_packet(pkt(src_ip=PC, src_port=63580, dst_ip=EDGE, dst_port=19327,
+                               protocol='UDP', payload_size=8))
+        self.assertNotIn('THREAT-INTEL-IP', [a.rule_id for a in alerts])
+        app = gateway_app(geoip=_GeoIP())
+        app._gateway_threat(parse(cef()))
+        [blocked] = app.raised
+        self.assertEqual(blocked.severity, 'LOW')
+        self.assertEqual(blocked.evidence['alert_verification']['verdict'], 'LIKELY_FALSE_POSITIVE')
 
     def test_home_assistants_token_on_four_days(self):
         """Four CRITICAL alerts for one standing condition; now one, at HIGH."""

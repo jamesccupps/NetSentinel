@@ -22,6 +22,19 @@ from src.ipcache import is_private
 from src.lan_threats import LanThreatMonitor
 from src.upload_history import UploadHistory
 
+# Networks whose addresses are shared edges (anycast proxies, egress), by AS
+# number: an address in one is many customers', so an attacker list's entry for
+# it says little about the one this machine reached. See IDSEngine.edge_network.
+EDGE_NETWORKS = {13335: 'Cloudflare', 20940: 'Akamai', 16625: 'Akamai',
+                 32787: 'Akamai', 54113: 'Fastly'}
+
+# ICMP to one target in 10 seconds above which it is a flood: a ping flood
+# runs to hundreds a second; a VPN's peer checking the path, a few.
+ICMP_FLOOD_PER_10S = 50
+# One host pinging this many local addresses within the window is a sweep.
+PING_SWEEP_HOSTS = 20
+PING_SWEEP_WINDOW = 30
+
 logger = logging.getLogger("NetSentinel.IDS")
 
 
@@ -419,7 +432,8 @@ class IDSEngine:
         self._conn_failures = defaultdict(lambda: deque(maxlen=500))  # {src_ip: [time]}
         self._arp_table = {}  # {ip: mac}
         self._dns_queries_by_ip = defaultdict(lambda: deque(maxlen=200))
-        self._icmp_flood_tracker = defaultdict(lambda: deque(maxlen=200))
+        self._icmp_flood_tracker = defaultdict(lambda: deque(maxlen=200))  # (src, dst)
+        self._ping_targets = {}     # src -> {local address pinged: last time}
 
         # DNS resolution tracking: maps IPs to domains and vice versa
         # When we see DNS query "docs.google.com" followed by a connection to 142.x.x.x,
@@ -577,6 +591,10 @@ class IDSEngine:
             for k in stale:
                 del tracker[k]
 
+        for src in [s for s, hosts in self._ping_targets.items()
+                    if not hosts or now - max(hosts.values()) > 300]:
+            del self._ping_targets[src]
+
         # Prune long-lived suppressions once their window has fully elapsed
         stale_long = [k for k, t in self._long_suppressions.items() if now - t > 7200]
         for k in stale_long:
@@ -719,7 +737,8 @@ class IDSEngine:
                     # or CDN publishes as its own, the address is shared or
                     # recycled and the listing is about someone else.
                     if result.get('attacker_feed') and listed_is_server:
-                        provider = self.cloud_ranges.provider(ip_field)
+                        provider = (self.cloud_ranges.provider(ip_field)
+                                    or self.edge_network(ip_field))
                         if provider:
                             self.cloud_exempted += 1
                             continue
@@ -1302,30 +1321,68 @@ class IDSEngine:
                             category="DoS"
                         ))
 
-        # === Rule 8: ICMP Flood ===
+        # === Rule 8: ICMP Flood, and ping sweeps ===
         # Not from the gateway: during a traceroute or a path-MTU problem it sends
         # this machine streams of time-exceeded and unreachable messages.
+        # A flood is one target hit hard, so it is counted per source and target.
+        # Counted per source, Tailscale timing its 29 relay servers at a few pings
+        # a second each was 160 HIGH "ICMP Flood" alerts in four minutes, six per
+        # server. One host pinging many on the LAN is a sweep: reconnaissance, its
+        # own alert, which the per-source count used to catch as a "flood".
         if pkt_info.protocol == "ICMP" and not (
                 self.net_env and self.net_env.is_gateway(pkt_info.src_ip)):
-            self._icmp_flood_tracker[pkt_info.src_ip].append(now)
-            recent = [t for t in self._icmp_flood_tracker[pkt_info.src_ip]
-                       if now - t < 10]
-            if len(recent) > 30:
+            pair = (pkt_info.src_ip, pkt_info.dst_ip)
+            self._icmp_flood_tracker[pair].append(now)
+            recent = [t for t in self._icmp_flood_tracker[pair] if now - t < 10]
+            if len(recent) > ICMP_FLOOD_PER_10S:
                 alerts.append(self._create_alert(
                     "ICMP-FLOOD", Severity.HIGH,
                     "ICMP Flood Detected",
-                    f"{len(recent)} ICMP packets from {pkt_info.src_ip} in 10 seconds",
+                    f"{len(recent)} ICMP packets from {pkt_info.src_ip} to "
+                    f"{pkt_info.dst_ip} in 10 seconds",
                     pkt_info,
                     evidence={
                         'source_ip': pkt_info.src_ip,
+                        'target_ip': pkt_info.dst_ip,
                         'icmp_count': len(recent),
                         'rate': f"{len(recent) / 10:.0f} pings/sec",
-                        'description': 'High volume of ICMP traffic can indicate a ping flood '
-                            'DoS attack or network scanning.',
+                        'description': 'A high rate of ICMP at one host can be a ping flood '
+                            '(denial of service).',
                         'recommendation': 'Block ICMP from this source if not expected.',
                     },
-                    category="DoS"
+                    category="DoS",
+                    cooldown_key=f"ICMP-FLOOD:{pkt_info.src_ip}:{pkt_info.dst_ip}",
+                    hold_sec=300,
                 ))
+            if pkt_info.icmp_type in (8, -1) and is_private(pkt_info.dst_ip):
+                swept = self._ping_targets.setdefault(pkt_info.src_ip, {})
+                swept[pkt_info.dst_ip] = now
+                if len(swept) > 512:
+                    for ip in sorted(swept, key=swept.get)[:256]:
+                        del swept[ip]
+                hosts = [ip for ip, t in swept.items() if now - t < PING_SWEEP_WINDOW]
+                if len(hosts) >= PING_SWEEP_HOSTS:
+                    alerts.append(self._create_alert(
+                        "PING-SWEEP", Severity.MEDIUM,
+                        "Ping Sweep of the Local Network",
+                        f"{pkt_info.src_ip} pinged {len(hosts)} local addresses in "
+                        f"{PING_SWEEP_WINDOW} seconds",
+                        pkt_info,
+                        evidence={
+                            'source_ip': pkt_info.src_ip,
+                            'hosts_pinged': len(hosts),
+                            'window_seconds': PING_SWEEP_WINDOW,
+                            'sample_targets': sorted(hosts)[:20],
+                            'process': pkt_info.process_name or 'Unknown',
+                            'description': 'One host pinging many on the network is finding '
+                                'which are there, the first step of a scan.',
+                            'recommendation': (f'If {pkt_info.src_ip} is not running a network '
+                                'scanner or monitoring tool you know of, find out what is.'),
+                        },
+                        category="Reconnaissance",
+                        cooldown_key=f"PING-SWEEP:{pkt_info.src_ip}",
+                        hold_sec=600,
+                    ))
 
         # === Rule 9: Suspicious DNS (with full detail) ===
         # Runs on the TLS SNI as well: a connection to a high-abuse TLD is the same
@@ -1509,6 +1566,25 @@ class IDSEngine:
         if info.get('asn') is None:
             return None
         return f"AS{info['asn']} {info.get('as_org', '')}".strip()
+
+    def edge_network(self, ip):
+        """
+        'Cloudflare' (or Akamai, Fastly) when GeoIP puts the address in that
+        network's own AS: anycast edges and egress shared by every customer.
+        Their published ranges cover only the CDN; Discord's voice servers on
+        Cloudflare's 104.29.0.0/16, two of them on the CINS list, are outside
+        them, and testing them was two HIGH "Known Malicious IP" alerts and a
+        blocked reply at the gateway. Not clouds' compute: an address there is
+        one tenant's for as long as it runs, an attacker's own when listed.
+        """
+        geoip = getattr(self, 'geoip', None)
+        if geoip is None or not ip:
+            return None
+        try:
+            asn = geoip.lookup(ip).get('asn')
+        except Exception:
+            return None
+        return EDGE_NETWORKS.get(asn)
 
     def _upload_owner_keys(self, ip):
         """
