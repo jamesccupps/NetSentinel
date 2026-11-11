@@ -365,8 +365,11 @@ function verdictButtons(a) {
     control(`/api/alerts/verdict?id=${encodeURIComponent(a.id)}&verdict=${verdict}`, refreshCurrent);
   };
   return [
-    h('button', { type: 'button', class: 'ack secondary', onclick: send('real') }, 'Real'),
-    h('button', { type: 'button', class: 'ack secondary', onclick: send('false_positive') }, 'False positive'),
+    h('button', { type: 'button', class: 'ack secondary', onclick: send('real'),
+      title: 'Acknowledge it, and record that it was a real issue' }, 'Real'),
+    h('button', { type: 'button', class: 'ack secondary', onclick: send('false_positive'),
+      title: 'Acknowledge it, record that it was not, and stop this rule for its host or domain' },
+    'False positive'),
   ];
 }
 
@@ -448,14 +451,16 @@ async function refreshOverview() {
   const sev = o.alerts.by_severity || {};
   const open = o.alerts.unacknowledged;
   document.title = open ? `(${open}) NetSentinel` : 'NetSentinel';
-  $('cards').replaceChildren(
+  $('cards').replaceChildren(...[
     card('Traffic', fmtPps(o.capture.packets_per_sec), `${fmtNum(o.capture.packets_captured)} packets since start`),
     card('Bandwidth', fmtBps(o.capture.bytes_per_sec), `${fmtBytes(o.capture.bytes_captured)} since start`),
     card('Open alerts', fmtNum(open), `${sev.CRITICAL || 0} critical · ${sev.HIGH || 0} high · ${fmtNum(o.alerts.total)} in all`,
       (sev.CRITICAL || sev.HIGH) && open ? COLOURS.red : open ? COLOURS.yellow : null, '#alerts'),
+    exposureCard(o.exposures),
     card('Threat level', o.threat.label, `anomaly score ${o.threat.score.toFixed(2)}`, COLOURS[o.threat.colour]),
     card('Active flows', fmtNum(o.capture.flows_active), `${fmtNum(o.incidents_active)} open incidents`, null, '#incidents'),
-    card('Devices', fmtNum(o.devices.total), `${fmtNum(o.devices.active_last_hour)} active in the last hour`, null, '#devices'));
+    card('Devices', fmtNum(o.devices.total), `${fmtNum(o.devices.active_last_hour)} active in the last hour`, null, '#devices'),
+  ].filter(Boolean));
 
   refreshHistory().catch(() => {});
   bars($('protocols'), o.protocols.map((p) => ({ name: p.name, value: p.count, fraction: p.fraction })),
@@ -511,6 +516,20 @@ async function refreshAlerts() {
   const data = await api('/api/alerts?limit=1000');
   alertView.alerts = data.alerts;
   renderAlerts();
+  if ($('rule-record').open) await refreshRuleRecord();
+}
+
+async function refreshRuleRecord() {
+  const rules = (await api('/api/rules')).rules;
+  const pct = (r) => (r.false_positive_rate == null ? '—' : `${Math.round(r.false_positive_rate * 100)}%`);
+  const built = table(
+    ['Rule', 'Alerts', 'Real', 'False positive', 'Only acknowledged', 'Open', 'False positive rate'],
+    rules.map((r) => h('tr', null, h('td', null, r.rule_id),
+      ...[r.alerts, r.real, r.false_positive, r.acknowledged_only, r.open]
+        .map((n) => h('td', { class: 'num' }, fmtNum(n))),
+      h('td', { class: 'num' }, pct(r)))));
+  $('rule-table').replaceChildren(...[...built.childNodes]);
+  if (!rules.length) $('rule-table').replaceChildren(h('tr', null, h('td', null, 'No alerts yet.')));
 }
 
 function renderAlerts() {
@@ -532,9 +551,91 @@ function renderAlerts() {
   else if (shown.length > 300) list.append(h('div', { class: 'empty' }, `Showing 300 of ${shown.length}. Narrow the filter to see the rest.`));
 }
 
+// ─── Exposures ───────────────────────────────────────────────────────────
+
+const EXPOSURE_STATES = [['open', 'Open'], ['accepted', 'Accepted'], ['fixed', 'Fixed']];
+const exposureView = { state: 'open', search: '', items: [], controls: false };
+
+function exposureCard(c) {
+  if (!c) return null;
+  const sev = c.open_by_severity || {};
+  return card('Exposures', fmtNum(c.open),
+    `${sev.HIGH || 0} high · ${sev.MEDIUM || 0} medium · ${fmtNum(c.repeats_folded)} repeats folded in`,
+    sev.HIGH ? COLOURS.orange : c.open ? COLOURS.yellow : null, '#exposures');
+}
+
+async function refreshExposures() {
+  const data = await api('/api/exposures');
+  exposureView.items = data.exposures;
+  exposureView.controls = data.controls;
+  renderExposures();
+}
+
+function exposureButtons(x) {
+  if (!exposureView.controls) return null;
+  const set = (state, ask) => (e) => {
+    e.stopPropagation();
+    if (ask && !confirm(ask)) return;
+    control(`/api/exposures/state?id=${encodeURIComponent(x.id)}&state=${state}`, refreshExposures);
+  };
+  const button = (text, state, ask) =>
+    h('button', { type: 'button', class: 'ack secondary', onclick: set(state, ask) }, text);
+  if (x.state === 'open') {
+    return [button('Fixed', 'fixed'),
+      button('Accept', 'accepted', 'Accept this and never be alerted about it again unless it gets worse?')];
+  }
+  return button('Reopen', 'open');
+}
+
+function exposureItem(x) {
+  const key = `exposure|${x.id}`;
+  const where = [x.device_name ? `${x.device} (${x.device_name})` : x.device, x.port ? `port ${x.port}` : null]
+    .filter(Boolean).join(', ');
+  const clients = x.clients.map((ip) => (x.client_names[ip] ? `${ip} (${x.client_names[ip]})` : ip));
+  const details = h('div', { class: 'evidence-wrap', hidden: !expanded.has(key) }, evidenceView({
+    recommendation: x.recommendation, description: x.description, seen_from: clients.join(', '),
+    first_seen: x.time_first, rule: x.rule_id, state: x.state, note: x.note,
+  }));
+  return h('div', {
+    class: `alert sev-${x.severity}${x.state !== 'open' ? ' acked' : ''}`,
+    onclick: (e) => {
+      if (details.contains(e.target) || window.getSelection().toString()) return;
+      details.hidden = !details.hidden;
+      if (details.hidden) expanded.delete(key); else expanded.add(key);
+    },
+  },
+  h('div', { class: 'head' },
+    h('span', { class: `badge ${x.severity}` }, x.severity),
+    h('span', { class: 'title' }, x.title),
+    h('span', { class: 'time', title: new Date(x.last_seen * 1000).toLocaleString() },
+      `seen ${fmtNum(x.count)}× · last ${ago(x.last_seen)}`),
+    h('span', { class: 'actions' }, exposureButtons(x))),
+  h('div', { class: 'meta' }, where),
+  details);
+}
+
+function renderExposures() {
+  const counts = {};
+  for (const x of exposureView.items) counts[x.state] = (counts[x.state] || 0) + 1;
+  $('exposure-states').replaceChildren(...EXPOSURE_STATES.map(([s, name]) => h('button', {
+    type: 'button', class: `chip${exposureView.state === s ? ' on' : ''}`,
+    onclick: () => { exposureView.state = s; renderExposures(); },
+  }, name, h('span', { class: 'n' }, counts[s] || 0))));
+  const q = exposureView.search.toLowerCase();
+  const shown = exposureView.items.filter((x) => x.state === exposureView.state &&
+    (!q || [x.title, x.device, x.device_name, x.description, ...x.clients]
+      .some((f) => String(f || '').toLowerCase().includes(q))));
+  const list = $('exposure-list');
+  list.replaceChildren(...shown.slice(0, 300).map(exposureItem));
+  if (!shown.length) {
+    list.append(h('div', { class: 'empty' },
+      exposureView.state === 'open' ? 'Nothing open. Quiet is good.' : 'None.'));
+  }
+}
+
 // ─── Devices ─────────────────────────────────────────────────────────────
 
-const deviceView = { type: 'ALL', search: '', data: null, sort: { key: 'packets', dir: -1 } };
+const deviceView ={ type: 'ALL', search: '', data: null, sort: { key: 'packets', dir: -1 } };
 
 async function refreshDevices() {
   deviceView.data = await api('/api/devices');
@@ -1170,6 +1271,7 @@ function refreshCurrent() {
 const PAGES = {
   overview: { refresh: () => Promise.all([refreshOverview(), refreshRecentAlerts()]), every: 2000 },
   alerts: { refresh: refreshAlerts, every: 5000 },
+  exposures: { refresh: refreshExposures, every: 10000 },
   devices: { refresh: refreshDevices, every: 5000 },
   incidents: { refresh: refreshIncidents, every: 10000 },
   scan: { refresh: refreshIgnored, every: 10000 },
@@ -1206,6 +1308,8 @@ document.addEventListener('DOMContentLoaded', () => {
   window.addEventListener('resize', () => { charts.pps.draw(); charts.bw.draw(); });
   $('alert-search').addEventListener('input', (e) => { alertView.search = e.target.value; renderAlerts(); });
   $('device-search').addEventListener('input', (e) => { deviceView.search = e.target.value; renderDevices(); });
+  $('exposure-search').addEventListener('input', (e) => { exposureView.search = e.target.value; renderExposures(); });
+  $('rule-record').addEventListener('toggle', () => { if ($('rule-record').open) refreshRuleRecord().catch(() => {}); });
   $('monitor-toggle').addEventListener('click', toggleMonitoring);
   $('ack-all').addEventListener('click', () => control('/api/alerts/ack-all', refreshCurrent));
   $('build-bundle').addEventListener('click', buildBundle);

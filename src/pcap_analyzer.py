@@ -305,7 +305,7 @@ class PcapAnalyzer:
 
         # Generate alerts from forensics findings
         from src.ids_engine import Alert
-        from src.forensics import credential_alert
+        from src.forensics import credential_alert, sensitive_alert
         # The live alert, so a capture is rated as live monitoring rates it. Built
         # here separately, every credential was a CRITICAL "Plaintext Credential",
         # ESET's hashed update login included.
@@ -332,22 +332,9 @@ class PcapAnalyzer:
             alert.evidence['recommendation'] = svc_finding.get('recommendation', '')
             on_alert(alert)
 
+        # The live alert too, with what matched.
         for sensitive in forensics.sensitive_data:
-            alert = Alert(
-                rule_id='FORENSICS-SENSITIVE-DATA',
-                severity=sensitive.get('risk', 'HIGH'),
-                title=f"Sensitive Data in Transit ({sensitive['data_type']})",
-                description=f"{sensitive['data_type']} found in unencrypted traffic",
-                src_ip=sensitive.get('source_ip', ''),
-                dst_ip=sensitive.get('destination_ip', ''),
-                dst_port=sensitive.get('port', 0),
-                category="Data Exposure",
-                evidence={
-                    'data_type': sensitive['data_type'],
-                    'source': f"{sensitive['source_ip']} → {sensitive['destination_ip']}:{sensitive['port']}",
-                },
-            )
-            on_alert(alert)
+            on_alert(sensitive_alert(sensitive))
 
         # Finalize
         elapsed = time.time() - start_time

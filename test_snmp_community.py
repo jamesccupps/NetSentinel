@@ -162,6 +162,22 @@ class TestTheApp(unittest.TestCase):
         alerts.app._check_forensics_alerts()
         self.assertEqual([a.rule_id for a in alerts.raised], ['FORENSICS-CREDENTIAL'])
 
+    def test_the_first_device_asked_that_answers_is_still_reported(self):
+        """
+        The sender's alert names the first device it asked. When that device
+        answered, its alert had the same protocol, ends, port and community, so
+        the app's once-a-day check took it for a repeat and dropped it.
+        """
+        f = forensics()
+        alerts = _Alerts(f)
+        alerts.app._credentials_alerted = {}
+        f.analyze_packet(udp(PC, 50001, DEVICE, 161, snmp()))
+        f.analyze_packet(udp(DEVICE, 161, PC, 50001, snmp(pdu=0xa2), ts=T0 + 0.01))
+        alerts.app._check_forensics_alerts()
+        self.assertEqual(sorted(a.title for a in alerts.raised),
+                         ["Default SNMP community 'public' sent",
+                          "Device answers SNMP's default community 'public'"])
+
 
 if __name__ == '__main__':
     unittest.main()

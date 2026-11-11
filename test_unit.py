@@ -99,16 +99,18 @@ class TestIDSMemoryCleanup(unittest.TestCase):
         self.assertEqual(len(self.ids._alert_cooldowns), 0)
 
     def test_data_transfer_pruning(self):
-        """Data transfer tracker should prune IPs not seen this cycle."""
-        self.ids._data_transfer["10.0.0.1"] = 50000
-        self.ids._data_transfer["10.0.0.2"] = 80000
-        self.ids._active_transfer_ips = {"10.0.0.1"}  # Only .1 was active
+        """Upload counters from an earlier day are closed into the history on cleanup."""
+        now = time.time()
+        uploads = self.ids.uploads
+        uploads.add('', '203.0.113.1', 50000, now - 86400)
+        uploads.add('', '203.0.113.2', 80000, now)
 
         self.ids._last_cleanup = 0
-        self.ids._periodic_cleanup(force=True)
+        self.ids._periodic_cleanup(force=True, now=now)
 
-        self.assertIn("10.0.0.1", self.ids._data_transfer)
-        self.assertNotIn("10.0.0.2", self.ids._data_transfer)
+        self.assertEqual(uploads.today_mb('', '203.0.113.1'), 0)
+        self.assertGreater(uploads.today_mb('', '203.0.113.2'), 0)
+        self.assertIn('unknown|ip:203.0.113.1', uploads._pairs)
 
     def test_dns_to_ip_pruning(self):
         """DNS-to-IP cache should prune entries older than 10 minutes."""
@@ -537,7 +539,7 @@ class TestIDSRules(unittest.TestCase):
         pkt = make_packet(src_ip="192.168.1.10", dst_ip="93.184.216.34",
                           payload_size=1000)
         self.ids.inspect_packet(pkt)
-        self.assertIn("93.184.216.34", self.ids._active_transfer_ips)
+        self.assertGreater(self.ids.uploads.today_mb('', "93.184.216.34"), 0)
 
     def test_data_exfil_ignores_inbound_traffic(self):
         """
@@ -551,8 +553,7 @@ class TestIDSRules(unittest.TestCase):
             self.ids.inspect_packet(make_packet(
                 src_ip="93.184.216.34", dst_ip="192.168.1.10",
                 src_port=80, dst_port=51000, payload_size=1460))
-        self.assertNotIn("192.168.1.10", self.ids._active_transfer_ips)
-        self.assertEqual(self.ids._data_transfer.get("192.168.1.10", 0), 0)
+        self.assertEqual(self.ids.uploads.today_mb('', "192.168.1.10"), 0)
         self.assertFalse([a for a in self.alerts if a.rule_id == "DATA-EXFIL"],
                          "A pure download must not raise DATA-EXFIL")
 
@@ -560,7 +561,7 @@ class TestIDSRules(unittest.TestCase):
         """LAN-to-LAN transfers (NAS backups) are out of scope for this rule."""
         self.ids.inspect_packet(make_packet(
             src_ip="192.168.1.10", dst_ip="192.168.1.50", payload_size=1000))
-        self.assertNotIn("192.168.1.50", self.ids._active_transfer_ips)
+        self.assertEqual(self.ids.uploads.today_mb('', "192.168.1.50"), 0)
 
     def test_dns_resolution_tracking(self):
         """DNS queries should create IP-to-domain mappings."""

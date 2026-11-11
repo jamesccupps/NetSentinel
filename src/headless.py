@@ -48,6 +48,8 @@ Endpoints
     GET /api/overview     what the dashboard's overview shows
     GET /api/status       capture, IDS, ML and alert counters
     GET /api/alerts       recent alerts, ?limit= and ?severity=
+    GET /api/exposures    standing conditions, one per device and issue
+    GET /api/rules        per rule: alerts, and how many were judged real or false
     GET /api/incidents    correlated incidents
     GET /api/devices      discovered devices on the local network
     GET /api/metrics      Prometheus text exposition
@@ -57,7 +59,8 @@ Endpoints
                           upload files and scan them (token required)
     GET /api/audit        the network audit: choices, progress, last report
     POST /api/monitoring/start, /api/monitoring/stop, /api/alerts/ack?id=,
-         /api/alerts/ack-all, /api/alerts/verdict?id=&verdict=, /api/review/bundle,
+         /api/alerts/ack-all, /api/alerts/verdict?id=&verdict=,
+         /api/exposures/state?id=&state=, /api/review/bundle,
          /api/audit/start?network=&gentle=, /api/audit/cancel,
          /api/scan/ignore (JSON body), /api/scan/unignore?id=
                           controls (token required, loopback binds only)
@@ -332,6 +335,8 @@ class HeadlessServer:
             '/api/scan': self._route_scan,
             '/api/status': self._route_status,
             '/api/alerts': self._route_alerts,
+            '/api/exposures': self._route_exposures,
+            '/api/rules': self._route_rules,
             '/api/incidents': self._route_incidents,
             '/api/devices': self._route_devices,
             '/api/metrics': self._route_metrics,
@@ -353,6 +358,7 @@ class HeadlessServer:
             '/api/alerts/ack': self._post_alert_ack,
             '/api/alerts/ack-all': self._post_alerts_ack_all,
             '/api/alerts/verdict': self._post_alert_verdict,
+            '/api/exposures/state': self._post_exposure_state,
             '/api/review/bundle': self._post_review_bundle,
             '/api/audit/start': self._post_audit_start,
             '/api/audit/cancel': self._post_audit_cancel,
@@ -473,6 +479,7 @@ class HeadlessServer:
             'resources': data.get('resources') or {'available': False},
             'review': data.get('review') or {'enabled': False},
             'suppressed_alerts': data.get('suppressed_alerts', 0),
+            'exposures': self._exposure_counts(),
             'alerts': {
                 'total': alerts.get('total', 0),
                 'unacknowledged': alerts.get('unacknowledged', 0),
@@ -554,6 +561,37 @@ class HeadlessServer:
         if history is None:
             return {'interval': 5, 'bucket_sec': 5, 'points': [], 'fields': []}, 'application/json'
         return history.series(minutes), 'application/json'
+
+    def _route_rules(self, params):
+        """Per rule: alerts, and how many people judged real or a false positive."""
+        record = getattr(self.app.alert_manager, 'rule_record', None)
+        return {'rules': record() if record is not None else []}, 'application/json'
+
+    def _exposure_counts(self):
+        exposures = getattr(self.app, 'exposures', None)
+        return exposures.counts() if exposures is not None else None
+
+    def _route_exposures(self, params):
+        """Standing conditions, one per device and issue (src/exposures.py)."""
+        exposures = getattr(self.app, 'exposures', None)
+        return {'exposures': exposures.entries() if exposures is not None else [],
+                'counts': self._exposure_counts(),
+                'controls': self.controls_allowed}, 'application/json'
+
+    def _post_exposure_state(self, params, body, length):
+        """?id=&state=open|accepted|fixed. Accepted: never alerted again unless worse."""
+        self._control(length)
+        exposures = getattr(self.app, 'exposures', None)
+        if exposures is None:
+            raise RequestRefused('Exposures are not tracked here.', 404)
+        try:
+            entry = exposures.set_state(_str_param(params, 'id') or '',
+                                        _str_param(params, 'state') or '')
+        except KeyError:
+            raise RequestRefused('No exposure with that id.', 404) from None
+        except ValueError:
+            raise RequestRefused('state must be open, accepted or fixed.', 400) from None
+        return {'id': entry['id'], 'state': entry['state']}, 200
 
     def _route_sources(self, params):
         """Every threat data source and whether it is in use (src/data_sources.py)."""

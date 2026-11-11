@@ -32,13 +32,19 @@ TLS stack stands out even when everything it sends is encrypted.
 
 **Passive Device Learning** — Automatically discovers and classifies every device on your local network (gateway, workstation, IoT, printer, camera, server) from ARP, DHCP, mDNS, and traffic patterns alone. Remote internet hosts are not treated as devices.
 
+**Exposures** — What is set up unsafely, kept apart from what is happening: plaintext logins, unencrypted services, devices answering SNMP's default community, software with known exploited flaws, bad certificates. Each is one entry per device and issue, alerted on once and rated at most HIGH (CRITICAL is for signs of an attack); it alerts again only if it gets worse or comes back after you mark it fixed. Accept one you have decided to live with. In the **Exposures** tab and on the dashboard.
+
+**Uploads judged by their own history** — Large uploads are tracked per program and destination, by day, for 30 days. A program's first large upload to a destination is reported; after that only a day past four times its biggest. The alert names the program, and verification checks its signature (a signed general-purpose tool such as curl or PowerShell gets no credit for it). Mark an upload real and that pair is reported from the start again.
+
+**Verdicts that teach** — **Real** and **False positive** on an alert acknowledge it and record what it was, in the dashboard and in the desktop app's alert window. A false positive stops that rule for that host or domain. **Rule record** shows, per rule, how many alerts were judged real or false, which is where detection needs work next. `test_detection_corpus.py` replays the attacks each rule exists for and the false alarms fixed so far; a change that quiets an attack fails it.
+
 **Alert Correlation** — Groups related alerts into Incidents. Detects escalation chains (Reconnaissance → Attack, Threat Intel → Exfiltration) and presents them as a single narrative instead of 50 individual alerts.
 
 **Baseline Whitelist** — During the initial learning period *only*, records every domain, IP, port, and periodic pattern as "normal for this network." Once that window closes, learning stops — so nothing an attacker does later can whitelist itself. No hardcoded whitelists.
 
 **PCAP Export** — Ring buffer of raw packets with on-demand "save last 5 minutes" export and continuous recording with auto-rotation. Serious alerts automatically save the traffic that triggered them, narrowed to the hosts involved, so every CRITICAL finding opens in Wireshark. Those captures are kept for good, in their own folder.
 
-**Browser dashboard** — NetSentinel serves a dashboard at `http://127.0.0.1:8737/` while it runs: live traffic and bandwidth charts, protocol and top-talker breakdowns, alerts with severity filters and evidence, devices, incidents, file scanning, the network audit, and what NetSentinel itself costs in CPU and memory. On this computer it can also start and stop monitoring, acknowledge alerts and record verdicts; those controls need the token the page carries and are refused unless the dashboard is bound to localhost. **Open in Browser** in the desktop app opens it; `--headless` runs the same dashboard with no window, as a server.
+**Browser dashboard** — NetSentinel serves a dashboard at `http://127.0.0.1:8737/` while it runs: live traffic and bandwidth charts, protocol and top-talker breakdowns, alerts with severity filters and evidence, devices, incidents, file scanning, the network audit, and what NetSentinel itself costs in CPU and memory. On this computer it can also start and stop monitoring, acknowledge alerts, record verdicts and mark exposures fixed or accepted; those controls need the token the page carries and are refused unless the dashboard is bound to localhost. **Open in Browser** in the desktop app opens it; `--headless` runs the same dashboard with no window, as a server.
 
 **Review mode** — `--review DIR` or Settings → Review mode saves the traffic behind every alert. **Build review bundle** turns it into a small, redacted text bundle (summary, alerts, a line-per-packet digest per group) to upload to Claude chat and ask which alerts are real; no payloads, query strings, cookies, credentials or tokens are written. Import the verdicts back, and confirmed false positives are not raised again.
 
@@ -146,6 +152,8 @@ and the browser tab shows how many alerts are open.
 | `GET /health` | liveness, for a supervisor or container probe |
 | `GET /api/status` | capture, IDS, ML and alert counters |
 | `GET /api/alerts` | recent alerts (`?limit=`, `?severity=`) |
+| `GET /api/exposures` | standing conditions, one per device and issue |
+| `GET /api/rules` | per rule: alerts, and how many were judged real or false |
 | `GET /api/incidents` | correlated incidents |
 | `GET /api/devices` | discovered devices on the local network |
 | `GET /api/metrics` | Prometheus text exposition |
@@ -274,6 +282,8 @@ All runtime data is stored locally in `~/.netsentinel/`:
 | `data/baseline_whitelist.json` | Learned normal domains/IPs/patterns |
 | `data/learned_devices.json` | Passive device inventory |
 | `data/incidents.json` | Correlated incident history |
+| `data/exposures.json` | Exposures, with their state (open, accepted, fixed) |
+| `data/upload_history.json` | MB uploaded per program and destination per day, 30 days |
 | `data/feature_history/` | Daily CSV feature vectors for ML training |
 | `models/` | Empty: the model is retrained from the feature history at each start, never saved |
 | `captures/` | Exported PCAP files and recordings |
@@ -410,6 +420,8 @@ NetSentinel/
 │   ├── alert_verify.py       # Multi-factor alert verification and scoring
 │   ├── alerts.py             # Alert storage, filtering, notification batching
 │   ├── alert_correlator.py   # Groups alerts into incidents with escalation detection
+│   ├── exposures.py          # Standing conditions, one entry per device and issue
+│   ├── upload_history.py     # Uploads per program and destination per day
 │   ├── device_learner.py     # Passive device discovery and classification
 │   ├── baseline_whitelist.py # Learns normal traffic patterns automatically
 │   ├── pcap_writer.py        # Ring buffer + PCAP export + continuous recording

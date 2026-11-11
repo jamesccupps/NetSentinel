@@ -143,6 +143,33 @@ class AlertManager:
                     return True
         return False
 
+    def rule_record(self):
+        """
+        Per rule, over the alerts kept: how many there were, how many a person
+        called real or a false positive, and how many were only acknowledged.
+        false_positive_rate is of the judged ones, None until one is judged.
+        Where to work next on detection is the rule whose rate is highest.
+        """
+        with self._lock:
+            items = list(self._alerts)
+        out = {}
+        for alert in items:
+            row = out.setdefault(alert.rule_id, {
+                'rule_id': alert.rule_id, 'alerts': 0, 'real': 0, 'false_positive': 0,
+                'acknowledged_only': 0, 'open': 0})
+            row['alerts'] += 1
+            verdict = (alert.evidence or {}).get('your_verdict')
+            if verdict in ('real', 'false_positive'):
+                row[verdict] += 1
+            elif alert.acknowledged:
+                row['acknowledged_only'] += 1
+            else:
+                row['open'] += 1
+        for row in out.values():
+            judged = row['real'] + row['false_positive']
+            row['false_positive_rate'] = round(row['false_positive'] / judged, 3) if judged else None
+        return sorted(out.values(), key=lambda r: (-r['alerts'], r['rule_id']))
+
     def acknowledge_all(self):
         """Mark all alerts as acknowledged."""
         with self._lock:

@@ -243,8 +243,9 @@ class TestDataExfilEscalation(unittest.TestCase):
         # Should have exactly 1 alert (at ~100MB)
         exfil_alerts = [a for a in alerts if a.rule_id == "DATA-EXFIL"]
         self.assertEqual(len(exfil_alerts), 1)
-        # Threshold should now be 200MB
-        self.assertEqual(ids._exfil_thresholds.get("5.5.5.5"), 200)
+        # The next is at four times that (it doubled before the per-day history,
+        # which made a day of one routine upload three alerts).
+        self.assertEqual(ids.uploads.next_level('', "5.5.5.5"), 400)
 
 
 class TestTimeOfDayThrottle(unittest.TestCase):

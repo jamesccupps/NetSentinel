@@ -82,6 +82,30 @@ KNOWN_TRANSFER_SERVICES = {
     'fbcdn.net',
 }
 
+# Programs that move data for a living, trusted by name only when the process
+# verifier cannot look at their signature.
+KNOWN_TRANSFER_PROCESSES = {
+    'onedrive.exe', 'dropbox.exe', 'googledrivesync.exe', 'icloudservices.exe',
+    'steam.exe', 'steamwebhelper.exe', 'chrome.exe', 'firefox.exe', 'msedge.exe',
+    'windowsupdate', 'svchost.exe', 'bits',
+}
+
+# General-purpose tools attackers upload with ("living off the land"). Signed by
+# Microsoft or another trusted publisher, so a signature check would vouch for
+# the upload; for these it is no evidence either way.
+UPLOAD_TOOLS = {
+    'powershell.exe', 'pwsh.exe', 'curl.exe', 'bitsadmin.exe', 'certutil.exe',
+    'mshta.exe', 'rundll32.exe', 'regsvr32.exe', 'wscript.exe', 'cscript.exe',
+    'cmd.exe', 'ftp.exe', 'scp.exe', 'sftp.exe', 'tftp.exe', 'rclone.exe',
+    'python.exe', 'pythonw.exe', 'wget.exe', 'nc.exe', 'ncat.exe',
+}
+
+
+def _common_name(subject):
+    """'Tailscale Inc.' from 'CN=Tailscale Inc., O=Tailscale Inc., C=CA'; else the whole."""
+    m = re.search(r'(?:^|,\s*)CN=("?)([^,"]+)\1', str(subject or ''))
+    return m.group(2).strip() if m else str(subject or '').strip()
+
 # Common CDN patterns that generate high-entropy subdomains (not DGA).
 #
 # These used to exonerate tunnels. A pure-hex label is exactly what dnscat2 and
@@ -241,7 +265,10 @@ class AlertVerifier:
             alert.severity = 'LOW'
             alert.title = f"[LIKELY SAFE] {alert.title}"
         elif verdict == AlertVerdict.VERIFIED_THREAT and confidence > 0.5:
-            if alert.severity in ('LOW', 'MEDIUM'):
+            # Not for an exposure (src/exposures.py): confirmed there means the
+            # condition is certainly there, not that it is worse than rated.
+            from src.exposures import exposure_key
+            if alert.severity in ('LOW', 'MEDIUM') and exposure_key(alert) is None:
                 alert.severity = 'HIGH'
             alert.title = f"[CONFIRMED] {alert.title}"
         elif verdict == AlertVerdict.LIKELY_THREAT and confidence > 0.5:
@@ -511,6 +538,47 @@ class AlertVerifier:
     # ═══════════════════════════════════════════════════════════════
     # DATA EXFILTRATION
     # ═══════════════════════════════════════════════════════════════
+    def _exfil_program(self, evidence, process):
+        """
+        The uploading program's signature, through the process verifier: a
+        reason and a score, or None when it cannot be checked (no verifier, no
+        process, or the process gone). Run off the packet path: DATA-EXFIL is
+        verified in the app's deferred queue.
+        """
+        if not self.process_verifier or not process or process == 'Unknown':
+            return None
+        pid = evidence.get('pid') or None
+        try:
+            result = self.process_verifier.verify_process(
+                process_name=process, pid=pid if isinstance(pid, int) and pid > 0 else None)
+        except Exception as e:
+            logger.debug("Program check for %s failed: %s", process, e)
+            return None
+        checks = result.get('checks') or {}
+        sig = checks.get('digital_signature')
+        if not sig or sig.get('skipped'):
+            return None
+        publisher = _common_name(sig.get('publisher', ''))
+        evidence['program_check'] = {
+            'verdict': result.get('verdict', ''),
+            'signed_by': publisher if sig.get('valid') else '',
+            'signature': ('valid' if sig.get('valid') else
+                          'does not verify' if sig.get('signed') else 'none'),
+            'summary': result.get('summary', ''),
+        }
+        if result.get('verdict') == 'MALICIOUS':
+            return {'score': 3, 'reason': f"{process} failed its checks: "
+                                          f"{result.get('summary', '')}"}
+        if sig.get('valid') and checks.get('trusted_publisher'):
+            return {'score': -2, 'reason': f"Sent by {process}, signed by {publisher}"}
+        if sig.get('valid'):
+            return {'score': -1, 'reason': f"Sent by {process}, signed by {publisher} "
+                                           f"(a publisher NetSentinel does not list)"}
+        if sig.get('signed'):
+            return {'score': 3, 'reason': f"{process} carries a signature that does not "
+                                          f"verify: forged or tampered"}
+        return {'score': 1, 'reason': f"{process} is not signed"}
+
     def _verify_data_exfil(self, alert, evidence, ids_engine):
         reasoning = []
         score = 0
@@ -558,21 +626,41 @@ class AlertVerifier:
             reasoning.append("No domain associated with destination — direct IP transfer")
             score += 2
 
-        # Process context
-        known_transfer_procs = {'onedrive.exe', 'dropbox.exe', 'googledrivesync.exe',
-                                'icloudservices.exe', 'steam.exe', 'steamwebhelper.exe',
-                                'chrome.exe', 'firefox.exe', 'msedge.exe',
-                                'windowsupdate', 'svchost.exe', 'bits'}
-        if process.lower() in known_transfer_procs:
-            reasoning.append(f"Transfer by known application: {process}")
+        # Process context: the program's signature where it can be checked, its
+        # name only where it cannot. A name proves nothing; malware borrows them.
+        program = self._exfil_program(evidence, process)
+        if process.lower() in UPLOAD_TOOLS:
+            reasoning.append(f"Sent by {process}, a general-purpose tool attackers upload "
+                             f"with, so its signature says nothing about the upload")
+            score += 1
+        elif program is not None:
+            reasoning.append(program['reason'])
+            score += program['score']
+        elif process.lower() in KNOWN_TRANSFER_PROCESSES:
+            reasoning.append(f"Transfer by known application: {process} (by name; "
+                             f"its signature could not be checked)")
             score -= 2
 
-        # Volume context
-        if mb > 500:
-            reasoning.append(f"Very large transfer: {mb:.0f} MB")
+        # The pair's own history (src/upload_history.py). A known pair is only
+        # reported past four times its biggest day, which is itself worth noting.
+        if evidence.get('first_large_upload') is False:
+            reasoning.append(
+                f"{process or 'This program'} uploads here regularly ("
+                f"{evidence.get('days_with_uploads', 0)} of the last 30 days), but today is "
+                f"past four times its biggest day ({evidence.get('usual_daily_max_mb', 0)} MB)")
+            score += 1
+        elif evidence.get('first_large_upload'):
+            reasoning.append("The first large upload from this program to this "
+                             "destination in 30 days")
+
+        # Volume context, for a day. Before the per-day history, uploads were
+        # judged per burst and +1 at 200 MB, which a day of Tailscale passed
+        # three days in four.
+        if mb > 5000:
+            reasoning.append(f"Very large upload: {mb:.0f} MB today")
             score += 2
-        elif mb > 200:
-            reasoning.append(f"Large transfer: {mb:.0f} MB")
+        elif mb > 1000:
+            reasoning.append(f"Large upload: {mb:.0f} MB today")
             score += 1
 
         # Check threat intel on destination

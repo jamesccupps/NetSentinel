@@ -21,6 +21,8 @@ CAPTURE_EXIT_WAIT = 6
 # stalls the whole capture pipeline exactly when something interesting happens.
 _SLOW_VERIFY_RULES = frozenset({
     'IOC-SUSPICIOUS-PROC', 'IOC-PROC-NAME', 'IOC-LISTEN-PORT', 'IOC-ACTIVE-THREAT',
+    # Its check reads the uploading program's signature (alert_verify._exfil_program).
+    'DATA-EXFIL',
 })
 
 # What NetSentinel's own network audit looks like to its own IDS: a port scan
@@ -133,6 +135,13 @@ class NetSentinelApp:
         self._alert_gateway = self._verified_alert_gateway
         self.suppressed_alerts = 0
 
+        # Standing conditions, one entry per device and issue (src/exposures.py).
+        import os
+        from src.config import DB_DIR
+        from src.exposures import ExposureRegistry, STATE_FILE as EXPOSURES_FILE
+        self.exposures = ExposureRegistry()
+        self.exposures.attach(os.path.join(DB_DIR, EXPOSURES_FILE))
+
         # Bounded so a burst cannot grow without limit; dropping deep verification is
         # survivable because the alert itself has already been delivered.
         import queue
@@ -147,6 +156,10 @@ class NetSentinelApp:
             threat_intel=self.threat_intel,
             net_env=self.net_env,
         )
+        # What each program uploads where, kept across runs so a routine upload is
+        # judged by its own last 30 days and not from scratch each morning.
+        from src.upload_history import STATE_FILE as UPLOADS_FILE
+        self.ids_engine.uploads.attach(os.path.join(DB_DIR, UPLOADS_FILE))
 
         # Feature history store (persistent feature vectors for ML training)
         from src.feature_store import FeatureStore
@@ -391,6 +404,19 @@ class NetSentinelApp:
         except Exception as e:
             logger.debug("Alert verification error: %s", e)
         _note_severity_change(alert, before)
+
+        # A standing condition (plaintext login, unencrypted service, known
+        # exploited software) is one entry under Exposures: alerted once, then
+        # only if it gets worse or comes back after being fixed. See src/exposures.py.
+        exposures = getattr(self, 'exposures', None)
+        if exposures is not None:
+            try:
+                seen = exposures.observe(alert)
+            except Exception as e:
+                logger.debug("Exposure tracking error: %s", e)
+                seen = None
+            if seen is not None and not seen['report']:
+                return
         self._emit_alert(alert)
 
     def _during_own_audit(self, alert):
@@ -492,6 +518,17 @@ class NetSentinelApp:
         if normalised == 'false_positive' and entry is None:
             raise LookupError('This alert names no host or domain to tie a verdict to.')
         alert.evidence['your_verdict'] = normalised
+        # Judged is dealt with: a verdict acknowledges the alert too, so judging
+        # one is one click and the per-rule record (AlertManager.rule_record)
+        # fills up from what people already do.
+        self.alert_manager.acknowledge_alert(alert_id)
+        if normalised == 'real' and alert.rule_id == 'DATA-EXFIL':
+            # Real exfiltration must not become the pair's normal: hold its history,
+            # so it is reported from the floor again and learns nothing from this.
+            engine = self.ids_engine
+            dst = alert.evidence.get('destination_ip') or alert.dst_ip
+            engine.uploads.hold(alert.evidence.get('process'), dst,
+                                engine._upload_owner_keys(dst))
         return entry
 
     def _verification_loop(self, stop):
@@ -636,8 +673,12 @@ class NetSentinelApp:
         the same one somewhere else, is a new alert. Records it either way.
         """
         now = now or time.time()
+        # 'answered' too: a device answering SNMP's default community is recorded
+        # asker to device, the same ends, port and value as the asker's own alert
+        # when that device was the first it asked, and was dropped as its repeat.
         key = tuple(str(cred.get(k, '')) for k in (
-            'protocol', 'credential_type', 'source_ip', 'destination_ip', 'port', 'value'))
+            'protocol', 'credential_type', 'source_ip', 'destination_ip', 'port', 'value')
+        ) + (str((cred.get('extra') or {}).get('answered', '')),)
         seen = self._credentials_alerted
         if now - seen.get(key, 0) < 86400:
             return True
@@ -704,7 +745,7 @@ class NetSentinelApp:
     def _check_forensics_alerts(self):
         """Generate alerts for new forensics findings (credentials, insecure services)."""
         from src.ids_engine import Alert
-        from src.forensics import credential_alert
+        from src.forensics import credential_alert, sensitive_alert
 
         self._check_software_seen()
 
@@ -776,27 +817,16 @@ class NetSentinelApp:
         else:
             new_sensitive = ()
         for item in new_sensitive:
-            item_key = (item['data_type'], item.get('source_ip', ''),
-                       item.get('destination_ip', ''), item.get('port', 0))
+            # By what matched and the site's name where the finding has them: one
+            # site behind several addresses (Microsoft's front ends) was one alert
+            # per address.
+            shown = item.get('evidence') or {}
+            item_key = (item['data_type'], item.get('source_ip', ''), shown.get('matched', ''),
+                        (shown.get('host') or item.get('destination_ip', '')).lower(),
+                        item.get('port', 0))
             if item_key not in self._forensics_alerted_sensitive:
                 self._forensics_alerted_sensitive.add(item_key)
-                alert = Alert(
-                    rule_id='FORENSICS-SENSITIVE-DATA',
-                    severity=item.get('risk', 'HIGH'),
-                    title=f"Sensitive Data in Transit ({item['data_type']})",
-                    description=f"{item['data_type']} found in unencrypted traffic",
-                    src_ip=item.get('source_ip', ''),
-                    dst_ip=item.get('destination_ip', ''),
-                    dst_port=item.get('port', 0),
-                    category="Data Exposure",
-                    evidence={
-                        'data_type': item['data_type'],
-                        'connection': f"{item.get('source_ip', '')} → "
-                                      f"{item.get('destination_ip', '')}:{item.get('port', '')}",
-                        'recommendation': 'Ensure all sensitive data is transmitted over encrypted connections.',
-                    },
-                )
-                self._alert_gateway(alert)
+                self._alert_gateway(sensitive_alert(item))
 
     def _analysis_loop(self, stop):
         """Periodic ML analysis of traffic windows."""
@@ -804,6 +834,9 @@ class NetSentinelApp:
             # Alerts reached disk only when monitoring stopped cleanly, so a crash
             # or a killed process lost the whole session. At most once a minute.
             self.alert_manager.maybe_autosave()
+            exposures = getattr(self, 'exposures', None)
+            if exposures is not None:
+                exposures.save()        # at most every 30 seconds, and only when changed
             try:
                 # Only packets from the interval just elapsed. _packet_window is a
                 # rolling buffer that is never cleared, so passing all of it while
@@ -1068,6 +1101,15 @@ class NetSentinelApp:
             self.alert_correlator.save()
         except Exception as e:
             logger.debug("Alert correlator save error: %s", e)
+        try:
+            self.ids_engine.uploads.flush(time.time())
+            self.ids_engine.uploads.save(force=True)
+        except Exception as e:
+            logger.debug("Upload history save error: %s", e)
+        try:
+            self.exposures.save(force=True)
+        except Exception as e:
+            logger.debug("Exposures save error: %s", e)
         try:
             self.pcap_writer.cleanup()
         except Exception as e:

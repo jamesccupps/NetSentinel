@@ -18,7 +18,16 @@ and what is left. Keep it current during long work (the owner asked for that).
   `src/archives.py`, `src/script_rules.py`, `src/scan_ignore.py`).
 - **Review mode** (`src/review.py`): saves the traffic behind alerts and builds a
   redacted text bundle for Claude chat; verdicts come back as confirmed false
-  positives (`src/baseline_whitelist.py: ConfirmedFalsePositives`).
+  positives (`src/baseline_whitelist.py: ConfirmedFalsePositives`). A verdict
+  given in the dashboard or the desktop alert window acknowledges the alert too;
+  `AlertManager.rule_record` counts them per rule.
+- **Exposures** (`src/exposures.py`): standing conditions (plaintext logins,
+  unencrypted services, devices answering default SNMP, KEV software, bad
+  certificates) are one entry per device and issue, alerted once and capped at
+  HIGH; the app's gateway folds repeats in. **Uploads** (`src/upload_history.py`):
+  DATA-EXFIL judged per program and destination against 30 days of its history.
+- **Detection corpus** (`test_detection_corpus.py`): the attacks each rule exists
+  for must still alert, and every false alarm fixed so far must stay quiet.
 - **Network audit** (`src/audit.py`): the one active feature, opt-in, see the rules.
 - **Updater** (`src/updater.py`, `tools/sign_release.py`): finds a newer GitHub
   release, checks its Ed25519-signed manifest and SHA-256, and hands over to the
@@ -129,6 +138,8 @@ device names (the hard rules below).
 - Commit messages: a plain subject, then a body that says what was wrong and why
   the change is right. Comments explain why, not what; match the file you are in.
 - Every fix gets a test that would have caught it. Run the full suite before pushing.
+- Quieting a false alarm? Add it to `test_detection_corpus.py`'s false alarms, and
+  check the attacks there still alert. A new rule adds its attack there.
 - Changing a default in `DEFAULT_CONFIG`? Every saved `config.json` keeps the old
   one: add it to `config.STALE_DEFAULTS` if existing installs should get the new.
 - Anything that came off the network or out of a scanned file is untrusted:
@@ -149,8 +160,8 @@ device names (the hard rules below).
   hold only the ClientHello; whether that sits within this rule is the owner's
   call, raised with him 2026-10-29.)
 - The HTTP server binds to localhost by default and cannot change configuration.
-  Its controls (start/stop monitoring, acknowledge, verdicts, review bundles,
-  network audits, the scan ignore list) need the per-process token the dashboard
+  Its controls (start/stop monitoring, acknowledge, verdicts, exposure states,
+  review bundles, network audits, the scan ignore list) need the per-process token the dashboard
   page carries and are refused unless the server is bound to loopback; loopback
   binds refuse foreign Host headers. Keep it that way. (Owner's decision,
   2026-10-29; it replaced "cannot change monitoring".)

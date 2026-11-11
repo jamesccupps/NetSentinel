@@ -770,6 +770,48 @@ SUSPICIOUS_USER_AGENTS = [
     b'crawler', b'spider', b'bot/',
 ]
 
+# A browser's own background jobs run it headless and fetch from its maker: Edge
+# sent "HeadlessChrome/... Edg/..." to edge.microsoft.com over plain HTTP, a
+# HIGH "Suspicious User Agent" five days of six. Automation tools send the same
+# user agent, but to the sites they automate, so only the maker's hosts are
+# passed, and they do not use up the once-per-source note for the rest. Edge's
+# token is looked for first: its user agent names Chrome too.
+HEADLESS_BROWSER_MAKERS = (
+    (b'edg/', ('microsoft.com', 'msedge.net', 'bing.com')),
+    (b'chrome/', ('google.com', 'googleapis.com', 'gvt1.com', 'gstatic.com')),
+)
+
+
+def headless_browser_at_home(ua_lower, host):
+    """True for a headless browser asking its own maker, by its user agent and the Host."""
+    if b'headless' not in ua_lower or not host:
+        return False
+    for token, domains in HEADLESS_BROWSER_MAKERS:
+        if token in ua_lower:
+            return host_matches(host, domains)
+    return False
+
+
+def http_request_details(payload):
+    """
+    The Host, method and URL of an HTTP request, for an alert to show. The URL
+    goes through the file scanner's masking, so a token in its path or query
+    is hidden as it is in a scanned file.
+    """
+    host = method = request = ''
+    m = HTTP_HOST_RE.search(payload)
+    if m:
+        host = m.group(1).decode('utf-8', errors='replace')[:200]
+    m = HTTP_REQUEST_RE.search(payload)
+    if m:
+        from src.file_scan import mask_url
+        method = m.group(1).decode('ascii', errors='replace').upper()
+        url = m.group(2).decode('utf-8', errors='replace')[:400]
+        if '://' not in url:
+            url = f"http://{host or 'host'}{url if url.startswith('/') else '/' + url}"
+        request = mask_url(url)[:200]
+    return {'host': host, 'method': method, 'request': request}
+
 # Empty or very short user agents are suspicious
 # (malware often forgets to set UA or uses minimal strings)
 
@@ -968,6 +1010,36 @@ def credential_alert(cred):
                 'Change this password immediately. Switch to the encrypted version '
                 'of this protocol.'),
         },
+    )
+
+
+def sensitive_alert(item):
+    """
+    The alert for one sensitive-data finding, live or in a capture. It shows
+    what the finding put in its 'evidence' (the user agent and the pattern it
+    matched, the host, the request with tokens hidden), which is only what is
+    safe to show. Never the finding's value: for cards, SSNs, cookies and
+    parking credentials that is the data itself, masked or not. Before this an
+    alert said "Suspicious User Agent found in unencrypted traffic" and nothing
+    else, so nobody could tell what had matched.
+    """
+    from src.ids_engine import Alert
+    shown = dict(item.get('evidence') or {})
+    summary = shown.pop('summary', '')
+    src, dst = item.get('source_ip', ''), item.get('destination_ip', '')
+    port = item.get('port', 0)
+    evidence = {'data_type': item['data_type'], 'connection': f"{src} → {dst}:{port}"}
+    evidence.update(shown)
+    evidence.setdefault('recommendation',
+                        'Ensure all sensitive data is transmitted over encrypted connections.')
+    return Alert(
+        rule_id='FORENSICS-SENSITIVE-DATA',
+        severity=item.get('risk', 'HIGH'),
+        title=f"Sensitive Data in Transit ({item['data_type']})",
+        description=summary or f"{item['data_type']} found in unencrypted traffic",
+        src_ip=src, dst_ip=dst, dst_port=port,
+        category="Data Exposure",
+        evidence=evidence,
     )
 
 
@@ -2124,16 +2196,29 @@ class NetworkForensics:
             dedup_key = (src, sig.decode('ascii'))
             if dedup_key not in self._http_ua_alerted:
                 self._http_ua_alerted.add(dedup_key)
-                host = ''
-                host_match = HTTP_HOST_RE.search(payload)
-                if host_match:
-                    host = host_match.group(1).decode('utf-8', errors='replace')
+                evidence = self._ua_evidence(ua_str, sig.decode('ascii'), payload, src)
                 self._add_sensitive_data('Scripted HTTP Client',
                     f'Library or command-line HTTP client: "{ua_str[:80]}" → '
-                    f'{host or dst}:{port}',
-                    src, dst, port, ts, risk=risk)
+                    f'{evidence["host"] or dst}:{port}',
+                    src, dst, port, ts, risk=risk, evidence=evidence)
             return True
         return False
+
+    @staticmethod
+    def _ua_evidence(ua_str, matched, payload, src, with_request=False):
+        """What a user-agent alert shows: the user agent, what in it matched, and where it went."""
+        details = http_request_details(payload)
+        evidence = {'user_agent': ua_str[:200], 'matched': matched,
+                    'host': details['host'], 'method': details['method']}
+        if with_request:
+            evidence['request'] = details['request']
+        evidence['summary'] = (f'User agent "{ua_str[:120]}" matched "{matched}", in a '
+                               f'request to {details["host"] or "a server that named no host"}')
+        evidence['recommendation'] = (
+            f'Find which program on {src} sent it. A tool or browser you run yourself '
+            f'explains it; if nothing there should, that machine may be running something '
+            f'you did not install.')
+        return evidence
 
     def _inspect_http_request(self, pkt_info, payload, ts, src, dst, port):
         """
@@ -2166,22 +2251,16 @@ class NetworkForensics:
                     if dedup_key not in self._http_ua_alerted:
                         self._http_ua_alerted.add(dedup_key)
 
-                        # Get request details
-                        host = ''
-                        host_match = HTTP_HOST_RE.search(payload)
-                        if host_match:
-                            host = host_match.group(1).decode('utf-8', errors='replace')
-                        url = ''
-                        url_match = HTTP_REQUEST_RE.search(payload)
-                        method = ''
-                        if url_match:
-                            method = url_match.group(1).decode('utf-8', errors='replace')
-                            url = url_match.group(2).decode('utf-8', errors='replace')[:200]
+                        evidence = self._ua_evidence(
+                            ua_str, bad_ua.decode('utf-8', errors='replace'), payload, src,
+                            with_request=True)
+                        host, method = evidence['host'], evidence['method']
+                        url = evidence['request']
 
                         self._add_sensitive_data('Suspicious User Agent',
                             f'Malicious user agent detected: "{ua_str[:80]}" '
-                            f'({method} {host}{url[:60]})',
-                            src, dst, port, ts, risk='CRITICAL')
+                            f'({method} {url[:80]})',
+                            src, dst, port, ts, risk='CRITICAL', evidence=evidence)
 
                         self.security_findings.append({
                             'type': 'malicious_user_agent',
@@ -2210,24 +2289,22 @@ class NetworkForensics:
                     break  # Only match first
 
             # Check for SUSPICIOUS user agents (HIGH), after the scripted-client
-            # tier (LOW or MEDIUM)
+            # tier (LOW or MEDIUM) and a headless browser asking its own maker
             else:
-                for sus_ua in ([] if self._note_scripted_client(
-                        ua_lower, ua_str, payload, src, dst, port, ts)
-                        else SUSPICIOUS_USER_AGENTS):
+                for sus_ua in ([] if headless_browser_at_home(ua_lower, request_host)
+                               or self._note_scripted_client(
+                                   ua_lower, ua_str, payload, src, dst, port, ts)
+                               else SUSPICIOUS_USER_AGENTS):
                     if sus_ua in ua_lower:
                         dedup_key = (src, sus_ua.decode('utf-8', errors='replace'))
                         if dedup_key not in self._http_ua_alerted:
                             self._http_ua_alerted.add(dedup_key)
-
-                            host = ''
-                            host_match = HTTP_HOST_RE.search(payload)
-                            if host_match:
-                                host = host_match.group(1).decode('utf-8', errors='replace')
-
+                            evidence = self._ua_evidence(
+                                ua_str, sus_ua.decode('utf-8', errors='replace'), payload, src)
                             self._add_sensitive_data('Suspicious User Agent',
-                                f'Uncommon user agent: "{ua_str[:80]}" → {host or dst}:{port}',
-                                src, dst, port, ts, risk='HIGH')
+                                f'Uncommon user agent: "{ua_str[:80]}" → '
+                                f'{evidence["host"] or dst}:{port}',
+                                src, dst, port, ts, risk='HIGH', evidence=evidence)
                         break
 
                 # Check for empty/very short user agent (suspicious)
@@ -2239,7 +2316,9 @@ class NetworkForensics:
                             self._add_sensitive_data('Suspicious User Agent',
                                 f'Unusually short user agent: "{ua_str}" — '
                                 f'may indicate malware or automated tool',
-                                src, dst, port, ts, risk='MEDIUM')
+                                src, dst, port, ts, risk='MEDIUM',
+                                evidence=self._ua_evidence(
+                                    ua_str, 'shorter than 5 characters', payload, src))
         else:
             # No User-Agent header at all (many attack tools omit it)
             # But skip known software update services that legitimately omit UA
@@ -2250,9 +2329,15 @@ class NetworkForensics:
                         self._http_ua_alerted.add(dedup_key)
                         # LOW: plenty of updaters and devices send none, and on
                         # its own it shows nothing being exposed.
+                        details = http_request_details(payload)
                         self._add_sensitive_data('Missing User Agent',
                             f'HTTP request with no User-Agent header from {src} → {dst}:{port}',
-                            src, dst, port, ts, risk='LOW')
+                            src, dst, port, ts, risk='LOW', evidence={
+                                'matched': 'no User-Agent header',
+                                'host': details['host'], 'method': details['method'],
+                                'summary': (f'An HTTP request to '
+                                            f'{details["host"] or dst} had no User-Agent header'),
+                            })
 
         # ─── Check URL for attack patterns ────────────────────
         # Only scan the request line and headers, not response bodies
@@ -2277,10 +2362,20 @@ class NetworkForensics:
                         if host_match:
                             host = host_match.group(1).decode('utf-8', errors='replace')
                         url = url_bytes.decode('utf-8', errors='replace')[:200]
+                        details = http_request_details(payload)
 
                         self._add_sensitive_data('HTTP Attack Pattern',
                             f'{attack_name}: {src} → {host or dst}:{port} ({url[:80]})',
-                            src, dst, port, ts, risk='CRITICAL')
+                            src, dst, port, ts, risk='CRITICAL', evidence={
+                                'matched': attack_name, **details,
+                                'summary': (f'{attack_name} in a request from {src} to '
+                                            f'{host or dst}:{port}'),
+                                'recommendation': (
+                                    f'Find what on {src} sent it. A vulnerability scanner '
+                                    f'you ran explains it; otherwise treat {src} as '
+                                    f'compromised, and check {host or dst} for signs it '
+                                    f'worked.'),
+                            })
 
                         self.security_findings.append({
                             'type': 'http_attack',
@@ -2731,8 +2826,13 @@ class NetworkForensics:
             except Exception as e:
                 logger.debug("ForensicsDB credential store error: %s", e)
 
-    def _add_sensitive_data(self, data_type, value, src, dst, port, ts, risk='HIGH'):
-        """Record sensitive data found in transit."""
+    def _add_sensitive_data(self, data_type, value, src, dst, port, ts, risk='HIGH',
+                            evidence=None):
+        """
+        Record sensitive data found in transit. value may be the data itself
+        (a card's last digits, a cookie) and stays out of alerts; evidence is
+        what the alert may show, and 'summary' in it becomes its description.
+        """
         finding = {
             'timestamp': ts,
             'time_str': datetime.fromtimestamp(ts).strftime('%Y-%m-%d %H:%M:%S') if ts else '',
@@ -2743,6 +2843,8 @@ class NetworkForensics:
             'port': port,
             'risk': risk,
         }
+        if evidence:
+            finding['evidence'] = dict(evidence)
         self.sensitive_data.append(finding)
         self._add_timeline_event(ts, 'sensitive_data',
             f"SENSITIVE DATA: {data_type} detected in transit — "

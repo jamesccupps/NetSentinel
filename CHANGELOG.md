@@ -1,5 +1,60 @@
 # NetSentinel Changelog
 
+## Unreleased — Fewer false alarms, and nothing real missed
+
+**2515 unit tests** plus 14 integration checks. A week of 1.14 on the owner's
+network raised 277 alerts for 62 distinct things, nearly all of them routine.
+This release reports each thing once, says why it alerted, and adds a test
+(`test_detection_corpus.py`) that replays the attacks each rule exists for: a
+change that quiets a false alarm and an attack with it fails there.
+
+- **Exposures, kept apart from alerts.** A plaintext login, an unencrypted
+  service, a device answering SNMP's default community, software with a known
+  exploited flaw or a bad certificate is a standing condition, not an event.
+  248 of the week's alerts were 43 of these repeated: Home Assistant's token
+  over plain HTTP on four days, an energy monitor's Modbus port as CRITICAL.
+  - Each is now one entry per device and issue, in a new **Exposures** tab and
+    dashboard page, with when it was first and last seen and how often.
+  - A new one raises one alert; a repeat only updates its entry. It alerts
+    again only if it gets worse, or comes back after you mark it fixed.
+    **Accept** one you have decided to live with.
+  - Exposures are rated at most HIGH. CRITICAL is for signs of an attack, and
+    verification no longer raises a confirmed MEDIUM exposure to HIGH.
+- **Large uploads judged by their own history.** The rule counted bytes per
+  address and started again at 100 MB every day, so Tailscale to one peer,
+  Chrome Remote Desktop and Claude were 13 HIGH alerts. It now keeps 30 days of
+  uploads per program and destination (a service's many addresses share one
+  history through the domain this PC's own DNS lookups gave them). A program's
+  first large upload to a destination is reported; after that only a day past
+  four times its biggest, and within a day at four times each level, not two.
+  - The check looks at the uploading program's signature. A signed program
+    counts in its favour, an unsigned one against, a broken signature heavily
+    against; general-purpose tools attackers upload with (curl, PowerShell,
+    certutil, rclone and the like) get no credit for being signed.
+  - Volume counts only past 1 GB and 5 GB a day. A VPN to its peer is no longer
+    a "LIKELY THREAT" because it moved 400 MB.
+  - Marking an upload **Real** holds that pair: it is reported from 100 MB
+    again and learns nothing.
+- **Every alert says what it matched.** "Suspicious User Agent found in
+  unencrypted traffic" now names the user agent, what in it matched, and the
+  site (with any token in the request hidden). One site behind several
+  addresses is one alert. Card numbers, SSNs, cookies and parking credentials
+  never reach an alert, only what is safe to show.
+  - Those five HIGH user-agent alerts were Edge running headless for its own
+    background job, fetching from edge.microsoft.com. A headless browser asking
+    its own maker is no longer flagged, and does not use up the once-per-source
+    note, so automation to any other site still is.
+- **A verdict acknowledges, and each rule keeps a record.** Real and False
+  positive acknowledge the alert as well, in the dashboard and now in the
+  desktop app's alert window, which had no way to judge an alert before.
+  **Rule record** (desktop) and **How each rule has done** (dashboard) show per
+  rule how many alerts were judged real or false: where detection needs work.
+- **A device answering SNMP's default community was missed** when it was the
+  first device the sender asked: its alert matched the sender's in the app's
+  once-a-day check and was dropped as a repeat.
+- New dashboard endpoints: `GET /api/exposures`, `GET /api/rules`, and the
+  token-gated `POST /api/exposures/state?id=&state=open|accepted|fixed`.
+
 ## v1.14.2 — Signed by James Cupps
 
 `NetSentinel.exe` is now code-signed, so Windows, and the administrator prompt

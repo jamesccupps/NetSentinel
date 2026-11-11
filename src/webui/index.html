@@ -19,6 +19,7 @@
   <nav class="tabs" id="tabs">
     <a href="#overview" data-page="overview">Overview</a>
     <a href="#alerts" data-page="alerts">Alerts</a>
+    <a href="#exposures" data-page="exposures">Exposures</a>
     <a href="#devices" data-page="devices">Devices</a>
     <a href="#incidents" data-page="incidents">Incidents</a>
     <a href="#scan" data-page="scan">Scan Files</a>
@@ -69,7 +70,25 @@
       <button type="button" id="build-bundle" class="secondary" hidden>Build review bundle</button>
     </div>
     <p id="bundle-result" class="hint" hidden></p>
+    <details class="panel" id="rule-record">
+      <summary>How each rule has done</summary>
+      <p class="hint">Real and False positive acknowledge an alert and record what it was.
+        A rule with many false positives is where detection needs work.</p>
+      <div class="table-wrap"><table id="rule-table"></table></div>
+    </details>
     <div id="alert-list" class="alert-list"></div>
+  </section>
+
+  <section class="page" id="page-exposures" hidden>
+    <p class="hint">What is set up unsafely on your network: plaintext logins, unencrypted
+      services, software with known exploited flaws. Each is listed once and alerted once;
+      it is alerted again only if it gets worse, or comes back after you mark it fixed.
+      Accept one you have decided to live with.</p>
+    <div class="toolbar">
+      <div class="chips" id="exposure-states"></div>
+      <input type="search" id="exposure-search" placeholder="Filter by title, IP or name">
+    </div>
+    <div id="exposure-list" class="alert-list"></div>
   </section>
 
   <section class="page" id="page-devices" hidden>

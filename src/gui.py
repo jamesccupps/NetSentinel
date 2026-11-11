@@ -261,7 +261,9 @@ class MiniChart(tk.Canvas):
 class AlertDetailWindow:
     """Popup window showing full alert details with domain resolution and structured analysis."""
 
-    def __init__(self, parent, alert_dict):
+    def __init__(self, parent, alert_dict, actions=None):
+        self._actions = actions
+        self._alert_dict = alert_dict
         self.win = tk.Toplevel(parent)
         self.win.title(f"Alert Detail — {alert_dict.get('title', '')}")
         self.win.geometry("750x700")
@@ -475,12 +477,59 @@ class AlertDetailWindow:
             rem_card.pack(fill='x', pady=(0, 6))
             self._render_evidence(rem_card, remaining)
 
-        # ─── Close Button ────────────────────────────────────────
-        close_btn = tk.Button(self.win, text="Close", font=('Segoe UI', 9),
+        # ─── Judge it, acknowledge it, close ─────────────────────
+        buttons = tk.Frame(self.win, bg=COLORS['bg_dark'])
+        buttons.pack(pady=8)
+        self._judgement = tk.Label(buttons, text='', font=('Segoe UI', 9),
+                                   fg=COLORS['text_dim'], bg=COLORS['bg_dark'])
+        self._judgement.pack(side='left', padx=8)
+        self._judge_buttons = []
+        if actions is not None and alert_dict.get('id') is not None:
+            mine = evidence.get('your_verdict')
+            if mine:
+                self._judgement.config(
+                    text=f"You marked this {'a false positive' if mine == 'false_positive' else 'real'}.")
+            else:
+                for text, verdict, tip in (
+                        ("Real", 'real', None),
+                        ("False positive", 'false_positive', None),
+                        ("Acknowledge", None, None)):
+                    b = tk.Button(buttons, text=text, font=('Segoe UI', 9),
+                                  bg=COLORS['bg_input'], fg=COLORS['text'], relief='flat',
+                                  padx=12, pady=4, cursor='hand2',
+                                  command=lambda v=verdict: self._judge(v))
+                    b.pack(side='left', padx=4)
+                    self._judge_buttons.append(b)
+        close_btn = tk.Button(buttons, text="Close", font=('Segoe UI', 9),
                              bg=COLORS['bg_input'], fg=COLORS['text'],
                              relief='flat', padx=16, pady=4, cursor='hand2',
                              command=self.win.destroy)
-        close_btn.pack(pady=8)
+        close_btn.pack(side='left', padx=4)
+
+    def _judge(self, verdict):
+        """Real or false positive (which also acknowledge it), or only acknowledge."""
+        alert_id = self._alert_dict.get('id')
+        if verdict == 'false_positive' and not messagebox.askyesno(
+                "False positive",
+                f"Never alert on {self._alert_dict.get('rule_id', 'this rule')} for this "
+                f"host or domain again?", parent=self.win):
+            return
+        try:
+            if verdict is None:
+                self._actions.acknowledge(alert_id)
+                said = "Acknowledged."
+            else:
+                self._actions.verdict(alert_id, verdict)
+                said = ("Marked a false positive and acknowledged."
+                        if verdict == 'false_positive' else "Marked real and acknowledged.")
+        except LookupError as e:
+            said = str(e)
+        except Exception as e:
+            logger.debug("Alert judgement failed: %s", e)
+            said = f"Could not record that: {e}"
+        self._judgement.config(text=said)
+        for b in self._judge_buttons:
+            b.config(state='disabled')
 
     def _render_evidence(self, parent, items):
         """Render a list of (key, value) evidence pairs."""
@@ -520,12 +569,13 @@ class AlertDetailWindow:
 
 class AlertListItem(tk.Frame):
     """Single alert row in the alerts panel. Click to expand details."""
-    def __init__(self, parent, alert_dict, **kwargs):
+    def __init__(self, parent, alert_dict, actions=None, **kwargs):
         kwargs.setdefault('bg', COLORS['bg_panel'])
         kwargs.setdefault('cursor', 'hand2')
         super().__init__(parent, **kwargs)
 
         self._alert_dict = alert_dict
+        self._actions = actions
         sev = alert_dict.get('severity', 'LOW')
         color = SEVERITY_COLORS.get(sev, COLORS['text_dim'])
 
@@ -621,7 +671,21 @@ class AlertListItem(tk.Frame):
 
     def _on_click(self, event=None):
         """Open the detail popup."""
-        AlertDetailWindow(self.winfo_toplevel(), self._alert_dict)
+        AlertDetailWindow(self.winfo_toplevel(), self._alert_dict, actions=self._actions)
+
+
+class AlertActions:
+    """What the alert detail window may do to a stored alert, through the app."""
+
+    def __init__(self, app):
+        self.app = app
+
+    def acknowledge(self, alert_id):
+        return self.app.alert_manager.acknowledge_alert(alert_id)
+
+    def verdict(self, alert_id, verdict):
+        """Real or false_positive; NetSentinelApp.record_verdict acknowledges it too."""
+        return self.app.record_verdict(alert_id, verdict)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -677,6 +741,7 @@ class NetSentinelGUI:
         self._lifecycle_thread = None
         self._lifecycle_was_start = False
         self._alert_widgets = []
+        self._alert_actions = AlertActions(app)
         # gui.max_log_lines was declared in config but never read.
         self._max_log_lines = max(20, int(
             self.app.config.get('gui', 'max_log_lines', default=500)))
@@ -833,6 +898,11 @@ class NetSentinelGUI:
         self._tab_alerts = StyledFrame(self.notebook)
         self.notebook.add(self._tab_alerts, text='  🔔  Alerts  ')
         self._build_alerts_tab(self._tab_alerts)
+
+        # Tab 2b: Exposures (standing conditions, one per device and issue)
+        self._tab_exposures = StyledFrame(self.notebook)
+        self.notebook.add(self._tab_exposures, text='  🛡  Exposures  ')
+        self._build_exposures_tab(self._tab_exposures)
 
         # Tab 3: Packet Log
         self._tab_packets = StyledFrame(self.notebook)
@@ -1000,6 +1070,15 @@ class NetSentinelGUI:
                  command=lambda: self.app.alert_manager.acknowledge_all()
                  ).pack(side='right', padx=4)
 
+        tk.Button(toolbar, text="📊  Rule record", font=('Segoe UI', 8),
+                 bg=COLORS['bg_input'], fg=COLORS['text_dim'],
+                 relief='flat', cursor='hand2',
+                 command=self._show_rule_record).pack(side='right', padx=4)
+
+        tk.Label(toolbar, text="Open an alert to mark it real or a false positive.",
+                 font=('Segoe UI', 8), fg=COLORS['text_dim'],
+                 bg=COLORS['bg_dark']).pack(side='left', padx=12)
+
         # Scrollable alerts list
         container = tk.Frame(parent, bg=COLORS['bg_dark'])
         container.pack(fill='both', expand=True, padx=8, pady=(0, 8))
@@ -1032,7 +1111,7 @@ class NetSentinelGUI:
         try:
             historical = self.app.alert_manager.get_alerts(limit=200)
             for alert in reversed(historical):  # oldest first so newest ends up on top
-                item = AlertListItem(self._alerts_scroll_frame, alert.to_dict())
+                item = AlertListItem(self._alerts_scroll_frame, alert.to_dict(), actions=self._alert_actions)
                 item.pack(fill='x', padx=4, pady=2)
                 self._alert_widgets.insert(0, item)
         except Exception as e:
@@ -3156,7 +3235,7 @@ class NetSentinelGUI:
             # Still store the widget reference for later filter changes,
             # but don't display it now
             pass
-        item = AlertListItem(self._alerts_scroll_frame, alert.to_dict())
+        item = AlertListItem(self._alerts_scroll_frame, alert.to_dict(), actions=self._alert_actions)
         item.pack(fill='x', padx=4, pady=2)
         self._alert_widgets.insert(0, item)
 
@@ -3183,7 +3262,7 @@ class NetSentinelGUI:
             self.app.alert_manager.get_alerts(limit=500), severity=sev_filter)[:200]
 
         for alert in reversed(alerts):  # oldest first so newest on top
-            item = AlertListItem(self._alerts_scroll_frame, alert.to_dict())
+            item = AlertListItem(self._alerts_scroll_frame, alert.to_dict(), actions=self._alert_actions)
             item.pack(fill='x', padx=4, pady=2)
             self._alert_widgets.insert(0, item)
 
@@ -3193,6 +3272,32 @@ class NetSentinelGUI:
             for w in self._alert_widgets:
                 w.destroy()
             self._alert_widgets.clear()
+
+    def _show_rule_record(self):
+        """Per rule: alerts, and how many were judged real or a false positive."""
+        win = tk.Toplevel(self.root)
+        win.title("Rule record")
+        win.geometry("760x420")
+        win.configure(bg=COLORS['bg_dark'])
+        tk.Label(win, text="Real and False positive (in an alert's window) acknowledge it and "
+                           "record what it was. A rule with many false positives is where "
+                           "detection needs work.",
+                 font=('Segoe UI', 9), fg=COLORS['text_dim'], bg=COLORS['bg_dark'],
+                 wraplength=720, justify='left', anchor='w').pack(fill='x', padx=12, pady=8)
+        cols = ('rule', 'alerts', 'real', 'fp', 'acked', 'open', 'rate')
+        tree = ttk.Treeview(win, columns=cols, show='headings')
+        for col, width, label in (('rule', 220, 'Rule'), ('alerts', 70, 'Alerts'),
+                                  ('real', 60, 'Real'), ('fp', 100, 'False positive'),
+                                  ('acked', 120, 'Only acknowledged'), ('open', 60, 'Open'),
+                                  ('rate', 120, 'False positive rate')):
+            tree.heading(col, text=label)
+            tree.column(col, width=width, minwidth=40, anchor='w' if col == 'rule' else 'e')
+        tree.pack(fill='both', expand=True, padx=8, pady=(0, 8))
+        for r in self.app.alert_manager.rule_record():
+            rate = r['false_positive_rate']
+            tree.insert('', 'end', values=(
+                r['rule_id'], r['alerts'], r['real'], r['false_positive'],
+                r['acknowledged_only'], r['open'], '—' if rate is None else f"{rate:.0%}"))
 
     def _export_alerts(self):
         filepath = filedialog.asksaveasfilename(
@@ -3335,7 +3440,7 @@ class NetSentinelGUI:
             return
 
         for alert in alerts[:5]:
-            AlertListItem(self._recent_alerts_frame, alert.to_dict()).pack(fill='x', pady=1)
+            AlertListItem(self._recent_alerts_frame, alert.to_dict(), actions=self._alert_actions).pack(fill='x', pady=1)
 
     def _update_packet_log(self):
         """Update the packet log text widget."""
@@ -3622,6 +3727,118 @@ class NetSentinelGUI:
         # Always rescheduled: gated on monitoring, the loop ran once at startup,
         # before anyone pressed Start, and never again.
         self.root.after(5000, self._devices_refresh)
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # Tab: Exposures (src/exposures.py)
+    # ──────────────────────────────────────────────────────────────────────────
+
+    _EXPOSURE_SHOWN = {'Open': ('open',), 'Accepted': ('accepted',), 'Fixed': ('fixed',),
+                       'All': ('open', 'accepted', 'fixed')}
+
+    def _build_exposures_tab(self, parent):
+        """Standing conditions, one row per device and issue, alerted on once."""
+        top = tk.Frame(parent, bg=COLORS['bg_dark'])
+        top.pack(fill='x', padx=8, pady=(8, 4))
+        tk.Label(top, text="Exposures", font=('Segoe UI', 12, 'bold'),
+                 fg=COLORS['accent'], bg=COLORS['bg_dark']).pack(side='left')
+        self._exposures_summary = tk.Label(top, text="", font=('Segoe UI', 9),
+                                           fg=COLORS['text_dim'], bg=COLORS['bg_dark'])
+        self._exposures_summary.pack(side='left', padx=16)
+
+        buttons = tk.Frame(top, bg=COLORS['bg_dark'])
+        buttons.pack(side='right')
+        self._exposures_show = tk.StringVar(value='Open')
+        ttk.Combobox(buttons, textvariable=self._exposures_show, state='readonly', width=9,
+                     values=list(self._EXPOSURE_SHOWN)).pack(side='left', padx=4)
+        self._exposures_show.trace_add('write', lambda *_: self._exposures_refresh(once=True))
+        for text, state in (('Mark fixed', 'fixed'), ('Accept', 'accepted'), ('Reopen', 'open')):
+            tk.Button(buttons, text=text, command=lambda s=state: self._exposure_set(s),
+                      bg=COLORS['bg_input'], fg=COLORS['text'], font=('Segoe UI', 9),
+                      relief='flat').pack(side='left', padx=4)
+
+        tk.Label(parent,
+                 text="What is set up unsafely: plaintext logins, unencrypted services, software "
+                      "with known exploited flaws. Each is alerted once, and again only if it "
+                      "gets worse or comes back after you mark it fixed. Accept one you have "
+                      "decided to live with.",
+                 font=('Segoe UI', 8), fg=COLORS['text_dim'], bg=COLORS['bg_dark'],
+                 anchor='w', justify='left', wraplength=1100).pack(fill='x', padx=12, pady=(0, 4))
+
+        cols = ('severity', 'title', 'device', 'count', 'last_seen', 'state')
+        self._exposures_tree = ttk.Treeview(parent, columns=cols, show='headings', height=16)
+        for col, width, label in (('severity', 80, 'Severity'), ('title', 380, 'Exposure'),
+                                  ('device', 220, 'Device'), ('count', 70, 'Seen'),
+                                  ('last_seen', 130, 'Last seen'), ('state', 80, 'State')):
+            self._exposures_tree.heading(col, text=label)
+            self._exposures_tree.column(col, width=width, minwidth=50)
+        for sev, colour in SEVERITY_COLORS.items():
+            self._exposures_tree.tag_configure(sev, foreground=colour)
+        self._exposures_tree.pack(fill='both', expand=True, padx=8, pady=4)
+        self._exposures_tree.bind('<<TreeviewSelect>>', lambda e: self._exposure_details())
+
+        self._exposures_detail = tk.Label(parent, text="", font=('Segoe UI', 9),
+                                          fg=COLORS['text'], bg=COLORS['bg_dark'], anchor='w',
+                                          justify='left', wraplength=1100)
+        self._exposures_detail.pack(fill='x', padx=12, pady=(0, 8))
+        self._exposures_by_id = {}
+        self.root.after(3000, self._exposures_refresh)
+
+    def _exposures_refresh(self, once=False):
+        try:
+            registry = self.app.exposures
+            counts = registry.counts()
+            sev = counts['open_by_severity']
+            self._exposures_summary.config(
+                text=f"{counts['open']} open ({sev.get('HIGH', 0)} high, "
+                     f"{sev.get('MEDIUM', 0)} medium) · {counts['accepted']} accepted · "
+                     f"{counts['fixed']} fixed · {counts['repeats_folded']} repeats folded in")
+            shown = self._EXPOSURE_SHOWN.get(self._exposures_show.get(), ('open',))
+            entries = [e for e in registry.entries() if e['state'] in shown]
+            self._exposures_by_id = {e['id']: e for e in entries}
+            tree = self._exposures_tree
+            selected = set(tree.selection())
+            tree.delete(*tree.get_children())
+            for e in entries:
+                device = e['device'] + (f" ({e['device_name']})" if e.get('device_name') else '')
+                if e.get('port'):
+                    device += f":{e['port']}"
+                tree.insert('', 'end', iid=e['id'], tags=(e['severity'],), values=(
+                    e['severity'], e['title'], device, e['count'],
+                    time.strftime('%Y-%m-%d %H:%M', time.localtime(e['last_seen'])), e['state']))
+            keep = [i for i in selected if tree.exists(i)]
+            if keep:
+                tree.selection_set(keep)
+            self._exposure_details()
+        except Exception as e:
+            logger.debug("Exposures refresh error: %s", e)
+        if not once:
+            self.root.after(5000, self._exposures_refresh)   # see _devices_refresh
+
+    def _exposure_details(self):
+        selected = self._exposures_tree.selection()
+        entry = self._exposures_by_id.get(selected[0]) if selected else None
+        if entry is None:
+            self._exposures_detail.config(text="Select an exposure to see what to do about it.")
+            return
+        clients = ', '.join(entry.get('clients') or []) or '—'
+        self._exposures_detail.config(text=(
+            f"{entry['description']}\n\nWhat to do: {entry.get('recommendation') or '—'}\n"
+            f"Seen from: {clients} · first seen {entry.get('time_first', '')}"))
+
+    def _exposure_set(self, state):
+        selected = self._exposures_tree.selection()
+        if not selected:
+            return
+        if state == 'accepted' and not messagebox.askyesno(
+                "Accept exposure",
+                "Accept this and never be alerted about it again unless it gets worse?"):
+            return
+        for ident in selected:
+            try:
+                self.app.exposures.set_state(ident, state)
+            except (KeyError, ValueError) as e:
+                logger.debug("Exposure %s: %s", ident, e)
+        self._exposures_refresh(once=True)
 
     # ──────────────────────────────────────────────────────────────────────────
     # Tab: Incidents (correlated alerts)

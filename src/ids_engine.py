@@ -20,6 +20,7 @@ from src.config import as_float, as_int
 from src.dns_analysis import DnsResponseMonitor, DnsTunnelMonitor
 from src.ipcache import is_private
 from src.lan_threats import LanThreatMonitor
+from src.upload_history import UploadHistory
 
 logger = logging.getLogger("NetSentinel.IDS")
 
@@ -376,9 +377,6 @@ class IDSEngine:
         # short-cooldown pruner cannot discard them.
         self._long_suppressions = {}
 
-        # Escalating per-destination exfil thresholds, in MB.
-        self._exfil_thresholds = {}
-
         # Whitelists/Blacklists
         self.whitelist_ips = set(config.get('whitelists', 'ips', default=[]))
         self.whitelist_ports = set(config.get('whitelists', 'ports', default=[]))
@@ -411,14 +409,15 @@ class IDSEngine:
             name='ids.brute_force_window_sec')
         self.large_upload_mb = as_float(config.get('ids', 'large_upload_mb', default=100),
                                         100, lo=1, name='ids.large_upload_mb')
+        # What each program has uploaded where, by day (src/upload_history.py).
+        # In memory until the app gives it a file.
+        self.uploads = UploadHistory(self.large_upload_mb)
 
         # State tracking
         self._port_access = defaultdict(
             lambda: SlidingPortWindow(self.port_scan_window))  # {src_ip: SlidingPortWindow}
         self._conn_failures = defaultdict(lambda: deque(maxlen=500))  # {src_ip: [time]}
         self._arp_table = {}  # {ip: mac}
-        self._data_transfer = defaultdict(float)  # {dst_ip: bytes}
-        self._active_transfer_ips = set()  # IPs seen this cleanup cycle
         self._dns_queries_by_ip = defaultdict(lambda: deque(maxlen=200))
         self._icmp_flood_tracker = defaultdict(lambda: deque(maxlen=200))
 
@@ -533,13 +532,10 @@ class IDSEngine:
         for k in stale_keys:
             del self._alert_cooldowns[k]
 
-        # Prune data transfer tracking — remove entries not updated in 10 minutes
-        # (these accumulate one entry per unique dst_ip seen, forever)
-        stale_transfers = [ip for ip, _ in self._data_transfer.items()
-                           if ip not in self._active_transfer_ips]
-        for ip in stale_transfers:
-            del self._data_transfer[ip]
-        self._active_transfer_ips = set()
+        # Upload counters: yesterday's into the history, days past 30 dropped.
+        self.uploads.flush(now)
+        if not self.offline:
+            self.uploads.save()
 
         # Prune dns_to_ip cache — remove entries older than 10 minutes
         stale_dns = [d for d, (ip, ts) in self._dns_to_ip.items()
@@ -585,11 +581,6 @@ class IDSEngine:
         stale_long = [k for k, t in self._long_suppressions.items() if now - t > 7200]
         for k in stale_long:
             del self._long_suppressions[k]
-
-        # Prune escalating exfil thresholds for destinations no longer being tracked
-        stale_exfil = [ip for ip in self._exfil_thresholds if ip not in self._data_transfer]
-        for ip in stale_exfil:
-            del self._exfil_thresholds[ip]
 
         # Cap the ARP table. Bounded by LAN size in normal use, but an ARP flood
         # from a hostile host would otherwise grow it without limit.
@@ -1426,56 +1417,21 @@ class IDSEngine:
         # In LanThreatMonitor (above the skip), which reads the sender from the ARP
         # payload, pins the gateway's MAC and knows failover and randomised MACs.
 
-        # === Rule 11: Large Data Transfer (potential exfil, escalating) ===
+        # === Rule 11: Large Data Transfer (potential exfil) ===
         # Only outbound counts. Accumulating against dst_ip unconditionally meant every
         # large download was reported as data "sent to" the user's own machine.
         # Scaled by the sampling weight: under load one packet stands for several.
+        # Per program and destination, against that pair's own last 30 days
+        # (src/upload_history.py): its first large upload, then only a day past
+        # four times its biggest.
         if pkt_info.payload_size > 0 and self._is_outbound(pkt_info):
             weight = max(1, int(getattr(pkt_info, 'sample_weight', 1) or 1))
-            self._data_transfer[pkt_info.dst_ip] += pkt_info.payload_size * weight
-            self._active_transfer_ips.add(pkt_info.dst_ip)
-            mb_sent = self._data_transfer[pkt_info.dst_ip] / (1024 * 1024)
-
-            # Per-IP escalating threshold: first alert at configured MB,
-            # then doubles each time (100 → 200 → 400 → ...)
-            ip_threshold = self._exfil_thresholds.get(
-                pkt_info.dst_ip, self.large_upload_mb)
-
-            if mb_sent > ip_threshold:
-                # Skip if this IP was contacted during baseline learning (normal transfer target)
-                is_learned = False
-                if self.baseline_whitelist and self.baseline_whitelist.is_learned_ip(pkt_info.dst_ip):
-                    is_learned = True
-
-                sev = Severity.MEDIUM if is_learned else Severity.HIGH
-                title_suffix = " (to known destination)" if is_learned else ""
-
-                alerts.append(self._create_alert(
-                    "DATA-EXFIL", sev,
-                    f"Large Data Transfer{title_suffix}",
-                    f"{mb_sent:.1f} MB sent to {pkt_info.dst_ip}",
-                    pkt_info,
-                    evidence={
-                        'destination_ip': pkt_info.dst_ip,
-                        'megabytes_transferred': round(mb_sent, 2),
-                        'threshold_mb': ip_threshold,
-                        'next_alert_at_mb': ip_threshold * 2,
-                        'destination_port': pkt_info.dst_port,
-                        'protocol': pkt_info.protocol,
-                        'process': pkt_info.process_name or 'Unknown',
-                        'known_destination': is_learned,
-                        'description': 'An unusually large volume of data was sent to a '
-                            'single destination, which could indicate data exfiltration.'
-                            + (' This destination was seen during baseline learning, so '
-                               'it may be a normal transfer target (cloud backup, update server).'
-                               if is_learned else ''),
-                        'recommendation': 'Verify this transfer was intentional. Check what '
-                            'application sent this data and whether the destination is trusted.',
-                    },
-                    category="Exfiltration"
-                ))
-                # Escalate threshold — next alert at double the current
-                self._exfil_thresholds[pkt_info.dst_ip] = ip_threshold * 2
+            dst_ip = pkt_info.dst_ip
+            crossed = self.uploads.add(
+                pkt_info.process_name, dst_ip, pkt_info.payload_size * weight, now,
+                owner_keys=lambda: self._upload_owner_keys(dst_ip))
+            if crossed:
+                alerts.append(self._upload_alert(pkt_info, crossed))
 
         # === Rule 12: Unusual time-of-day activity ===
         # Only alert once per source IP per hour window (not per packet). Offline,
@@ -1553,6 +1509,64 @@ class IDSEngine:
         if info.get('asn') is None:
             return None
         return f"AS{info['asn']} {info.get('as_org', '')}".strip()
+
+    def _upload_owner_keys(self, ip):
+        """
+        The upload history's other names for a destination: the registrable
+        domains DNS answers to this side's own queries gave it, so one service's
+        many addresses share a history. Not its network: one network hosts
+        unrelated sites, and a program's routine uploads to one would cover its
+        uploads to another.
+        """
+        from src.public_suffix import registrable_domain
+        names = sorted({registrable_domain(n) or n for n in self._ip_vouched.get(ip, ())})
+        return [f'dom:{n}' for n in names[:3]]
+
+    def _upload_alert(self, pkt_info, crossed):
+        dst_ip = pkt_info.dst_ip
+        process = pkt_info.process_name or 'Unknown'
+        mb, days, usual = crossed['mb'], crossed['history_days'], crossed['usual_max_mb']
+        # Contacted during baseline learning: a normal transfer target, so MEDIUM.
+        is_learned = bool(self.baseline_whitelist
+                          and self.baseline_whitelist.is_learned_ip(dst_ip))
+        first = not days or crossed['held']
+        if crossed['held']:
+            story = (f"{process} sent {mb:.0f} MB here today. An upload from it here was "
+                     f"marked real exfiltration, so it is reported from "
+                     f"{self.large_upload_mb:.0f} MB again.")
+        elif first:
+            story = (f"The first large upload from {process} to this destination in the "
+                     f"last 30 days: {mb:.0f} MB today.")
+        else:
+            story = (f"{process} sent {mb:.0f} MB here today. Its biggest day here in the "
+                     f"last 30 days was {usual:.0f} MB, over {days} day"
+                     f"{'' if days == 1 else 's'} with uploads.")
+        return self._create_alert(
+            "DATA-EXFIL", Severity.MEDIUM if is_learned else Severity.HIGH,
+            "Large Data Transfer" + (" (to known destination)" if is_learned else ""),
+            f"{mb:.1f} MB sent to {dst_ip} today by {process}",
+            pkt_info,
+            evidence={
+                'destination_ip': dst_ip,
+                'megabytes_transferred': round(mb, 2),
+                'threshold_mb': round(crossed['level'], 1),
+                'next_alert_at_mb': round(crossed['next_mb'], 1),
+                'destination_port': pkt_info.dst_port,
+                'protocol': pkt_info.protocol,
+                'process': process,
+                'pid': getattr(pkt_info, 'process_pid', 0) or 0,
+                'known_destination': is_learned,
+                'first_large_upload': first,
+                'days_with_uploads': days,
+                'usual_daily_max_mb': usual,
+                'description': story + (
+                    ' This destination was seen during baseline learning, so it may be a '
+                    'normal transfer target (cloud backup, update server).'
+                    if is_learned else ''),
+                'recommendation': 'Verify this transfer was intentional. Check what '
+                    'application sent this data and whether the destination is trusted.',
+            },
+            category="Exfiltration")
 
     def _dns_trusted(self, name):
         """Names the DNS heuristics leave alone: first-party cloud services and
