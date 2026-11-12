@@ -1,5 +1,48 @@
 # NetSentinel Changelog
 
+## v1.16.1 — A day on a work laptop, and four false alarms gone
+
+**2574 unit tests** plus 14 integration checks. From 1.10.x or later this
+installs from the Update button. A few hours of 1.16.0 on a work laptop
+running PingerPlot, a path monitor, raised 56 HIGH "ICMP Flood" and two
+CRITICAL "SYN Flood" alerts, a HIGH DGA, a HIGH fast-flux, and a certificate
+exposure filed under the laptop itself. None was an attack. Each fix has tests
+that fail on 1.16.0, and the detection corpus keeps the attacks each rule is
+for.
+
+- **Path probes are not floods.** Traceroute, mtr and path monitors step the
+  TTL up from 1 so that each router on the way answers, and no system starts
+  its packets below 32. A packet from this network to the internet with a TTL
+  of 30 or less is now a probe, left out of the ICMP and SYN flood counts:
+  every probe but the last dies at a router before the target. A flood at a
+  normal TTL still alerts, and so does a low TTL on the LAN, where no router
+  stands in the way, or arriving from the internet.
+- **DGA looks at the name someone registered.** Malware's generated names
+  have to be registered to be any use, so that is where their randomness
+  shows. Random labels under a domain someone else owns are that owner's
+  naming: SharePoint and Azure SignalR hosts, Google's ad frames, Claude's
+  artifact frames. Scoring every label made an evening of web pages a HIGH
+  alert. OneDrive's numbered storage accounts (`onedrive...prod...NNNNN` under
+  `blob.core.windows.net`) are allowed by name. Random registered domains,
+  under `.co.uk` or a dynamic-DNS service too, still alert.
+- **Fast-flux needs addresses that change.** An ad server's name gave 67
+  addresses in a single answer, and was HIGH. A pool handed out whole is load
+  balancing however big it is, so only the addresses beyond the largest single
+  answer now count, and the alert says how large that was. With GeoIP on, one
+  company under two AS numbers (velia.net's AS29066 and AS30083) counts as one
+  network.
+- **A bad certificate is an exposure of the server.** Certificate alerts were
+  filed under this PC, at the random port it connected from, so each hourly
+  repeat was a new entry on the Exposures page. They are filed under the
+  server now, and repeats add to one entry. The misfiled entries are dropped
+  when NetSentinel starts.
+
+Before release, nine of the laptop's alert captures were replayed through
+1.16.0 and this version: 38 ICMP Flood, 3 SYN Flood and the fast-flux alert
+are gone, and every other alert is the same. The DGA alert did not recur in
+the replay on either version, so its fix is checked by its tests and the
+corpus.
+
 ## v1.16.0 — The gateway's threat detections, and three false alarms gone
 
 **2550 unit tests** plus 14 integration checks.
