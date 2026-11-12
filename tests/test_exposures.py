@@ -45,6 +45,18 @@ def modbus():
                  title='Unencrypted Modbus Service', how_to_fix='Firewall port 502.')
 
 
+CERT_SERVER = '45.155.205.80'       # documentation ranges count as private in Python
+
+
+def certificate(client_port):
+    """As the engine raises it: on the server's packet, to this PC's random port."""
+    from src.ids_engine import Alert
+    return Alert('TLS-CERT-INVALID', 'MEDIUM', 'Untrusted Server Certificate (expired)',
+                 'presented an expired certificate', src_ip=CERT_SERVER, src_port=443,
+                 dst_ip=PC, dst_port=client_port,
+                 evidence={'src_name': 'sync.ads.example', 'server': f'{CERT_SERVER}:443'})
+
+
 class TestWhatIsAnExposure(unittest.TestCase):
 
     def key(self, a):
@@ -130,6 +142,32 @@ class TestTheList(unittest.TestCase):
         r.observe(ha_token(src='192.168.10.40'), now=T0 + 5)
         [entry] = r.entries()
         self.assertEqual(entry['clients'], [PC, '192.168.10.40'])
+
+    def test_a_certificate_is_an_exposure_of_the_server(self):
+        """Filed by its destination, it was this PC at the port it connected from,
+        and the same server an hour later a second entry."""
+        r = self.registry()
+        first = r.observe(certificate(26224), now=T0)
+        again = r.observe(certificate(37665), now=T0 + 3600)
+        self.assertEqual((first['why'], again['why']), ('new', 'repeat'))
+        [entry] = r.entries()
+        self.assertEqual((entry['device'], entry['port'], entry['device_name']),
+                         (CERT_SERVER, 443, 'sync.ads.example'))
+        self.assertEqual((entry['clients'], entry['count']), ([PC], 2))
+
+    def test_a_misfiled_certificate_is_dropped_on_load(self):
+        from src.exposures import ExposureRegistry
+        path = os.path.join(tempfile.mkdtemp(), 'exposures.json')
+        old = {'state': 'open', 'severity': 'MEDIUM', 'first_seen': T0, 'last_seen': T0,
+               'count': 1}
+        with open(path, 'w', encoding='utf-8') as f:
+            json.dump({'version': 1, 'entries': [
+                dict(old, id='a1', kind='certificate', device=PC, port=26224),
+                dict(old, id='b2', kind='certificate', device=CERT_SERVER, port=443),
+                dict(old, id='c3', kind='service', device=METER, port=502)]}, f)
+        r = ExposureRegistry()
+        r.attach(path)
+        self.assertEqual(sorted(e['id'] for e in r.entries()), ['b2', 'c3'])
 
     def test_no_credential_value_is_kept(self):
         r = self.registry()

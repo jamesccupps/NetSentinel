@@ -256,6 +256,38 @@ class TestFastFlux(unittest.TestCase):
         self.assertGreaterEqual(findings[0]['network_count'], 4)
         self.assertIn('AS64496 ISP 0', findings[0]['network_owners'])
 
+    def test_a_pool_in_one_answer_is_not_flux(self):
+        """An ad server's name answered once with 67 addresses, a 37 s CNAME on the
+        way, across four hosting companies, and was HIGH "Fast-Flux"."""
+        owners = {f'{60 + i % 4}.151.{i}.{i}': f'AS{64496 + i % 4} Hosting {i % 4}'
+                  for i in range(67)}
+        m = DnsResponseMonitor(owner_of=owners.get)
+        m.cdn_check = lambda *a: False
+        findings = m.observe_response('192.168.1.50', 's.console.ads.example', 0,
+                                      ['s.routing.example', *owners], 37, T0)
+        findings += m.observe_response('192.168.1.50', 's.console.ads.example', 0,
+                                       list(owners), 37, T0 + 120)
+        self.assertEqual(findings, [])
+
+    def test_answers_that_keep_changing_are_still_flux(self):
+        """Five addresses an answer, different every time: churn, whatever the pool."""
+        m = DnsResponseMonitor()
+        m.cdn_check = lambda *a: False
+        findings = []
+        for i in range(4):
+            answer = [f'{60 + i * 5 + k}.184.{k}.{i}' for k in range(5)]
+            findings += m.observe_response('192.168.1.50', 'flux.example.net', 0, answer,
+                                           60, T0 + i * 60)
+        self.assertEqual([f['type'] for f in findings], ['fast_flux'])
+        self.assertEqual(findings[0]['largest_single_answer'], 5)
+
+    def test_one_company_under_two_as_numbers_is_one_network(self):
+        from src.dns_analysis import _distinct_networks
+        owners = {'60.1.1.1': 'AS64496 Example Hosting GmbH', '60.1.1.2': 'AS64497 Example',
+                  '61.1.1.1': 'AS64498 Other Cloud, Inc.', '62.1.1.1': None}
+        self.assertEqual(_distinct_networks(owners),
+                         {'example', 'other cloud inc.', '62.1'})
+
     def test_unknown_owners_fall_back_to_the_slash16(self):
         def broken(address):
             raise RuntimeError('database closed')

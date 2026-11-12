@@ -25,7 +25,10 @@ Checks:
 import time
 import math
 import logging
+import re
 from collections import Counter, defaultdict
+
+from src.public_suffix import registrable_domain
 
 logger = logging.getLogger("NetSentinel.IOC")
 
@@ -230,6 +233,13 @@ DGA_WHITELIST_SUFFIXES = {
 # Full domain exact matches that are legitimate
 DGA_WHITELIST_EXACT = set()
 
+# OneDrive keeps files in numbered Azure storage accounts
+# (onedriveclubproddm20046.blob.core.windows.net), and a sync looks up several
+# in a minute. blob.core.windows.net is a public suffix, where anyone can name
+# an account, so the account name is what gets scored, and these score 3.85 to
+# 3.97: readable words and a number.
+DGA_ONEDRIVE_STORAGE = re.compile(r'^onedrive[a-z]+prod[a-z]+\d+\.blob\.core\.windows\.net$')
+
 # Patterns in domain that indicate mDNS service records (not DGA)
 DGA_WHITELIST_PATTERNS = [
     '_tcp.local',
@@ -247,6 +257,15 @@ DGA_WHITELIST_REGISTERED_KEYWORDS = {
     'azurewebsites', 'cloudfront', 'samsungcloudsolution',
     'steamserver', 'steamcontent', 'steampowered',
 }
+
+
+def _registered_label(domain):
+    """
+    The label someone registered: 'example' in a.b.example.co.uk, the account
+    name in x.blob.core.windows.net. Empty for a public suffix itself.
+    """
+    registered = registrable_domain(domain)
+    return registered.split('.', 1)[0] if registered else ''
 
 
 class IOCScanner:
@@ -434,42 +453,49 @@ class IOCScanner:
                             is_whitelisted = True
                             break
 
+            if not is_whitelisted and DGA_ONEDRIVE_STORAGE.match(domain):
+                is_whitelisted = True
+
             if not is_whitelisted:
-                labels = domain.split('.')
-                # Check longest non-TLD label
-                for label in labels[:-1]:  # Skip TLD
-                    if len(label) >= DGA_MIN_LABEL_LENGTH:
-                        ent = self._label_entropy(label)
-                        if ent >= DGA_ENTROPY_THRESHOLD:
-                            recent = self._note_high_entropy(pkt_info.src_ip, domain, now)
-                            # Only alert if one host produced several in a short time
-                            # (one-off could be a CDN hash, but a pattern = DGA)
-                            total_dga = len(recent)
-                            if total_dga >= DGA_MIN_DOMAINS:
-                                # Reset, so the next alert needs a fresh burst.
-                                self._dga_by_source.pop(pkt_info.src_ip, None)
-                                findings.append({
-                                    'rule_id': 'IOC-DGA',
-                                    'severity': 'HIGH',
-                                    'title': 'Domain Generation Algorithm Detected',
-                                    'description': f'{total_dga} high-entropy domains detected — '
-                                                   f'possible DGA malware',
-                                    'evidence': {
-                                        'latest_domain': domain,
-                                        'domain_entropy': round(ent, 2),
-                                        'total_dga_domains': total_dga,
-                                        'window_seconds': DGA_WINDOW_SEC,
-                                        'requesting_ip': pkt_info.src_ip,
-                                        'sample_domains': recent[:15],
-                                        'description': 'Domain Generation Algorithms (DGA) are used by '
-                                            'malware to generate random-looking domain names for C2 '
-                                            'communication. A high number of high-entropy domains is '
-                                            'a strong indicator of an active DGA-based infection.',
-                                        'recommendation': 'This is a strong malware indicator. '
-                                            'Check running processes, scan with anti-malware tools, '
-                                            'and consider isolating this machine from the network.',
-                                    },
-                                })
+                # Only the label someone registered. A DGA's names have to be
+                # registered to be of use, so its randomness is there; random
+                # labels under a domain someone else owns are that owner's
+                # naming: SharePoint's and Azure SignalR's hosts, Google's ad
+                # frames, Claude's artifact frames. Scoring every label made a
+                # OneDrive sync and an evening of web pages HIGH alerts.
+                label = _registered_label(domain)
+                if len(label) >= DGA_MIN_LABEL_LENGTH:
+                    ent = self._label_entropy(label)
+                    if ent >= DGA_ENTROPY_THRESHOLD:
+                        recent = self._note_high_entropy(pkt_info.src_ip, domain, now)
+                        # Only alert if one host produced several in a short time
+                        # (one-off could be a CDN hash, but a pattern = DGA)
+                        total_dga = len(recent)
+                        if total_dga >= DGA_MIN_DOMAINS:
+                            # Reset, so the next alert needs a fresh burst.
+                            self._dga_by_source.pop(pkt_info.src_ip, None)
+                            findings.append({
+                                'rule_id': 'IOC-DGA',
+                                'severity': 'HIGH',
+                                'title': 'Domain Generation Algorithm Detected',
+                                'description': f'{total_dga} high-entropy domains detected — '
+                                               f'possible DGA malware',
+                                'evidence': {
+                                    'latest_domain': domain,
+                                    'domain_entropy': round(ent, 2),
+                                    'total_dga_domains': total_dga,
+                                    'window_seconds': DGA_WINDOW_SEC,
+                                    'requesting_ip': pkt_info.src_ip,
+                                    'sample_domains': recent[:15],
+                                    'description': 'Domain Generation Algorithms (DGA) are used by '
+                                        'malware to generate random-looking domain names for C2 '
+                                        'communication. A high number of high-entropy domains is '
+                                        'a strong indicator of an active DGA-based infection.',
+                                    'recommendation': 'This is a strong malware indicator. '
+                                        'Check running processes, scan with anti-malware tools, '
+                                        'and consider isolating this machine from the network.',
+                                },
+                            })
 
         # ─── DNS bypass (DoH to non-configured providers) ─────
         if pkt_info.dst_port == 443 and pkt_info.dst_ip in DOH_ENDPOINTS and not (

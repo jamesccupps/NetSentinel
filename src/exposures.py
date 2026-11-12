@@ -24,6 +24,8 @@ import logging
 import threading
 import time
 
+from src.ipcache import is_private
+
 logger = logging.getLogger("NetSentinel.Exposures")
 
 STATE_FILE = 'exposures.json'
@@ -57,6 +59,22 @@ def _bare_title(title):
     return title
 
 
+# Raised on the packet the server sent, so the alert's source is the device.
+_SERVER_SENT_RULES = frozenset({'TLS-CERT-SELF-SIGNED', 'TLS-CERT-INVALID'})
+
+
+def _ends(alert):
+    """
+    (device, port, client, device's name field, client's name field). Filed by
+    the destination like the rest, a certificate alert was an exposure of this
+    PC at the random port it connected from, and every hour's repeat for the
+    same server a new one.
+    """
+    if alert.rule_id in _SERVER_SENT_RULES:
+        return alert.src_ip, alert.src_port, alert.dst_ip, 'src_name', 'dst_name'
+    return alert.dst_ip, alert.dst_port, alert.src_ip, 'dst_name', 'src_name'
+
+
 def exposure_key(alert):
     """
     The device-and-issue an alert is about, as a tuple, or None for an alert
@@ -84,8 +102,9 @@ def exposure_key(alert):
         return ('data', data_type, alert.dst_ip, port)
     if rule == 'VULN-KEV':
         return ('vulnerability', alert.dst_ip, port)
-    if rule in ('TLS-CERT-SELF-SIGNED', 'TLS-CERT-INVALID'):
-        return ('certificate', rule, alert.dst_ip, port)
+    if rule in _SERVER_SENT_RULES:
+        server, server_port = _ends(alert)[:2]
+        return ('certificate', rule, server, server_port or 0)
     return None
 
 
@@ -150,13 +169,13 @@ class ExposureRegistry:
                     why = 'seen again'
                 else:
                     why = 'accepted' if entry['state'] == 'accepted' else 'repeat'
-            src = alert.src_ip
-            if src and src != alert.dst_ip and src not in entry['clients']:
-                entry['clients'] = (entry['clients'] + [src])[-MAX_CLIENTS:]
-            if ev.get('src_name') and src:
-                entry['client_names'][src] = ev['src_name']
-            if ev.get('dst_name'):
-                entry['device_name'] = ev['dst_name']
+            device, _, client, device_name, client_name = _ends(alert)
+            if client and client != device and client not in entry['clients']:
+                entry['clients'] = (entry['clients'] + [client])[-MAX_CLIENTS:]
+            if ev.get(client_name) and client:
+                entry['client_names'][client] = ev[client_name]
+            if ev.get(device_name):
+                entry['device_name'] = ev[device_name]
             self._dirty = True
             report = why in ('new', 'worse', 'seen again')
             if not report:
@@ -172,14 +191,15 @@ class ExposureRegistry:
 
     def _new_entry(self, ident, key, alert, severity, now):
         ev = alert.evidence or {}
+        device, port, _, device_name, _ = _ends(alert)
         return {
             'id': ident, 'kind': key[0], 'key': [str(k) for k in key],
             'rule_id': alert.rule_id, 'severity': severity,
             'title': _bare_title(alert.title),
             'description': str(alert.description or '')[:500],
             'recommendation': str(ev.get('recommendation') or ev.get('how_to_fix') or '')[:500],
-            'device': alert.dst_ip or '', 'port': alert.dst_port or 0,
-            'device_name': ev.get('dst_name', ''),
+            'device': device or '', 'port': port or 0,
+            'device_name': ev.get(device_name, ''),
             'clients': [], 'client_names': {},
             'first_seen': now, 'last_seen': now, 'count': 1,
             'time_first': time.strftime('%Y-%m-%d %H:%M', time.localtime(now)),
@@ -247,6 +267,12 @@ class ExposureRegistry:
         for e in (data.get('entries') if isinstance(data, dict) else None) or []:
             try:
                 if e['state'] not in STATES or not isinstance(e['id'], str):
+                    continue
+                # Certificates are only judged on internet servers, so one filed
+                # under a private address is the old misfiling: this PC and the
+                # port it connected from. Its server's entry comes back with the
+                # next alert.
+                if e.get('kind') == 'certificate' and is_private(str(e.get('device', ''))):
                     continue
                 e['first_seen'], e['last_seen'] = float(e['first_seen']), float(e['last_seen'])
                 e['count'] = int(e['count'])

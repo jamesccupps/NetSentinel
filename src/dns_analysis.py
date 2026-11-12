@@ -60,8 +60,9 @@ NXDOMAIN_WINDOW_SEC = 60
 DGA_ENTROPY_THRESHOLD = 3.2
 DGA_MIN_LABEL_LEN = 7
 
-# Fast-flux: distinct addresses for ONE name inside the window, plus a TTL at or
-# under the ceiling. Both are required — CDNs have the short TTL but not the churn.
+# Fast-flux: distinct addresses for ONE name inside the window, beyond the most
+# any single answer held, plus a TTL at or under the ceiling. Both are required:
+# CDNs have the short TTL but not the churn.
 FLUX_MIN_ADDRESSES = 8
 FLUX_TTL_CEILING = 300
 FLUX_WINDOW_SEC = 900
@@ -254,6 +255,9 @@ class DnsResponseMonitor:
         if entry is None:
             entry = {'addresses': {}, 'ttl': -1, 'first': now, 'via': set()}
             self._resolutions[name] = entry
+        # How many addresses each answer held, to tell churn from a big pool.
+        sizes = entry.setdefault('answer_sizes', deque(maxlen=64))
+        sizes.append((now, len(set(addresses))))
         # The CNAMEs the answer went through. Bounded: every name here came off
         # the network.
         via = entry.setdefault('via', set())
@@ -273,8 +277,13 @@ class DnsResponseMonitor:
         cutoff = now - FLUX_WINDOW_SEC
         live = {a: t for a, t in entry['addresses'].items() if t >= cutoff}
         entry['addresses'] = live
+        # Flux is churn: addresses that change from one answer to the next. A
+        # pool handed out whole in one answer is load balancing however big it
+        # is: an ad server's name gave 67 addresses in a single reply, and was
+        # HIGH. Only the addresses beyond the largest single answer count.
+        largest = max((n for t, n in sizes if t >= cutoff), default=0)
 
-        if len(live) < self.flux_threshold:
+        if len(live) - largest < self.flux_threshold:
             return None
         if entry['ttl'] > FLUX_TTL_CEILING:
             # Many addresses with a long TTL is ordinary load balancing.
@@ -288,7 +297,7 @@ class DnsResponseMonitor:
                 except Exception as e:
                     logger.debug("Owner lookup failed for %s: %s", a, e)
             owners[a] = owner
-        networks = {owner or _network_of(a) for a, owner in owners.items()}
+        networks = _distinct_networks(owners)
         if len(networks) < FLUX_MIN_NETWORKS:
             return None
         if name in self._reported_flux and now - self._reported_flux[name] < FLUX_REPORT_HOLD_SEC:
@@ -307,6 +316,7 @@ class DnsResponseMonitor:
             'severity': 'HIGH',
             'domain': name,
             'address_count': len(live),
+            'largest_single_answer': largest,
             'network_count': len(networks),
             'network_owners': sorted({o for o in owners.values() if o})[:10],
             'min_ttl': entry['ttl'],
@@ -315,8 +325,8 @@ class DnsResponseMonitor:
             'description': (
                 f"{name} resolved to {len(live)} different addresses in "
                 f"{len(networks)} unrelated networks within "
-                f"{FLUX_WINDOW_SEC // 60} minutes, with a TTL of at most "
-                f"{entry['ttl']}s."),
+                f"{FLUX_WINDOW_SEC // 60} minutes, no answer holding more than "
+                f"{largest}, with a TTL of at most {entry['ttl']}s."),
             'recommendation': (
                 'Hosting that moves this fast is characteristic of fast-flux '
                 'networks, which rotate through compromised hosts to stay '
@@ -396,6 +406,27 @@ def _network_of(address):
     if ':' in address:
         return ':'.join(address.split(':')[:2])
     return '.'.join(address.split('.')[:2])
+
+
+def _org_name(owner):
+    """'velia.net internetdienste gmbh' from 'AS29066 velia.net Internetdienste GmbH'."""
+    parts = owner.split(' ', 1)
+    if len(parts) == 2 and parts[0].upper().startswith('AS') and parts[1].strip():
+        owner = parts[1]
+    return ' '.join(owner.lower().replace(',', ' ').split())
+
+
+def _distinct_networks(owners):
+    """
+    The unrelated networks among {address: owner}: the owner's organization when
+    GeoIP names one, else the address's /16. One company under two AS numbers
+    is one network: velia.net's AS29066 and AS30083 counted as two.
+    """
+    distinct = []
+    for org in sorted({_org_name(o) for o in owners.values() if o}, key=len):
+        if not any(org == d or org.startswith(d + ' ') for d in distinct):
+            distinct.append(org)
+    return set(distinct) | {_network_of(a) for a, o in owners.items() if not o}
 
 
 def _default_cdn_check(name, addresses, via=()):

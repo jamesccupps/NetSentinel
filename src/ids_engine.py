@@ -37,6 +37,15 @@ ICMP_FLOOD_PER_10S = 50
 # thousands a second, and are held to that.
 ICMP_ERROR_TYPES = frozenset({3, 4, 5, 11, 12})
 ICMP_ERROR_FLOOD_PER_10S = 1000
+# A packet from this network with a TTL this low was sent as a path probe:
+# traceroute, mtr and path monitors like PingerPlot step the TTL up from 1 so
+# that each router on the way answers "time exceeded". No system starts its
+# packets below 32. Sent to the internet, every probe but the last dies at a
+# router before the target, so probes are not flood traffic. A work laptop
+# mapping eleven hops to 8.8.8.8 and twelve to Outlook once a second raised
+# 56 HIGH "ICMP Flood" and two CRITICAL "SYN Flood" alerts in two hours. On
+# the LAN no router stands in the way, and a low TTL proves nothing.
+PATH_PROBE_MAX_TTL = 30
 # One host pinging this many local addresses within the window is a sweep.
 PING_SWEEP_HOSTS = 20
 PING_SWEEP_WINDOW = 30
@@ -1271,7 +1280,8 @@ class IDSEngine:
         # Fix: track SYNs per (src → dst) pair. Only alert when one source
         # sends many SYNs to ONE destination. Also apply higher thresholds
         # for local machines making outbound connections to standard ports.
-        if pkt_info.protocol == "TCP" and pkt_info.flags:
+        # A TCP traceroute's SYNs die at the routers on the way (PATH_PROBE_MAX_TTL).
+        if pkt_info.protocol == "TCP" and pkt_info.flags and not self._is_path_probe(pkt_info):
             if 'S' in pkt_info.flags and 'A' not in pkt_info.flags:
                 # Track per (src, dst) pair — this is the key change
                 pair_key = f"syn-{pkt_info.src_ip}->{pkt_info.dst_ip}"
@@ -1354,6 +1364,8 @@ class IDSEngine:
                     window = self._icmp_error_counts[pair] = [now, 0]
                 window[1] += 1
                 count, limit = window[1], ICMP_ERROR_FLOOD_PER_10S
+            elif self._is_path_probe(pkt_info):
+                count, limit = 0, ICMP_FLOOD_PER_10S
             else:
                 self._icmp_flood_tracker[pair].append(now)
                 count = len([t for t in self._icmp_flood_tracker[pair] if now - t < 10])
@@ -1574,6 +1586,13 @@ class IDSEngine:
                 if _domain_matches(domain, domain_set):
                     return True
         return False
+
+    def _is_path_probe(self, pkt_info):
+        """A traceroute-style probe from this network to the internet (see
+        PATH_PROBE_MAX_TTL). An unknown TTL (0) is not one."""
+        ttl = getattr(pkt_info, 'ttl', 0) or 0
+        return (0 < ttl <= PATH_PROBE_MAX_TTL and self._is_local_ip(pkt_info.src_ip)
+                and not self._is_local_ip(pkt_info.dst_ip))
 
     def _is_local_ip(self, ip):
         """

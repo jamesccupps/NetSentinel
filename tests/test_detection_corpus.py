@@ -25,9 +25,11 @@ sys.path.insert(1, os.path.dirname(os.path.abspath(__file__)))  # tests/, for _t
 import _test_support  # noqa: E402,F401
 from _test_support import reset_config  # noqa: E402
 
+from test_dga_names import GENERATED, ONEDRIVE_SYNC, WEB_PAGES, dga_findings  # noqa: E402
 from test_dns_tunnel import encoded, query  # noqa: E402
 from test_gateway_threats import EDGE, _GeoIP, cef  # noqa: E402
 from test_lan_threats import arp, dhcp_payload, name_query, name_response, pkt  # noqa: E402
+from test_path_probes import tcp_traceroute, traceroute_pings  # noqa: E402
 from test_snmp_community import snmp, sweep  # noqa: E402
 from test_third_review import T0, DAY, http_get, tcp, udp  # noqa: E402
 from test_upload_history import engine as upload_engine, exfil, upload  # noqa: E402
@@ -132,6 +134,28 @@ def ping_engine():
 def ping(ids, src, dst, ts, icmp_type=8):
     ids.inspect_packet(pkt(ts=ts, src_ip=src, dst_ip=dst, protocol='ICMP',
                            icmp_type=icmp_type, payload_size=56))
+
+
+def as_alerts(findings):
+    """IOC findings in the shape assertRaised reads."""
+    return [SimpleNamespace(rule_id=f['rule_id'], severity=f['severity'], title=f['title'])
+            for f in findings]
+
+
+class _HostingGeoIP:
+    """Owners for made-up public addresses: the second octet picks the company."""
+
+    def lookup(self, ip):
+        owner = {151: (64496, 'Example Hosting GmbH'), 152: (64497, 'Example Hosting'),
+                 153: (64498, 'Shells Ltd'), 154: (64499, 'Rack Servers, Inc.'),
+                 155: (64500, 'Deft Example')}.get(int(ip.split('.')[1]))
+        return {'asn': owner[0], 'as_org': owner[1]} if owner else {}
+
+
+def dns_answer(ids, name, answers, ttl, ts):
+    p = pkt(ts=ts, src_ip=GATEWAY, dst_ip=PC, src_port=53, dst_port=51000, protocol='UDP',
+            dns_query=name, dns_rcode=0, dns_answers=tuple(answers), dns_ttl=ttl, length=90)
+    ids.inspect_packet(p)
 
 
 def ha_token_request():
@@ -267,6 +291,26 @@ class TestAttacksStillAlert(unittest.TestCase):
         for i in range(4000):
             ping(ids, '198.51.100.9', PC, T0 + i * 0.0005, icmp_type=3)
         self.assertRaised(alerts, 'ICMP-FLOOD', 'HIGH')
+
+    def test_a_syn_flood_from_this_network(self):
+        ids, alerts = ping_engine()
+        for i in range(800):
+            ids.inspect_packet(pkt(ts=T0 + i * 0.01, src_ip=PC, src_port=20000 + i,
+                                   dst_ip='45.60.10.114', dst_port=443, protocol='TCP',
+                                   flags='S', ttl=128))
+        self.assertRaised(alerts, 'SYN-FLOOD', 'CRITICAL')
+
+    def test_a_dga_burst(self):
+        """Generated names, including under co.uk and a dynamic-DNS provider."""
+        self.assertRaised(as_alerts(dga_findings(GENERATED)), 'IOC-DGA', 'HIGH')
+
+    def test_fast_flux_on_home_machines(self):
+        """Three addresses an answer, never the same twice, all over the internet."""
+        ids, alerts = ping_engine()
+        for i in range(6):
+            answer = [f'{70 + i * 3 + k}.{20 + k}.{i}.9' for k in range(3)]
+            dns_answer(ids, 'pharma.example', answer, 60, T0 + i * 60)
+        self.assertRaised(alerts, 'DNS-FAST-FLUX', 'HIGH')
 
     def test_a_ping_sweep_of_the_network(self):
         ids, alerts = ping_engine()
@@ -408,6 +452,46 @@ class TestFalseAlarmsStayQuiet(unittest.TestCase):
         [blocked] = app.raised
         self.assertEqual(blocked.severity, 'LOW')
         self.assertEqual(blocked.evidence['alert_verification']['verdict'], 'LIKELY_FALSE_POSITIVE')
+
+    def test_a_path_monitor_mapping_its_routes(self):
+        """56 HIGH "ICMP Flood" and two CRITICAL "SYN Flood" in two hours on 11-12:
+        PingerPlot on a work laptop stepping the TTL from 1 to 11 to a public
+        resolver, and from 1 to 12 in SYNs to a mail server, every second."""
+        ids, alerts = ping_engine()
+        traceroute_pings(ids, '8.8.8.8', hops=11, seconds=120)
+        tcp_traceroute(ids, '45.60.10.114', hops=12, seconds=120, ts=T0 + 200)
+        self.assertEqual([a.rule_id for a in alerts if a.rule_id in ('ICMP-FLOOD', 'SYN-FLOOD')],
+                         [])
+
+    def test_a_onedrive_sync_and_an_evening_of_web_pages(self):
+        """Two HIGH "Domain Generation Algorithm" alerts: OneDrive's storage accounts,
+        SharePoint, Azure SignalR, and the UUIDs and hashes in Claude's and Google's
+        frame hosts."""
+        self.assertEqual(dga_findings(ONEDRIVE_SYNC) + dga_findings(WEB_PAGES), [])
+
+    def test_an_ad_servers_pool_in_one_answer(self):
+        """A HIGH "Fast-Flux Hosting": an ad server's name answered once with 67
+        addresses at four hosting companies, one of them under two AS numbers."""
+        ids, alerts = ping_engine()
+        ids.geoip = _HostingGeoIP()
+        pool = [f'{60 + i % 9}.{151 + i % 5}.{i}.{i % 7}' for i in range(67)]
+        dns_answer(ids, 's.console.ads.example', ['s.routing.example', *pool], 37, T0)
+        dns_answer(ids, 's.console.ads.example', pool, 37, T0 + 400)
+        self.assertNotIn('DNS-FAST-FLUX', [a.rule_id for a in alerts])
+
+    def test_an_ad_servers_expired_certificate_every_hour(self):
+        """An expired certificate on an ad exchange's sync server, filed under this
+        PC at a new random port each time: a new exposure every hour."""
+        from src.exposures import ExposureRegistry
+        from src.ids_engine import Alert
+        registry = ExposureRegistry()
+        seen = []
+        for hour, port in enumerate((26224, 37665, 41022)):
+            seen.append(registry.observe(Alert(
+                'TLS-CERT-INVALID', 'MEDIUM', 'Untrusted Server Certificate (expired)', 'x',
+                src_ip='45.60.35.228', src_port=443, dst_ip=PC, dst_port=port),
+                now=T0 + hour * 3600)['report'])
+        self.assertEqual(seen, [True, False, False])
 
     def test_home_assistants_token_on_four_days(self):
         """Four CRITICAL alerts for one standing condition; now one, at HIGH."""
