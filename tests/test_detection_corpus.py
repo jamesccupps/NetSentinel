@@ -129,9 +129,9 @@ def ping_engine():
     return IDSEngine(reset_config(), alert_callback=alerts.append), alerts
 
 
-def ping(ids, src, dst, ts):
-    ids.inspect_packet(pkt(ts=ts, src_ip=src, dst_ip=dst, protocol='ICMP', icmp_type=8,
-                           payload_size=56))
+def ping(ids, src, dst, ts, icmp_type=8):
+    ids.inspect_packet(pkt(ts=ts, src_ip=src, dst_ip=dst, protocol='ICMP',
+                           icmp_type=icmp_type, payload_size=56))
 
 
 def ha_token_request():
@@ -261,6 +261,13 @@ class TestAttacksStillAlert(unittest.TestCase):
             ping(ids, '198.51.100.9', PC, T0 + i * 0.005)
         self.assertRaised(alerts, 'ICMP-FLOOD', 'HIGH')
 
+    def test_an_unreachable_flood(self):
+        """BlackNurse: ICMP errors by the thousands a second, at a firewall's CPU."""
+        ids, alerts = ping_engine()
+        for i in range(4000):
+            ping(ids, '198.51.100.9', PC, T0 + i * 0.0005, icmp_type=3)
+        self.assertRaised(alerts, 'ICMP-FLOOD', 'HIGH')
+
     def test_a_ping_sweep_of_the_network(self):
         ids, alerts = ping_engine()
         for i in range(2, 100):
@@ -365,6 +372,16 @@ class TestFalseAlarmsStayQuiet(unittest.TestCase):
             ping(ids, PC, relays[tick % 29], T0 + tick * 0.2)
         self.assertEqual([a.rule_id for a in alerts if a.rule_id in ('ICMP-FLOOD', 'PING-SWEEP')],
                          [])
+
+    def test_a_vpn_exit_node_losing_its_uplink(self):
+        """One more HIGH "ICMP Flood" on 11-10, found replaying the day: the exit
+        node answered this PC's HTTPS connections with 492 "host unreachable" in
+        4.5 minutes, up to 86 in ten seconds."""
+        ids, alerts = ping_engine()
+        times = [T0 + i * 0.1 for i in range(86)] + [T0 + 10 + i * 0.63 for i in range(406)]
+        for ts in times:
+            ping(ids, '100.68.0.5', PC, ts, icmp_type=3)
+        self.assertEqual([a.rule_id for a in alerts if a.rule_id == 'ICMP-FLOOD'], [])
 
     def test_discord_testing_its_voice_servers(self):
         """Two HIGH "Known Malicious IP" on 11-11 and the gateway blocking a reply:

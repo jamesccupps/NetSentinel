@@ -9,7 +9,9 @@ The gateway's IDS/IPS detections, and two false alarms from 2026-11-10/11.
   NetSentinel raised two HIGH "Known Malicious IP" alerts and the gateway
   blocked a reply. Cloudflare's published ranges do not cover that /16.
 - Tailscale timing its 29 relay servers at a few pings a second each was 160
-  HIGH "ICMP Flood" alerts in four minutes: the rule counted per source.
+  HIGH "ICMP Flood" alerts in four minutes: the rule counted per source. In the
+  same minutes its exit node, having lost its uplink, answered this PC's HTTPS
+  connections with "host unreachable", up to 86 in ten seconds: one more.
 Addresses here are made up or public example ones; MACs are documentation ones.
 """
 
@@ -322,6 +324,33 @@ class TestIcmp(unittest.TestCase):
         flood = [a for a in alerts if a.rule_id == 'ICMP-FLOOD']
         self.assertEqual(len(flood), 1)
         self.assertEqual(flood[0].evidence['target_ip'], PC)
+
+    def test_unreachables_answering_this_pcs_own_connections(self):
+        """A VPN exit node losing its uplink, 11-10: 492 "host unreachable" in
+        4.5 minutes, up to 86 in ten seconds, each answering an HTTPS connection
+        this PC tried. One HIGH "ICMP Flood" at the echo bar."""
+        ids, alerts = self.engine()
+        times = [T0 + i * 0.1 for i in range(86)]
+        times += [T0 + 10 + i * 0.63 for i in range(406)]
+        for ts in times:
+            self.ping(ids, '100.68.0.5', PC, ts, icmp_type=3)
+        self.assertNotIn('ICMP-FLOOD', [a.rule_id for a in alerts])
+
+    def test_an_unreachable_flood_still_alerts(self):
+        """BlackNurse: "port unreachable" by the tens of thousands a second."""
+        ids, alerts = self.engine()
+        for i in range(4000):
+            self.ping(ids, OTHER, PC, T0 + i * 0.0005, icmp_type=3)
+        flood = [a for a in alerts if a.rule_id == 'ICMP-FLOOD']
+        self.assertEqual(len(flood), 1)
+        self.assertEqual(flood[0].evidence['icmp_type'], 3)
+        self.assertIn('error messages', flood[0].description)
+
+    def test_unreachables_do_not_mask_pings_at_the_same_pair(self):
+        ids, alerts = self.engine()
+        for i in range(600):
+            self.ping(ids, OTHER, PC, T0 + i * 0.01, icmp_type=8 if i % 2 else 3)
+        self.assertIn('ICMP-FLOOD', [a.rule_id for a in alerts])
 
     def test_a_ping_sweep_of_the_lan(self):
         ids, alerts = self.engine()

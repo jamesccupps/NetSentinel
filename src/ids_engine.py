@@ -31,6 +31,12 @@ EDGE_NETWORKS = {13335: 'Cloudflare', 20940: 'Akamai', 16625: 'Akamai',
 # ICMP to one target in 10 seconds above which it is a flood: a ping flood
 # runs to hundreds a second; a VPN's peer checking the path, a few.
 ICMP_FLOOD_PER_10S = 50
+# ICMP errors (unreachable, source quench, redirect, time exceeded, parameter
+# problem) answer packets the target itself sent, so a dropped path makes a
+# burst of them. As a flood they are BlackNurse's unreachables, tens of
+# thousands a second, and are held to that.
+ICMP_ERROR_TYPES = frozenset({3, 4, 5, 11, 12})
+ICMP_ERROR_FLOOD_PER_10S = 1000
 # One host pinging this many local addresses within the window is a sweep.
 PING_SWEEP_HOSTS = 20
 PING_SWEEP_WINDOW = 30
@@ -433,6 +439,7 @@ class IDSEngine:
         self._arp_table = {}  # {ip: mac}
         self._dns_queries_by_ip = defaultdict(lambda: deque(maxlen=200))
         self._icmp_flood_tracker = defaultdict(lambda: deque(maxlen=200))  # (src, dst)
+        self._icmp_error_counts = {}  # (src, dst) -> [window start, ICMP errors in it]
         self._ping_targets = {}     # src -> {local address pinged: last time}
 
         # DNS resolution tracking: maps IPs to domains and vice versa
@@ -594,6 +601,9 @@ class IDSEngine:
         for src in [s for s, hosts in self._ping_targets.items()
                     if not hosts or now - max(hosts.values()) > 300]:
             del self._ping_targets[src]
+        for pair in [p for p, (start, _) in self._icmp_error_counts.items()
+                     if now - start > 300]:
+            del self._icmp_error_counts[pair]
 
         # Prune long-lived suppressions once their window has fully elapsed
         stale_long = [k for k, t in self._long_suppressions.items() if now - t > 7200]
@@ -1332,22 +1342,43 @@ class IDSEngine:
         if pkt_info.protocol == "ICMP" and not (
                 self.net_env and self.net_env.is_gateway(pkt_info.src_ip)):
             pair = (pkt_info.src_ip, pkt_info.dst_ip)
-            self._icmp_flood_tracker[pair].append(now)
-            recent = [t for t in self._icmp_flood_tracker[pair] if now - t < 10]
-            if len(recent) > ICMP_FLOOD_PER_10S:
+            errors = pkt_info.icmp_type in ICMP_ERROR_TYPES
+            if errors:
+                # A Tailscale exit node that lost its uplink answered each HTTPS
+                # connection this PC tried with "host unreachable": 492 in 4.5
+                # minutes, up to 86 in ten seconds, a HIGH alert at the echo bar.
+                # Counted per ten-second window: a deque long enough for this bar
+                # would be a thousand entries per pair.
+                window = self._icmp_error_counts.get(pair)
+                if window is None or now - window[0] >= 10:
+                    window = self._icmp_error_counts[pair] = [now, 0]
+                window[1] += 1
+                count, limit = window[1], ICMP_ERROR_FLOOD_PER_10S
+            else:
+                self._icmp_flood_tracker[pair].append(now)
+                count = len([t for t in self._icmp_flood_tracker[pair] if now - t < 10])
+                limit = ICMP_FLOOD_PER_10S
+            if count > limit:
+                kind = 'ICMP error messages' if errors else 'ICMP packets'
                 alerts.append(self._create_alert(
                     "ICMP-FLOOD", Severity.HIGH,
                     "ICMP Flood Detected",
-                    f"{len(recent)} ICMP packets from {pkt_info.src_ip} to "
+                    f"{count} {kind} from {pkt_info.src_ip} to "
                     f"{pkt_info.dst_ip} in 10 seconds",
                     pkt_info,
                     evidence={
                         'source_ip': pkt_info.src_ip,
                         'target_ip': pkt_info.dst_ip,
-                        'icmp_count': len(recent),
-                        'rate': f"{len(recent) / 10:.0f} pings/sec",
-                        'description': 'A high rate of ICMP at one host can be a ping flood '
-                            '(denial of service).',
+                        'icmp_count': count,
+                        'icmp_type': pkt_info.icmp_type,
+                        'rate': f"{count / 10:.0f} per second",
+                        'description': (
+                            'A flood of ICMP errors (unreachable, time exceeded) far '
+                            'beyond what a lost route produces: an attack on a '
+                            "firewall's CPU, such as BlackNurse."
+                            if errors else
+                            'A high rate of ICMP at one host can be a ping flood '
+                            '(denial of service).'),
                         'recommendation': 'Block ICMP from this source if not expected.',
                     },
                     category="DoS",
