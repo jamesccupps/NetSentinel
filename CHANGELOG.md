@@ -1,13 +1,13 @@
 # NetSentinel Changelog
 
-## Unreleased — The gateway's threat detections, and two more false alarms
+## v1.16.0 — The gateway's threat detections, and three false alarms gone
 
-**2544 unit tests** plus 14 integration checks.
+**2550 unit tests** plus 14 integration checks.
 
 - **UniFi's IDS/IPS detections are NetSentinel alerts.** The gateway already
   sent each "Threat Detected" and "Threat Detected and Blocked" event over the
   syslog NetSentinel receives, and NetSentinel stored them and did nothing
-  more: the owner learnt of a block from the UniFi phone app. Each is now a
+  more: the owner learned of a block from the UniFi phone app. Each is now a
   **UNIFI-IPS** alert with the signature and its number, the policy, UniFi's
   risk and action, and what NetSentinel adds:
   - when the gateway's "incoming" is a reply (from a remote service port to an
@@ -32,6 +32,16 @@
   and target, over 50 in ten seconds, one alert per pair per five minutes. A
   host pinging 20 or more local addresses in 30 seconds is its own MEDIUM
   **PING-SWEEP** alert, which the old count caught as a "flood".
+- **A lost route is not a flood either.** In the same minutes, Tailscale's
+  exit node lost its uplink and answered each HTTPS connection this PC tried
+  with "host unreachable": 492 in four and a half minutes, one more HIGH alert.
+  ICMP errors (unreachable, time exceeded and the like) answer traffic the
+  target sent, so they now count as a flood only at attack rates, over 1,000
+  in ten seconds (BlackNurse runs to tens of thousands a second).
+
+Before release, the 23 hours of the owner's traffic around these alerts were
+replayed through 1.15.0 and this version: the same alerts, less 160 ICMP Flood,
+and no PING-SWEEP.
 
 ## v1.15.0 — Fewer false alarms, and nothing real missed
 

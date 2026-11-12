@@ -242,8 +242,10 @@ jobs:
         run: |
           test -f dist/NetSentinel.exe.sig || { echo "::error::the build was not signed"; exit 1; }
           python3 tools/release_notes.py "$TAG" > notes.md
+          # Titled "NetSentinel 1.2.3", not "v1.2.3": the form the owner's other
+          # repositories use.
           gh release view "$TAG" >/dev/null 2>&1 || \
-            gh release create "$TAG" --title "NetSentinel $TAG" --notes-file notes.md
+            gh release create "$TAG" --title "NetSentinel ${TAG#v}" --notes-file notes.md
           # No --clobber: once a release is out, Scoop has its hash and installs
           # have its signature, so a re-run on a released tag must fail rather
           # than swap in a rebuilt exe. A bad release gets a new version.

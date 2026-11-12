@@ -663,6 +663,14 @@ class TestReleaseWorkflow(unittest.TestCase):
         self.assertIn('gh release upload', commands)
         self.assertNotIn('--clobber', commands)
 
+    def test_a_release_is_titled_without_the_tags_v(self):
+        # "NetSentinel 1.16.0", the form the owner's other repositories use;
+        # through 1.15.0 the title repeated the tag ("NetSentinel v1.15.0").
+        import re
+        title = re.search(r'gh release create[^\n]*--title "([^"]+)"', self.runs('publish'))
+        self.assertIsNotNone(title)
+        self.assertEqual(title.group(1), 'NetSentinel ${TAG#v}')
+
     def test_actions_are_pinned_by_commit_and_keep_no_credentials(self):
         import re
         for name, job in self.jobs.items():
