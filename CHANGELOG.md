@@ -1,5 +1,53 @@
 # NetSentinel Changelog
 
+## v1.16.2 — Building automation, and a window that keeps up
+
+**2610 unit tests** plus 14 integration checks. From 1.10.x or later this
+installs from the Update button. On a PC that runs a building's HVAC
+controls, 1.16.1 raised almost nothing but BACnet, and the desktop window
+barely opened or scrolled, with monitoring on or off. The browser dashboard
+was fine. Each fix has tests that fail on 1.16.1.
+
+- **A BACnet setting.** Settings → Building automation (`bacnet.mode`):
+  - **Watch it**, the default and what NetSentinel did before: discovery from
+    another computer, writes and device resets are alerts.
+  - **This PC runs the building's controls**: its own discovery, polling and
+    writes are expected, and BACnet is not listed as an unencrypted service.
+    Resets, and writes from any other computer, are still alerts.
+  - **Off**: BACnet is left out of the capture, so none of it is even read.
+  If you added `not udp port 47808` to `capture.bpf_filter` as a stopgap,
+  take it out and use the setting.
+- **No more BACnet "credentials".** Every controller answering discovery was
+  stored in the vault as a credential, and alerted as "[CONFIRMED] Plaintext
+  Credential (BACnet)": filed under the broadcast address, with the source
+  port shown as 0, saying to change a password nobody had sent. BACnet and
+  Modbus write commands were filed as credentials too. None of them holds a
+  secret. A controller that announces itself is now a building controller in
+  the device list, and a write is a finding only. What was filed that way
+  before is dropped from the vault and the Exposures page when NetSentinel
+  starts.
+- **A broadcast address is no device.** Controllers answer discovery to the
+  broadcast address, which became an "Unencrypted BACnet Service" of its own.
+- **The desktop window keeps up.** Timed on the real window:
+  - The Forensics Vault drew every entry as its own row of widgets, a second
+    after the window opened: 10 seconds for 500 entries, about 3 minutes for
+    5,000, with the window frozen throughout. It is a table now, newest first
+    (under a tenth of a second), loaded when you open the tab.
+  - Each alert was a block of a dozen widgets, and the dashboard rebuilt its
+    five most recent for every new one: 0.3 to 0.55 seconds of frozen window
+    per alert, and a building network raises them by the hundred. The Alerts
+    tab, the dashboard's recent alerts and the File Analyzer's list are
+    tables now, and new alerts are added twice a second in one batch: 4 to
+    25 ms an alert, a burst of 300 in 29 ms. With 5,000 stored alerts the
+    window opens in under a second instead of 3.3, and the Alerts tab lists
+    the latest 1,000, not 200, with an Ack column.
+  - The Devices, Exposures, Incidents and Capture tabs rebuilt themselves
+    every five seconds whether shown or not. Now only the one on screen does.
+- **Open in vault.** A credential alert's window and a plaintext login on the
+  Exposures page open the vault at that entry, to see what was actually
+  caught. By default the vault keeps only the masked value; the full one only
+  with `forensics.store_raw_credentials` on.
+
 ## v1.16.1 — A day on a work laptop, and four false alarms gone
 
 **2574 unit tests** plus 14 integration checks. From 1.10.x or later this
