@@ -337,11 +337,17 @@ _PORT_CACHE_TTL = 2  # seconds between full psutil enumerations
 # Refreshed with it, for TcpRoles: this computer's addresses and listening ports.
 _local_addresses = frozenset()
 _listening_ports = frozenset()
+# (local port, remote address) -> (process name, pid, last seen), for a few
+# minutes after the connection is gone: the gateway's report of a connection
+# from here arrives over syslog after the fact (process_for_connection).
+_recent_connections = {}
+_RECENT_CONNECTION_SEC = 300
 
 
 def _refresh_port_process_map(force=False):
     """Build a map of local ports to process names using psutil."""
     global _port_process_cache, _port_cache_time, _local_addresses, _listening_ports
+    global _recent_connections
     if not PSUTIL_AVAILABLE:
         return
     now = time.time()
@@ -349,6 +355,8 @@ def _refresh_port_process_map(force=False):
         return
     try:
         new_map, listening = {}, set()
+        recent = {key: seen for key, seen in _recent_connections.items()
+                  if now - seen[2] < _RECENT_CONNECTION_SEC}
         for conn in psutil.net_connections(kind='inet'):
             if conn.laddr and conn.status == psutil.CONN_LISTEN:
                 listening.add(conn.laddr.port)
@@ -357,8 +365,12 @@ def _refresh_port_process_map(force=False):
                     proc = psutil.Process(conn.pid)
                     new_map[conn.laddr.port] = (proc.name(), conn.pid)
                 except (psutil.NoSuchProcess, psutil.AccessDenied):
-                    pass
+                    continue
+                if conn.raddr:
+                    recent[(conn.laddr.port, conn.raddr.ip)] = (new_map[conn.laddr.port][0],
+                                                               conn.pid, now)
         _port_process_cache = new_map
+        _recent_connections = recent
         _listening_ports = frozenset(listening)
         _local_addresses = frozenset(
             a.address.split('%')[0] for addrs in psutil.net_if_addrs().values()
@@ -371,6 +383,19 @@ def _refresh_port_process_map(force=False):
 def _get_process_for_port(port):
     """Look up which process owns a given local port. Pure dict read — no syscalls."""
     return _port_process_cache.get(port, ("", 0))
+
+
+def process_for_connection(local_port, remote_ip, refresh=True):
+    """
+    (process name, pid) of what had this local port connected to remote_ip
+    in the last few minutes, or None. Both, because Windows reuses a port for
+    another program's connection soon after. refresh looks at the connections
+    open now as well: NetSentinel may not be monitoring.
+    """
+    if refresh:
+        _refresh_port_process_map(force=True)
+    seen = _recent_connections.get((local_port, remote_ip))
+    return (seen[0], seen[1]) if seen else None
 
 
 def _process_map_refresher(stop):

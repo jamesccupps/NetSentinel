@@ -653,8 +653,11 @@ class IDSEngine:
                 entry[1] += 1
 
         # The TLS server name is what the client says it is connecting to: shown
-        # with the address, but on its own never a reason to trust it.
-        if pkt_info.tls_sni and pkt_info.dst_ip:
+        # with the address, but on its own never a reason to trust it. Never
+        # filed under this PC's own address, which no server name belongs to: one
+        # that got there made this PC "outlook.office365.com" in a gateway alert.
+        if pkt_info.tls_sni and pkt_info.dst_ip and \
+                pkt_info.dst_ip not in (getattr(self.net_env, 'local_ips', None) or ()):
             known = self._ip_to_domains.get(pkt_info.dst_ip)
             if known is None or len(known) < self._ip_to_domains_max:
                 self._ip_to_domains[pkt_info.dst_ip].add(pkt_info.tls_sni)

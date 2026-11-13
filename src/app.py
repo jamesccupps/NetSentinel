@@ -370,12 +370,15 @@ class NetSentinelApp:
                 "computer; the audit's own probes look like this.")
 
         # Enrich with domain resolution from IDS engine's DNS tracker
+        # Never for this PC's own address: a server's name filed under it (see
+        # IDSEngine's TLS server names) made this PC "outlook.office365.com".
+        own = self._own_addresses()
         try:
-            if self.ids_engine and alert.dst_ip:
+            if self.ids_engine and alert.dst_ip and alert.dst_ip not in own:
                 domains = self.ids_engine._get_domains_for_ip(alert.dst_ip)
                 if domains and 'destination_domains' not in alert.evidence:
                     alert.evidence['destination_domains'] = list(domains)[:5]
-            if self.ids_engine and alert.src_ip:
+            if self.ids_engine and alert.src_ip and alert.src_ip not in own:
                 domains = self.ids_engine._get_domains_for_ip(alert.src_ip)
                 if domains and 'source_domains' not in alert.evidence:
                     alert.evidence['source_domains'] = list(domains)[:5]
@@ -385,7 +388,7 @@ class NetSentinelApp:
         # Enrich with forensics domain map
         try:
             forensics = getattr(self, 'forensics', None)
-            if forensics and alert.dst_ip:
+            if forensics and alert.dst_ip and alert.dst_ip not in own:
                 f_domains = forensics._ip_to_domains.get(alert.dst_ip, set())
                 if f_domains:
                     existing = set(alert.evidence.get('destination_domains', []))
@@ -436,8 +439,9 @@ class NetSentinelApp:
         same signature between the same two addresses is one alert per ten
         minutes: a blocked scan arrives as one event per packet.
         """
-        from src.gateway_threats import sides, threat_alert
-        local, _, remote, _ = sides(record)
+        from src.gateway_threats import sides, started_here, threat_alert
+        own = self._own_addresses()
+        local, local_port, remote, _ = sides(record, own)
         key = (record.get('rule', ''), record.get('signature_id') or record.get('signature', ''),
                remote, local)
         now = now or time.time()
@@ -448,12 +452,29 @@ class NetSentinelApp:
         if len(seen) > 2000:
             for k in sorted(seen, key=seen.get)[:1000]:
                 del seen[k]
-        alert = threat_alert(record)
+        program = ''
+        if started_here(record, own) and local_port:
+            program = self._program_for_connection(local_port, remote)
+        alert = threat_alert(record, own=own, program=program)
         also = self._own_alerts_about(remote, alert.timestamp)
         if also:
             alert.evidence['netsentinel_also_saw'] = also
         self._alert_gateway(alert)
         return alert
+
+    def _own_addresses(self):
+        """This PC's addresses, as the network environment last found them."""
+        return frozenset(getattr(getattr(self, 'net_env', None), 'local_ips', None) or ())
+
+    def _program_for_connection(self, local_port, remote):
+        """'name (process N)' for what had this PC's end of a connection, or ''."""
+        try:
+            from src.capture import process_for_connection
+            found = process_for_connection(local_port, remote)
+        except Exception as e:
+            logger.debug("Program lookup failed: %s", e)
+            return ''
+        return f"{found[0]} (process {found[1]})" if found else ''
 
     def _own_alerts_about(self, ip, when, within=600):
         """NetSentinel's own alerts naming this address within ten minutes, for a gateway event."""

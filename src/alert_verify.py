@@ -998,6 +998,10 @@ class AlertVerifier:
         what = evidence.get('signature') or evidence.get('policy') or 'a signature'
         reasoning.append(f"The gateway's IPS matched {what} "
                          f"({evidence.get('gateway_action', 'action unknown')})")
+        here = bool(evidence.get('started_here'))
+        if here:
+            program = evidence.get('program')
+            reasoning.append("This PC opened the connection" + (f": {program}" if program else ""))
         shared = None
         if ids_engine is not None and remote:
             ranges = getattr(ids_engine, 'cloud_ranges', None)
@@ -1035,7 +1039,8 @@ class AlertVerifier:
                                 "Reported by the gateway; check what this side was doing")
         else:
             verdict, summary = (AlertVerdict.LIKELY_THREAT,
-                                "The gateway matched an attack pattern")
+                                "A program on this PC did what the gateway matched" if here
+                                else "The gateway matched an attack pattern")
         return {'verdict': verdict, 'confidence': min(abs(score) / 4, 1.0),
                 'reasoning': reasoning, 'summary': summary}
 
