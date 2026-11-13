@@ -1,5 +1,29 @@
 # NetSentinel Changelog
 
+## v1.16.3 — Gateway alerts this PC started
+
+**2625 unit tests** plus 14 integration checks. From 1.10.x or later this
+installs from the Update button.
+
+- **When this PC starts what the gateway caught, the alert says so.** An SSH
+  client on the owner's desktop retried an address on another private network
+  five times, and the UniFi gateway blocked it as "ET SCAN Potential SSH Scan
+  OUTBOUND". NetSentinel's alert had it backwards: with both addresses
+  private, it took the other one for this network's, put the desktop on the
+  far side, and said to check what the other address runs on port 22. Now:
+  - this PC's own addresses decide which side is here, then private against
+    public, then the gateway's direction;
+  - an event this PC started reads "This PC started it: ssh.exe (process
+    4242) connected to ... on port 22", and the check says a program on this
+    PC did what the gateway matched;
+  - the program comes from the connection itself, which NetSentinel now
+    remembers for five minutes with where it went, since the gateway's report
+    arrives after the fact. When it can't tell, the alert says so.
+- **No server names for this PC.** A website's name had been filed under this
+  PC's own address, which made the desktop "outlook.office365.com" in that
+  alert. Names are never filed under, or shown for, this PC's addresses.
+- "NetSentinel saw this address too" looks at the far side, not this PC.
+
 ## v1.16.2 — Building automation, and a window that keeps up
 
 **2610 unit tests** plus 14 integration checks. From 1.10.x or later this
