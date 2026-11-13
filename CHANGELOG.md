@@ -1,5 +1,27 @@
 # NetSentinel Changelog
 
+## v1.16.4 — This network, on both dashboards
+
+**2638 unit tests** plus 14 integration checks. From 1.10.x or later this
+installs from the Update button.
+
+- **"This network"** is a panel on the browser dashboard's overview and a
+  card on the desktop Dashboard tab: this PC's address on the network it
+  watches, the subnet, gateway, DHCP and DNS servers, the network adapter,
+  and this PC's other addresses (a VPN's, virtual adapters'). NetSentinel
+  always found these when it started, and used them for detection, but
+  neither dashboard showed them. Link-local addresses (169.254.x.x, fe80::)
+  are left out: Windows gives one to every adapter that is connected
+  nowhere. The desktop card refreshes every 30 seconds, monitoring or not.
+- "This PC" is the address of the adapter NetSentinel captures on. The
+  summary it was taken from kept only five of the PC's addresses, picked
+  arbitrarily, and could leave out the one that matters: on a PC with
+  Tailscale and virtual adapters, the VPN's address came out as "This PC".
+
+Your public internet address is not shown: finding it means asking an
+outside service, and NetSentinel sends nothing out beyond downloading its
+threat lists.
+
 ## v1.16.3 — Gateway alerts this PC started
 
 **2625 unit tests** plus 14 integration checks. From 1.10.x or later this

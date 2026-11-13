@@ -12,7 +12,7 @@ REM ============================================================================
 echo.
 echo  ========================================
 echo     NETSENTINEL - Setup Installer
-echo     Network Monitor ^& IDS v1.16.3
+echo     Network Monitor ^& IDS v1.16.4
 echo  ========================================
 echo.
 
