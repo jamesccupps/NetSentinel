@@ -142,8 +142,9 @@ class TestTheDesktopApp(unittest.TestCase):
         import inspect
         from src import gui
         source = inspect.getsource(gui.NetSentinelGUI)
-        self.assertEqual(source.count('AlertListItem(self._alerts_scroll_frame, alert.to_dict(), '
-                                      'actions=self._alert_actions)'), 3)
+        # The Alerts tab's table and the dashboard's recent alerts (test_alert_table).
+        self.assertEqual(source.count('AlertTable(parent, actions=self._alert_actions,'), 1)
+        self.assertEqual(source.count('actions=self._alert_actions'), 2)
         self.assertIn(json.dumps('Rule record')[1:-1], source)
 
 

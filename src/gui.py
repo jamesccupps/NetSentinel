@@ -48,6 +48,35 @@ SEVERITY_COLORS = {
     'CRITICAL': COLORS['red'],
 }
 
+# Rows the Alerts tab shows, newest first; the alert store keeps more
+# (alerts.max_stored), and Export has them all.
+ALERTS_SHOWN = 1000
+# The File Analyzer's list of what a capture raised.
+PCAP_ALERTS_SHOWN = 2000
+# How often alerts heard from other threads are added to the window (ms).
+ALERT_BATCH_MS = 500
+
+# The Forensics Vault's services list shows at most this many.
+SERVICES_SHOWN = 300
+
+# Settings' choices for bacnet.mode (config.BACNET_MODES), as (value, shown).
+BACNET_CHOICES = (
+    ('watch', 'Watch it'),
+    ('workstation', "This PC runs the building's controls"),
+    ('off', 'Off'),
+)
+
+
+class _Choice:
+    """A Settings drop-down: shows the text, gives back the value."""
+
+    def __init__(self, var, choices):
+        self._var = var
+        self._values = {text: value for value, text in choices}
+
+    def get(self):
+        return self._values.get(self._var.get(), self._var.get())
+
 
 # ─── Mouse wheel ───────────────────────────────────────────────────────────────
 # A canvas has no wheel binding of its own, so the scrolling pages built on one
@@ -330,12 +359,12 @@ class AlertDetailWindow:
         host = evidence.get('extra', {}).get('host', '') or evidence.get('host', '')
 
         conn_fields = []
-        src_str = f"{src_ip}:{src_port}" if src_ip else '—'
+        src_str = presentation.endpoint(src_ip, src_port) or '—'
         if src_domains:
             src_str += f"  ({', '.join(str(d) for d in src_domains[:2])})"
         conn_fields.append(('Source', src_str))
 
-        dst_str = f"{dst_ip}:{dst_port}" if dst_ip else '—'
+        dst_str = presentation.endpoint(dst_ip, dst_port) or '—'
         if dst_domains and dst_domains != ['No domain — direct IP']:
             dst_str += f"  ({', '.join(str(d) for d in dst_domains[:2])})"
         elif host:
@@ -500,6 +529,13 @@ class AlertDetailWindow:
                                   command=lambda v=verdict: self._judge(v))
                     b.pack(side='left', padx=4)
                     self._judge_buttons.append(b)
+        # A credential alert says only that one was seen; the vault shows what.
+        open_vault = getattr(actions, 'open_vault', None)
+        if open_vault is not None and alert_dict.get('rule_id') == 'FORENSICS-CREDENTIAL':
+            tk.Button(buttons, text="Open in vault", font=('Segoe UI', 9),
+                      bg=COLORS['bg_input'], fg=COLORS['text'], relief='flat',
+                      padx=12, pady=4, cursor='hand2',
+                      command=lambda: open_vault(alert_dict)).pack(side='left', padx=4)
         close_btn = tk.Button(buttons, text="Close", font=('Segoe UI', 9),
                              bg=COLORS['bg_input'], fg=COLORS['text'],
                              relief='flat', padx=16, pady=4, cursor='hand2',
@@ -567,118 +603,110 @@ class AlertDetailWindow:
                         anchor='w', wraplength=500).pack(side='left', padx=(4, 0))
 
 
-class AlertListItem(tk.Frame):
-    """Single alert row in the alerts panel. Click to expand details."""
-    def __init__(self, parent, alert_dict, actions=None, **kwargs):
-        kwargs.setdefault('bg', COLORS['bg_panel'])
-        kwargs.setdefault('cursor', 'hand2')
+class AlertTable(tk.Frame):
+    """
+    Alerts as a table, newest first, opened with a click. Each alert used to be
+    a block of a dozen widgets in one long scrolling frame, and every new one
+    made Tk lay out all of them again: 0.15 to 0.4 seconds of frozen window per
+    alert with 200 listed, and the dashboard's five rebuilt for each alert added
+    as much again. A building network's few hundred alerts froze the window for
+    minutes. A table row costs a fraction of a millisecond.
+    """
+    COLUMNS = (('time', 'Time', 135), ('severity', 'Severity', 75), ('title', 'Alert', 380),
+               ('route', 'From → to', 270), ('rule', 'Rule', 160), ('ack', 'Ack', 40))
+
+    def __init__(self, parent, actions=None, lookup=None, limit=ALERTS_SHOWN, height=20,
+                 columns=('time', 'severity', 'title', 'route', 'rule', 'ack'), **kwargs):
+        kwargs.setdefault('bg', COLORS['bg_card'])
         super().__init__(parent, **kwargs)
-
-        self._alert_dict = alert_dict
         self._actions = actions
-        sev = alert_dict.get('severity', 'LOW')
-        color = SEVERITY_COLORS.get(sev, COLORS['text_dim'])
+        self._lookup = lookup           # alert id -> its current dict, or None
+        self._limit = limit
+        self._rows = {}                 # table row -> alert dict
+        shown = [c for c in self.COLUMNS if c[0] in columns]
+        tree = ttk.Treeview(self, columns=[c[0] for c in shown], show='headings',
+                            height=height, selectmode='browse')
+        for col, label, width in shown:
+            tree.heading(col, text=label)
+            tree.column(col, width=width, minwidth=35, anchor='w',
+                        stretch=col in ('title', 'route'))
+        for sev, colour in SEVERITY_COLORS.items():
+            tree.tag_configure(sev, foreground=colour)
+        bar = ttk.Scrollbar(self, orient='vertical', command=tree.yview)
+        tree.configure(yscrollcommand=bar.set)
+        tree.pack(side='left', fill='both', expand=True)
+        bar.pack(side='right', fill='y')
+        tree.bind('<ButtonRelease-1>', self._clicked)
+        tree.bind('<Return>', lambda e: self._open(tree.focus()))
+        self.tree = tree
 
-        # Severity indicator bar
-        bar = tk.Frame(self, bg=color, width=4)
-        bar.pack(side='left', fill='y', padx=(0, 8))
+    @staticmethod
+    def values(alert):
+        """One alert dict's row."""
+        return {
+            'time': alert.get('time_str', ''),
+            'severity': alert.get('severity', ''),
+            'title': alert.get('title', ''),
+            'route': (f"{presentation.endpoint(alert.get('src_ip'), alert.get('src_port')) or '—'} → "
+                      f"{presentation.endpoint(alert.get('dst_ip'), alert.get('dst_port')) or '—'}"),
+            'rule': alert.get('rule_id', ''),
+            'ack': '✓' if alert.get('acknowledged') else '',
+        }
 
-        # Content
-        content = tk.Frame(self, bg=COLORS['bg_panel'])
-        content.pack(side='left', fill='both', expand=True)
+    def _insert(self, alert, index):
+        row = self.values(alert)
+        item = self.tree.insert('', index, values=[row[c] for c in self.tree['columns']],
+                                tags=(str(alert.get('severity', '')),))
+        self._rows[item] = alert
 
-        # Title row
-        title_frame = tk.Frame(content, bg=COLORS['bg_panel'])
-        title_frame.pack(fill='x')
+    def show(self, alerts):
+        """Replace the rows: alerts newest first, at most the limit."""
+        self.clear()
+        for alert in list(alerts)[:self._limit]:
+            self._insert(alert, 'end')
 
-        sev_lbl = tk.Label(title_frame, text=f"[{sev}]",
-                           font=('Consolas', 8, 'bold'), fg=color,
-                           bg=COLORS['bg_panel'])
-        sev_lbl.pack(side='left')
+    def add(self, alerts, at_top=True):
+        """Add alerts in the order they came, oldest first: at the top, newest
+        uppermost, or at the bottom. Past the limit the oldest go."""
+        alerts = list(alerts)[-self._limit:]
+        for alert in alerts:
+            self._insert(alert, 0 if at_top else 'end')
+        children = self.tree.get_children()
+        if len(children) > self._limit:
+            extra = children[self._limit:] if at_top else children[:len(children) - self._limit]
+            self.tree.delete(*extra)
+            for item in extra:
+                self._rows.pop(item, None)
 
-        title_lbl = tk.Label(title_frame, text=alert_dict.get('title', ''),
-                             font=('Segoe UI', 9, 'bold'),
-                             fg=COLORS['text'], bg=COLORS['bg_panel'])
-        title_lbl.pack(side='left', padx=(6, 0))
+    def clear(self):
+        self.tree.delete(*self.tree.get_children())
+        self._rows = {}
 
-        time_str = alert_dict.get('time_str', '')
-        time_lbl = tk.Label(title_frame, text=time_str,
-                            font=('Segoe UI', 8), fg=COLORS['text_dim'],
-                            bg=COLORS['bg_panel'])
-        time_lbl.pack(side='right')
+    def __len__(self):
+        return len(self._rows)
 
-        # Click indicator
-        expand_lbl = tk.Label(title_frame, text="▶ click for details",
-                              font=('Segoe UI', 7), fg=COLORS['text_dim'],
-                              bg=COLORS['bg_panel'])
-        expand_lbl.pack(side='right', padx=(0, 8))
+    def _clicked(self, event):
+        if self.tree.identify_region(event.x, event.y) == 'cell':
+            self._open(self.tree.identify_row(event.y))
 
-        # Description
-        desc = alert_dict.get('description', '')
-        if len(desc) > 120:
-            desc = desc[:117] + "..."
-        desc_lbl = tk.Label(content, text=desc, font=('Segoe UI', 8),
-                            fg=COLORS['text_dim'], bg=COLORS['bg_panel'],
-                            anchor='w', wraplength=500, justify='left')
-        desc_lbl.pack(fill='x', pady=(2, 0))
-
-        # Source/Dest
-        src = alert_dict.get('src_ip', '')
-        dst = alert_dict.get('dst_ip', '')
-        if src or dst:
-            addr_lbl = tk.Label(content,
-                                text=f"{src}:{alert_dict.get('src_port','')} → "
-                                     f"{dst}:{alert_dict.get('dst_port','')}",
-                                font=('Consolas', 8), fg=COLORS['text_dim'],
-                                bg=COLORS['bg_panel'], anchor='w')
-            addr_lbl.pack(fill='x')
-
-        # Evidence preview (first key-value if available)
-        evidence = alert_dict.get('evidence') or {}
-        if evidence:
-            preview_parts = []
-            for k, v in evidence.items():
-                if k in ('recommendation', 'description'):
-                    continue
-                if isinstance(v, list):
-                    preview_parts.append(f"{k}: [{len(v)} items]")
-                else:
-                    preview_parts.append(f"{k}: {v}")
-                if len(preview_parts) >= 3:
-                    break
-            if preview_parts:
-                preview_text = "  |  ".join(preview_parts)
-                if len(preview_text) > 100:
-                    preview_text = preview_text[:97] + "..."
-                preview_lbl = tk.Label(content, text=f"📋 {preview_text}",
-                                       font=('Consolas', 7),
-                                       fg=COLORS['accent'], bg=COLORS['bg_panel'],
-                                       anchor='w')
-                preview_lbl.pack(fill='x')
-
-        # Separator
-        sep = tk.Frame(self, bg=COLORS['border'], height=1)
-        sep.pack(fill='x', side='bottom')
-
-        # Bind click to ALL child widgets
-        self._bind_click_recursive(self)
-
-    def _bind_click_recursive(self, widget):
-        """Bind click handler to widget and all its children."""
-        widget.bind('<Button-1>', self._on_click)
-        for child in widget.winfo_children():
-            self._bind_click_recursive(child)
-
-    def _on_click(self, event=None):
-        """Open the detail popup."""
-        AlertDetailWindow(self.winfo_toplevel(), self._alert_dict, actions=self._actions)
+    def _open(self, item):
+        alert = self._rows.get(item)
+        if alert is None:
+            return
+        if self._lookup is not None and alert.get('id') is not None:
+            # Its current state: verification can finish, and verdicts be given,
+            # after the row was drawn.
+            alert = self._lookup(alert['id']) or alert
+        AlertDetailWindow(self.winfo_toplevel(), alert, actions=self._actions)
 
 
 class AlertActions:
     """What the alert detail window may do to a stored alert, through the app."""
 
-    def __init__(self, app):
+    def __init__(self, app, open_vault=None):
         self.app = app
+        # Opens the Forensics Vault at a credential alert's entry (the main window's).
+        self.open_vault = open_vault
 
     def acknowledge(self, alert_id):
         return self.app.alert_manager.acknowledge_alert(alert_id)
@@ -740,8 +768,9 @@ class NetSentinelGUI:
         self._monitoring = False
         self._lifecycle_thread = None
         self._lifecycle_was_start = False
-        self._alert_widgets = []
-        self._alert_actions = AlertActions(app)
+        # Alerts from other threads wait here; _drain_alerts adds them a batch at a time.
+        self._pending_alerts = deque()
+        self._alert_actions = AlertActions(app, open_vault=self._open_alert_in_vault)
         # gui.max_log_lines was declared in config but never read.
         self._max_log_lines = max(20, int(
             self.app.config.get('gui', 'max_log_lines', default=500)))
@@ -752,6 +781,7 @@ class NetSentinelGUI:
 
         # Register alert listener
         self.app.alert_manager.register_listener(self._on_new_alert)
+        self.root.after(ALERT_BATCH_MS, self._drain_alerts)
 
         # The tray icon. With it, closing the window hides it and monitoring
         # carries on; without one (no library, no tray on this desktop), closing
@@ -948,6 +978,7 @@ class NetSentinelGUI:
         self._tab_settings = StyledFrame(self.notebook)
         self.notebook.add(self._tab_settings, text='  ⚙  Settings  ')
         self._build_settings_tab(self._tab_settings)
+        self.notebook.bind('<<NotebookTabChanged>>', lambda e: self._on_tab_changed())
 
         # ─── Bottom Status Bar ─────────────────────────────────────
         status_bar = tk.Frame(self.root, bg=COLORS['bg_panel'], height=28)
@@ -1027,8 +1058,10 @@ class NetSentinelGUI:
         recent_card = Card(bottom_frame, title="RECENT ALERTS")
         recent_card.pack(side='left', fill='both', expand=True, padx=(4, 0))
 
-        self._recent_alerts_frame = tk.Frame(recent_card, bg=COLORS['bg_card'])
-        self._recent_alerts_frame.pack(fill='both', expand=True)
+        self._recent_alerts = AlertTable(recent_card, actions=self._alert_actions,
+                                         lookup=self._current_alert, limit=5, height=5,
+                                         columns=('time', 'severity', 'title'))
+        self._recent_alerts.pack(fill='both', expand=True)
 
     def _make_metric_card(self, parent, label, value, color=None):
         card = Card(parent)
@@ -1067,7 +1100,8 @@ class NetSentinelGUI:
         tk.Button(toolbar, text="✓  Acknowledge All", font=('Segoe UI', 8),
                  bg=COLORS['bg_input'], fg=COLORS['text_dim'],
                  relief='flat', cursor='hand2',
-                 command=lambda: self.app.alert_manager.acknowledge_all()
+                 command=lambda: (self.app.alert_manager.acknowledge_all(),
+                                  self._refresh_alerts_display())
                  ).pack(side='right', padx=4)
 
         tk.Button(toolbar, text="📊  Rule record", font=('Segoe UI', 8),
@@ -1079,41 +1113,14 @@ class NetSentinelGUI:
                  font=('Segoe UI', 8), fg=COLORS['text_dim'],
                  bg=COLORS['bg_dark']).pack(side='left', padx=12)
 
-        # Scrollable alerts list
-        container = tk.Frame(parent, bg=COLORS['bg_dark'])
-        container.pack(fill='both', expand=True, padx=8, pady=(0, 8))
+        self._alerts_table = AlertTable(parent, actions=self._alert_actions,
+                                        lookup=self._current_alert)
+        self._alerts_table.pack(fill='both', expand=True, padx=8, pady=(0, 8))
 
-        self._alerts_canvas = tk.Canvas(container, bg=COLORS['bg_dark'], highlightthickness=0)
-        scrollbar = ttk.Scrollbar(container, orient='vertical', command=self._alerts_canvas.yview)
-        self._alerts_scroll_frame = tk.Frame(self._alerts_canvas, bg=COLORS['bg_dark'])
-
-        self._alerts_scroll_frame.bind(
-            '<Configure>',
-            lambda e: self._alerts_canvas.configure(scrollregion=self._alerts_canvas.bbox('all'))
-        )
-        self._alerts_canvas_window = self._alerts_canvas.create_window(
-            (0, 0), window=self._alerts_scroll_frame, anchor='nw')
-        self._alerts_canvas.configure(yscrollcommand=scrollbar.set)
-
-        # CRITICAL: Bind canvas resize to stretch the inner frame to full width
-        # Without this, AlertListItems render with minimal width and appear invisible
-        def _on_canvas_resize(event):
-            self._alerts_canvas.itemconfig(self._alerts_canvas_window, width=event.width)
-        self._alerts_canvas.bind('<Configure>', _on_canvas_resize)
-
-        self._alerts_canvas.pack(side='left', fill='both', expand=True)
-        scrollbar.pack(side='right', fill='y')
-        wheel_scrollable(self._alerts_canvas)
-
-        # ─── Load historical alerts from disk into the GUI ────────
-        # These were loaded by AlertManager before the GUI existed,
-        # so the listener never fired for them. Populate now.
+        # The alerts stored before this window existed: the listener never heard them.
         try:
-            historical = self.app.alert_manager.get_alerts(limit=200)
-            for alert in reversed(historical):  # oldest first so newest ends up on top
-                item = AlertListItem(self._alerts_scroll_frame, alert.to_dict(), actions=self._alert_actions)
-                item.pack(fill='x', padx=4, pady=2)
-                self._alert_widgets.insert(0, item)
+            self._alerts_table.show(
+                a.to_dict() for a in self.app.alert_manager.get_alerts(limit=ALERTS_SHOWN))
         except Exception as e:
             logger.debug("Failed to load historical alerts into GUI: %s", e)
 
@@ -1397,21 +1404,10 @@ class NetSentinelGUI:
         alerts_card = Card(results_frame, title="ALERTS FOUND IN CAPTURE")
         alerts_card.pack(side='left', fill='both', expand=True, padx=(4, 0))
 
-        alerts_inner = tk.Frame(alerts_card, bg=COLORS['bg_card'])
-        alerts_inner.pack(fill='both', expand=True)
-
-        pcap_alert_canvas = tk.Canvas(alerts_inner, bg=COLORS['bg_card'], highlightthickness=0)
-        pcap_scrollbar = ttk.Scrollbar(alerts_inner, orient='vertical', command=pcap_alert_canvas.yview)
-        self._pcap_alerts_frame = tk.Frame(pcap_alert_canvas, bg=COLORS['bg_card'])
-        self._pcap_alerts_frame.bind('<Configure>',
-            lambda e: pcap_alert_canvas.configure(scrollregion=pcap_alert_canvas.bbox('all')))
-        pcap_alert_canvas.create_window((0, 0), window=self._pcap_alerts_frame, anchor='nw')
-        pcap_alert_canvas.configure(yscrollcommand=pcap_scrollbar.set)
-        pcap_alert_canvas.pack(side='left', fill='both', expand=True)
-        pcap_scrollbar.pack(side='right', fill='y')
-        wheel_scrollable(pcap_alert_canvas)
-
-        self._pcap_alert_widgets = []
+        # In the order the capture raised them. Not stored, so nothing to judge.
+        self._pcap_alerts = AlertTable(alerts_card, limit=PCAP_ALERTS_SHOWN,
+                                       columns=('time', 'severity', 'title', 'route', 'rule'))
+        self._pcap_alerts.pack(fill='both', expand=True)
         self._pcap_batch = None
 
     def _open_dashboard(self, page=''):
@@ -1565,9 +1561,7 @@ class NetSentinelGUI:
 
         self._pcap_stats_text.delete('1.0', 'end')
         self._pcap_stats_text.insert('end', "Collecting files...\n")
-        for w in self._pcap_alert_widgets:
-            w.destroy()
-        self._pcap_alert_widgets.clear()
+        self._pcap_alerts.clear()
         self._pcap_set_busy(True)
         self._pcap_progress_var.set(0)
 
@@ -1712,9 +1706,7 @@ class NetSentinelGUI:
         # Clear previous results
         self._pcap_stats_text.delete('1.0', 'end')
         self._pcap_stats_text.insert('end', f"Loading: {os.path.basename(filepath)}...\n")
-        for w in self._pcap_alert_widgets:
-            w.destroy()
-        self._pcap_alert_widgets.clear()
+        self._pcap_alerts.clear()
 
         # Update UI state
         self._pcap_batch = None
@@ -1765,13 +1757,10 @@ class NetSentinelGUI:
 
     def _pcap_add_alert(self, alert):
         """Add a single alert to the PCAP results panel."""
-        # A big folder can raise thousands; Tk slows to a crawl long before that.
-        # The report and Export Results still have every one.
-        if len(self._pcap_alert_widgets) >= 300:
-            return
-        item = AlertListItem(self._pcap_alerts_frame, alert.to_dict())
-        item.pack(fill='x', padx=2, pady=1)
-        self._pcap_alert_widgets.append(item)
+        # A big folder can raise thousands. The table keeps the first
+        # PCAP_ALERTS_SHOWN; the report and Export Results have every one.
+        if len(self._pcap_alerts) < PCAP_ALERTS_SHOWN:
+            self._pcap_alerts.add([alert.to_dict()], at_top=False)
 
     def _pcap_show_results(self, result):
         """Display final analysis results."""
@@ -1944,443 +1933,6 @@ class NetSentinelGUI:
     # ──────────────────────────────────────────────────────────────────────────
     def _build_forensics_tab(self, parent):
         # Top controls
-        ctrl = tk.Frame(parent, bg=COLORS['bg_dark'])
-        ctrl.pack(fill='x', padx=8, pady=8)
-
-        tk.Label(ctrl, text="Encrypted credential vault & security audit findings",
-                font=('Segoe UI', 9), fg=COLORS['text_dim'],
-                bg=COLORS['bg_dark']).pack(side='left')
-
-        self._fv_clear_btn = tk.Button(ctrl, text="🗑  Clear All Data",
-            font=('Segoe UI', 8), bg=COLORS['red_dim'], fg=COLORS['text'],
-            relief='flat', cursor='hand2', command=self._fv_clear_all)
-        self._fv_clear_btn.pack(side='right', padx=4)
-
-        self._fv_export_btn = tk.Button(ctrl, text="📤  Export",
-            font=('Segoe UI', 8), bg=COLORS['bg_input'], fg=COLORS['text_dim'],
-            relief='flat', cursor='hand2', command=self._fv_export)
-        self._fv_export_btn.pack(side='right', padx=4)
-
-        self._fv_refresh_btn = tk.Button(ctrl, text="🔄  Refresh",
-            font=('Segoe UI', 8), bg=COLORS['bg_input'], fg=COLORS['text_dim'],
-            relief='flat', cursor='hand2', command=self._fv_refresh)
-        self._fv_refresh_btn.pack(side='right', padx=4)
-
-        # Search bar
-        search_frame = tk.Frame(parent, bg=COLORS['bg_dark'])
-        search_frame.pack(fill='x', padx=8, pady=(0, 4))
-
-        tk.Label(search_frame, text="Search:", font=('Segoe UI', 9),
-                fg=COLORS['text_dim'], bg=COLORS['bg_dark']).pack(side='left')
-        self._fv_search_var = tk.StringVar()
-        search_entry = tk.Entry(search_frame, textvariable=self._fv_search_var,
-            bg=COLORS['bg_input'], fg=COLORS['text'], insertbackground=COLORS['text'],
-            font=('Consolas', 10), relief='flat', width=30)
-        search_entry.pack(side='left', padx=4, fill='x', expand=True)
-        search_entry.bind('<Return>', lambda e: self._fv_search())
-
-        tk.Label(search_frame, text="Protocol:", font=('Segoe UI', 9),
-                fg=COLORS['text_dim'], bg=COLORS['bg_dark']).pack(side='left', padx=(8, 0))
-        self._fv_proto_var = tk.StringVar(value='ALL')
-        proto_menu = ttk.Combobox(search_frame, textvariable=self._fv_proto_var, width=12,
-            values=['ALL', 'FTP', 'HTTP', 'Telnet', 'POP3', 'IMAP', 'SMTP', 'SNMP',
-                    'Redis', 'MongoDB', 'RTSP', 'IRC', 'SIP', 'BACnet', 'Modbus'],
-            state='readonly')
-        proto_menu.pack(side='left', padx=4)
-
-        tk.Button(search_frame, text="🔍 Search", font=('Segoe UI', 9),
-            bg=COLORS['accent'], fg=COLORS['bg_dark'], relief='flat',
-            cursor='hand2', command=self._fv_search).pack(side='left', padx=4)
-
-        # Stats bar
-        stats_frame = tk.Frame(parent, bg=COLORS['bg_panel'])
-        stats_frame.pack(fill='x', padx=8, pady=(0, 4))
-        self._fv_stats_label = tk.Label(stats_frame,
-            text="Loading forensics data...",
-            font=('Consolas', 8), fg=COLORS['text_dim'], bg=COLORS['bg_panel'],
-            anchor='w', padx=8, pady=4)
-        self._fv_stats_label.pack(fill='x')
-
-        # Main content: three panels
-        content = tk.Frame(parent, bg=COLORS['bg_dark'])
-        content.pack(fill='both', expand=True, padx=8, pady=(0, 8))
-
-        # Left: Credentials
-        left = Card(content, title="CAPTURED CREDENTIALS")
-        left.pack(side='left', fill='both', expand=True, padx=(0, 4))
-
-        cred_inner = tk.Frame(left, bg=COLORS['bg_card'])
-        cred_inner.pack(fill='both', expand=True)
-
-        # Credential list with scrollbar
-        cred_canvas = tk.Canvas(cred_inner, bg=COLORS['bg_card'], highlightthickness=0)
-        cred_sb = ttk.Scrollbar(cred_inner, orient='vertical', command=cred_canvas.yview)
-        self._fv_cred_frame = tk.Frame(cred_canvas, bg=COLORS['bg_card'])
-        self._fv_cred_frame.bind('<Configure>',
-            lambda e: cred_canvas.configure(scrollregion=cred_canvas.bbox('all')))
-        cred_canvas.create_window((0, 0), window=self._fv_cred_frame, anchor='nw')
-        cred_canvas.configure(yscrollcommand=cred_sb.set)
-        cred_canvas.pack(side='left', fill='both', expand=True)
-        cred_sb.pack(side='right', fill='y')
-        wheel_scrollable(cred_canvas)
-
-        self._fv_cred_widgets = []
-
-        # Right: Services + Detail
-        right = tk.Frame(content, bg=COLORS['bg_dark'])
-        right.pack(side='left', fill='both', expand=True, padx=(4, 0))
-
-        # Top right: Detail view
-        detail_card = Card(right, title="SELECTED ITEM DETAIL")
-        detail_card.pack(fill='both', expand=True, pady=(0, 4))
-
-        self._fv_detail_text = tk.Text(detail_card, bg=COLORS['bg_card'],
-            fg=COLORS['text'], font=('Consolas', 9), relief='flat',
-            wrap='word', padx=8, pady=8)
-        self._fv_detail_text.pack(fill='both', expand=True)
-        self._fv_detail_text.tag_configure('header', foreground=COLORS['accent'],
-            font=('Consolas', 10, 'bold'))
-        self._fv_detail_text.tag_configure('crit', foreground=COLORS['red'])
-        self._fv_detail_text.tag_configure('warn', foreground=COLORS['yellow'])
-        self._fv_detail_text.tag_configure('safe', foreground=COLORS['green'])
-        self._fv_detail_text.tag_configure('key', foreground=COLORS['cyan'])
-        self._fv_detail_text.tag_configure('secret', foreground=COLORS['red'],
-            font=('Consolas', 10, 'bold'))
-        self._fv_detail_text.insert('end',
-            'Select a credential or service from the left panel to view details.\n\n'
-            'Credentials are stored encrypted on disk.\n'
-            'Click "Reveal" on any credential to show the full value.\n')
-
-        # Bottom right: Insecure services
-        svc_card = Card(right, title="INSECURE SERVICES FOUND")
-        svc_card.pack(fill='both', expand=True, pady=(4, 0))
-
-        svc_inner = tk.Frame(svc_card, bg=COLORS['bg_card'])
-        svc_inner.pack(fill='both', expand=True)
-
-        svc_canvas = tk.Canvas(svc_inner, bg=COLORS['bg_card'], highlightthickness=0)
-        svc_sb = ttk.Scrollbar(svc_inner, orient='vertical', command=svc_canvas.yview)
-        self._fv_svc_frame = tk.Frame(svc_canvas, bg=COLORS['bg_card'])
-        self._fv_svc_frame.bind('<Configure>',
-            lambda e: svc_canvas.configure(scrollregion=svc_canvas.bbox('all')))
-        svc_canvas.create_window((0, 0), window=self._fv_svc_frame, anchor='nw')
-        svc_canvas.configure(yscrollcommand=svc_sb.set)
-        svc_canvas.pack(side='left', fill='both', expand=True)
-        svc_sb.pack(side='right', fill='y')
-        wheel_scrollable(svc_canvas)
-
-        self._fv_svc_widgets = []
-
-        # Initial load
-        self.root.after(1000, self._fv_refresh)
-
-    def _fv_refresh(self):
-        """Refresh all forensics data from the database."""
-        try:
-            db = self.app.forensics_db
-            stats = db.get_stats()
-
-            # Update stats bar
-            self._fv_stats_label.config(
-                text=f"Credentials: {stats['total_credentials']}  |  "
-                     f"Services: {stats['total_services']}  |  "
-                     f"Sensitive Data: {stats['total_sensitive']}  |  "
-                     f"Protocols: {', '.join(stats.get('protocols_seen', [])) or 'none yet'}  |  "
-                     f"Encrypted: {'Yes (AES)' if stats.get('encrypted') else 'XOR fallback'}")
-
-            # Load credentials
-            self._fv_load_credentials(db.search_credentials())
-
-            # Load services
-            self._fv_load_services(db.get_all_services())
-
-        except Exception as e:
-            self._fv_stats_label.config(text=f"Error loading forensics data: {e}")
-
-    def _fv_search(self):
-        """Search credentials by query and protocol."""
-        try:
-            db = self.app.forensics_db
-            query = self._fv_search_var.get().strip() or None
-            proto = self._fv_proto_var.get()
-            proto = None if proto == 'ALL' else proto
-
-            results = db.search_credentials(query=query, protocol=proto)
-            self._fv_load_credentials(results)
-        except Exception as e:
-            self._fv_stats_label.config(text=f"Search error: {e}")
-
-    def _fv_load_credentials(self, credentials):
-        """Populate the credential list."""
-        for w in self._fv_cred_widgets:
-            w.destroy()
-        self._fv_cred_widgets.clear()
-
-        if not credentials:
-            lbl = tk.Label(self._fv_cred_frame, text="No credentials found yet.\n\n"
-                "Credentials will appear here when NetSentinel\n"
-                "captures plaintext authentication on the network\n"
-                "(FTP, HTTP, Telnet, etc.)",
-                font=('Segoe UI', 9), fg=COLORS['text_dim'],
-                bg=COLORS['bg_card'], justify='center', pady=20)
-            lbl.pack(fill='x')
-            self._fv_cred_widgets.append(lbl)
-            return
-
-        for cred in credentials:
-            frame = tk.Frame(self._fv_cred_frame, bg=COLORS['bg_panel'],
-                            padx=6, pady=4, cursor='hand2')
-            frame.pack(fill='x', padx=2, pady=1)
-            self._fv_cred_widgets.append(frame)
-
-            # Risk color
-            risk_colors = {'CRITICAL': COLORS['red'], 'HIGH': '#ff6644',
-                          'MEDIUM': COLORS['yellow'], 'LOW': COLORS['green']}
-            risk_color = risk_colors.get(cred.get('risk', ''), COLORS['text_dim'])
-
-            # Protocol badge
-            proto_lbl = tk.Label(frame, text=f" {cred.get('protocol', '?')} ",
-                font=('Consolas', 8, 'bold'), fg=COLORS['bg_dark'],
-                bg=risk_color)
-            proto_lbl.pack(side='left', padx=(0, 6))
-
-            # Credential type and masked value
-            info_text = f"{cred.get('credential_type', '?')}: {cred.get('value', '***')}"
-            info_lbl = tk.Label(frame, text=info_text, font=('Consolas', 9),
-                fg=COLORS['text'], bg=COLORS['bg_panel'], anchor='w')
-            info_lbl.pack(side='left', fill='x', expand=True)
-
-            # Connection info
-            time_str = cred.get('time_str', '')
-            conn = f"{cred.get('source_ip', '?')} → {cred.get('destination_ip', '?')}:{cred.get('port', '?')}"
-            conn_lbl = tk.Label(frame, text=f"{conn}  {time_str}",
-                font=('Consolas', 7), fg=COLORS['text_dim'], bg=COLORS['bg_panel'])
-            conn_lbl.pack(side='right')
-
-            # Reveal button
-            cred_id = cred.get('id', '')
-            reveal_btn = tk.Button(frame, text="🔓 Reveal",
-                font=('Segoe UI', 7), bg=COLORS['bg_input'], fg=COLORS['yellow'],
-                relief='flat', cursor='hand2',
-                command=lambda c=cred, cid=cred_id: self._fv_show_credential_detail(c, cid))
-            reveal_btn.pack(side='right', padx=4)
-
-            # Click anywhere to show detail (without reveal)
-            for widget in [frame, proto_lbl, info_lbl, conn_lbl]:
-                widget.bind('<Button-1>',
-                    lambda e, c=cred: self._fv_show_credential_detail(c))
-
-    def _fv_show_credential_detail(self, cred, reveal_id=None):
-        """Show detailed view of a credential, optionally revealing the raw value."""
-        dt = self._fv_detail_text
-        dt.delete('1.0', 'end')
-
-        protocol = cred.get('protocol', '?')
-        cred_type = cred.get('credential_type', '?')
-        port = cred.get('port', 0)
-
-        dt.insert('end', f'{protocol} CREDENTIAL\n', 'header')
-        dt.insert('end', '─' * 40 + '\n\n')
-
-        dt.insert('end', 'Type:        ', 'key')
-        dt.insert('end', f'{cred_type}\n')
-        dt.insert('end', 'Protocol:    ', 'key')
-        dt.insert('end', f'{protocol}\n')
-        dt.insert('end', 'Source:      ', 'key')
-        dt.insert('end', f"{cred.get('source_ip', '?')}\n")
-        dt.insert('end', 'Destination: ', 'key')
-        dt.insert('end', f"{cred.get('destination_ip', '?')}:{port}\n")
-        dt.insert('end', 'Captured:    ', 'key')
-        dt.insert('end', f"{cred.get('time_str', '?')}\n\n")
-
-        # Masked value
-        dt.insert('end', 'Value (masked): ', 'key')
-        dt.insert('end', f"{cred.get('value', '***')}\n")
-
-        # Reveal raw value if requested
-        if reveal_id:
-            try:
-                raw = self.app.forensics_db.get_credential_raw(reveal_id)
-                if raw:
-                    dt.insert('end', '\nFull Value:   ', 'key')
-                    dt.insert('end', f'{raw}\n', 'secret')
-                    dt.insert('end', '\n⚠ This is the actual captured credential.\n', 'warn')
-                    dt.insert('end', 'Change this password immediately if still in use.\n', 'warn')
-                else:
-                    dt.insert('end', '\nRaw value not available for this entry.\n', 'warn')
-            except Exception as e:
-                dt.insert('end', f'\nCould not decrypt: {e}\n', 'crit')
-
-        # Extra info
-        extra = cred.get('extra', {})
-        if extra:
-            dt.insert('end', '\nAdditional Context:\n', 'key')
-            for k, v in extra.items():
-                if v:
-                    dt.insert('end', f'  {k}: {v}\n')
-
-        # Exploitation info
-        from src.forensics import PROTOCOL_EXPLOITATION, DEFAULT_EXPLOITATION
-        exploit = PROTOCOL_EXPLOITATION.get(port, DEFAULT_EXPLOITATION)
-
-        dt.insert('end', '\n\nHOW THIS IS EXPLOITED\n', 'header')
-        dt.insert('end', '─' * 40 + '\n')
-        dt.insert('end', f"{exploit['how_exploited']}\n", 'crit')
-
-        dt.insert('end', '\nHOW TO FIX\n', 'header')
-        dt.insert('end', '─' * 40 + '\n')
-        dt.insert('end', f"{exploit['how_to_fix']}\n", 'safe')
-
-        dt.insert('end', '\nIS THIS CURRENTLY MALICIOUS?\n', 'header')
-        dt.insert('end', '─' * 40 + '\n')
-        dt.insert('end', f"{exploit['currently_malicious']}\n", 'warn')
-
-    def _fv_load_services(self, services):
-        """Populate the insecure services list."""
-        for w in self._fv_svc_widgets:
-            w.destroy()
-        self._fv_svc_widgets.clear()
-
-        if not services:
-            lbl = tk.Label(self._fv_svc_frame, text="No insecure services detected yet.",
-                font=('Segoe UI', 9), fg=COLORS['text_dim'],
-                bg=COLORS['bg_card'], pady=10)
-            lbl.pack(fill='x')
-            self._fv_svc_widgets.append(lbl)
-            return
-
-        for svc in services:
-            frame = tk.Frame(self._fv_svc_frame, bg=COLORS['bg_panel'],
-                            padx=6, pady=4, cursor='hand2')
-            frame.pack(fill='x', padx=2, pady=1)
-            self._fv_svc_widgets.append(frame)
-
-            risk_colors = {'CRITICAL': COLORS['red'], 'HIGH': '#ff6644',
-                          'MEDIUM': COLORS['yellow'], 'LOW': COLORS['green']}
-            risk_color = risk_colors.get(svc.get('risk', ''), COLORS['text_dim'])
-
-            risk_lbl = tk.Label(frame, text=f" {svc.get('risk', '?')} ",
-                font=('Consolas', 8, 'bold'), fg=COLORS['bg_dark'], bg=risk_color)
-            risk_lbl.pack(side='left', padx=(0, 6))
-
-            svc_text = f"{svc.get('service', '?')} at {svc.get('ip', '?')}:{svc.get('port', '?')}"
-            svc_lbl = tk.Label(frame, text=svc_text, font=('Consolas', 9),
-                fg=COLORS['text'], bg=COLORS['bg_panel'], anchor='w')
-            svc_lbl.pack(side='left', fill='x', expand=True)
-
-            count_lbl = tk.Label(frame,
-                text=f"seen {svc.get('seen_count', 1)}x",
-                font=('Consolas', 7), fg=COLORS['text_dim'], bg=COLORS['bg_panel'])
-            count_lbl.pack(side='right')
-
-            # Click to show detail
-            for widget in [frame, risk_lbl, svc_lbl]:
-                widget.bind('<Button-1>',
-                    lambda e, s=svc: self._fv_show_service_detail(s))
-
-    def _fv_show_service_detail(self, svc):
-        """Show detailed view of an insecure service."""
-        dt = self._fv_detail_text
-        dt.delete('1.0', 'end')
-
-        port = svc.get('port', 0)
-        service = svc.get('service', '?')
-
-        dt.insert('end', f'INSECURE SERVICE: {service}\n', 'header')
-        dt.insert('end', '─' * 40 + '\n\n')
-
-        dt.insert('end', 'Service:     ', 'key')
-        dt.insert('end', f"{service}\n")
-        dt.insert('end', 'Server:      ', 'key')
-        dt.insert('end', f"{svc.get('ip', '?')}:{port}\n")
-        dt.insert('end', 'Risk:        ', 'key')
-        risk = svc.get('risk', '?')
-        dt.insert('end', f"{risk}\n", 'crit' if risk in ('CRITICAL', 'HIGH') else 'warn')
-        dt.insert('end', 'First Seen:  ', 'key')
-        from datetime import datetime
-        first = svc.get('first_seen', 0)
-        dt.insert('end', f"{datetime.fromtimestamp(first).strftime('%Y-%m-%d %H:%M:%S') if first else '?'}\n")
-        dt.insert('end', 'Last Seen:   ', 'key')
-        last = svc.get('last_seen', 0)
-        dt.insert('end', f"{datetime.fromtimestamp(last).strftime('%Y-%m-%d %H:%M:%S') if last else '?'}\n")
-        dt.insert('end', 'Times Seen:  ', 'key')
-        dt.insert('end', f"{svc.get('seen_count', 1)}\n\n")
-
-        dt.insert('end', 'Description:\n', 'key')
-        dt.insert('end', f"  {svc.get('description', '')}\n\n")
-
-        from src.forensics import PROTOCOL_EXPLOITATION, DEFAULT_EXPLOITATION, SECURE_EQUIVALENTS
-        exploit = PROTOCOL_EXPLOITATION.get(port, DEFAULT_EXPLOITATION)
-
-        dt.insert('end', 'HOW THIS IS EXPLOITED\n', 'header')
-        dt.insert('end', '─' * 40 + '\n')
-        dt.insert('end', f"{exploit['how_exploited']}\n\n", 'crit')
-
-        dt.insert('end', 'HOW TO FIX\n', 'header')
-        dt.insert('end', '─' * 40 + '\n')
-        dt.insert('end', f"{exploit['how_to_fix']}\n\n", 'safe')
-        alt = SECURE_EQUIVALENTS.get(port, '')
-        if alt:
-            dt.insert('end', f'Secure Alternative: {alt}\n\n', 'safe')
-
-        dt.insert('end', 'IS THIS CURRENTLY MALICIOUS?\n', 'header')
-        dt.insert('end', '─' * 40 + '\n')
-        dt.insert('end', f"{exploit['currently_malicious']}\n", 'warn')
-
-    def _fv_clear_all(self):
-        """Clear all forensics data after confirmation."""
-        if messagebox.askyesno("Clear Forensics Data",
-                "This will permanently delete ALL captured credentials,\n"
-                "insecure service records, and sensitive data findings.\n\n"
-                "The encrypted database files will be erased.\n\n"
-                "Are you sure?"):
-            try:
-                self.app.forensics_db.clear_all()
-                self._fv_refresh()
-                messagebox.showinfo("Cleared", "All forensics data has been erased.")
-            except Exception as e:
-                messagebox.showerror("Error", f"Failed to clear data: {e}")
-
-    def _fv_export(self):
-        """Export forensics data."""
-        try:
-            db = self.app.forensics_db
-            creds = db.search_credentials()
-            services = db.get_all_services()
-            sensitive = db.get_all_sensitive()
-
-            if not creds and not services and not sensitive:
-                messagebox.showinfo("Export", "No forensics data to export.")
-                return
-
-            filepath = filedialog.asksaveasfilename(
-                defaultextension='.json',
-                filetypes=[('JSON', '*.json')],
-                title='Export Forensics Data (credentials will be masked)')
-            if not filepath:
-                return
-
-            import json
-            data = {
-                'exported_at': time.strftime('%Y-%m-%d %H:%M:%S'),
-                'note': 'Credential values are MASKED in this export. Use the app to reveal full values.',
-                'credentials': creds,
-                'insecure_services': services,
-                'sensitive_data': sensitive,
-            }
-            with open(filepath, 'w') as f:
-                json.dump(data, f, indent=2, default=str)
-            messagebox.showinfo("Export", f"Forensics data exported to {filepath}\n\n"
-                "Note: Credential values are masked. Full values remain\n"
-                "in the encrypted database only.")
-        except Exception as e:
-            messagebox.showerror("Error", f"Export failed: {e}")
-
-    # ──────────────────────────────────────────────────────────────────────────
-    # Forensics Vault Tab
-    # ──────────────────────────────────────────────────────────────────────────
-    def _build_forensics_tab(self, parent):
-        # Top controls
         ctrl_frame = tk.Frame(parent, bg=COLORS['bg_dark'])
         ctrl_frame.pack(fill='x', padx=8, pady=8)
 
@@ -2444,20 +1996,43 @@ class NetSentinelGUI:
         left_card = Card(content, title="CAPTURED CREDENTIALS")
         left_card.pack(side='left', fill='both', expand=True, padx=(0, 4))
 
-        left_inner = tk.Frame(left_card, bg=COLORS['bg_card'])
-        left_inner.pack(fill='both', expand=True)
+        # A table, newest first (presentation.VAULT_ROWS_SHOWN). It was a row of
+        # widgets per entry, and a building network's thousands of BACnet
+        # entries left the window barely able to open or scroll.
+        table = tk.Frame(left_card, bg=COLORS['bg_card'])
+        table.pack(fill='both', expand=True)
+        cols = ('time', 'protocol', 'kind', 'connection', 'value')
+        tree = ttk.Treeview(table, columns=cols, show='headings', height=12,
+                            selectmode='browse')
+        for col, label, width in (('time', 'Last seen', 130), ('protocol', 'Protocol', 110),
+                                  ('kind', 'Kind', 110), ('connection', 'Client → server', 230),
+                                  ('value', 'Value (masked)', 220)):
+            tree.heading(col, text=label)
+            tree.column(col, width=width, minwidth=60, anchor='w')
+        tree_sb = ttk.Scrollbar(table, orient='vertical', command=tree.yview)
+        tree.configure(yscrollcommand=tree_sb.set)
+        tree.pack(side='left', fill='both', expand=True)
+        tree_sb.pack(side='right', fill='y')
+        tree.bind('<<TreeviewSelect>>', lambda e: self._forensics_show_selected())
+        self._forensics_tree = tree
+        self._forensics_rows = {}           # table row -> vault entry
 
-        # Credential list with scrollbar
-        cred_canvas = tk.Canvas(left_inner, bg=COLORS['bg_card'], highlightthickness=0)
-        cred_sb = ttk.Scrollbar(left_inner, orient='vertical', command=cred_canvas.yview)
-        self._forensics_cred_frame = tk.Frame(cred_canvas, bg=COLORS['bg_card'])
-        self._forensics_cred_frame.bind('<Configure>',
-            lambda e: cred_canvas.configure(scrollregion=cred_canvas.bbox('all')))
-        cred_canvas.create_window((0, 0), window=self._forensics_cred_frame, anchor='nw')
-        cred_canvas.configure(yscrollcommand=cred_sb.set)
-        cred_canvas.pack(side='left', fill='both', expand=True)
-        cred_sb.pack(side='right', fill='y')
-        wheel_scrollable(cred_canvas)
+        self._forensics_cred_detail = tk.Text(
+            left_card, bg=COLORS['bg_card'], fg=COLORS['text'], font=('Consolas', 9),
+            relief='flat', wrap='word', padx=8, pady=6, height=8, state='disabled')
+        self._forensics_cred_detail.pack(fill='x', pady=(4, 0))
+        cred_buttons = tk.Frame(left_card, bg=COLORS['bg_card'])
+        cred_buttons.pack(fill='x', pady=(4, 0))
+        self._forensics_reveal_btn = tk.Button(
+            cred_buttons, text="🔓 Reveal Full Value", font=('Segoe UI', 8),
+            bg=COLORS['bg_input'], fg=COLORS['yellow'], relief='flat', cursor='hand2',
+            state='disabled', command=self._forensics_reveal_selected)
+        self._forensics_reveal_btn.pack(side='left')
+        self._forensics_copy_btn = tk.Button(
+            cred_buttons, text="📋 Copy", font=('Segoe UI', 8),
+            bg=COLORS['bg_input'], fg=COLORS['text_dim'], relief='flat', cursor='hand2',
+            state='disabled', command=self._forensics_copy_selected)
+        self._forensics_copy_btn.pack(side='left', padx=4)
 
         # Right: Services + Sensitive Data
         right_frame = tk.Frame(content, bg=COLORS['bg_dark'])
@@ -2490,10 +2065,10 @@ class NetSentinelGUI:
                                                  font=('Consolas', 9, 'bold'))
         self._forensics_sens_text.tag_configure('critical', foreground=COLORS['red'])
 
-        self._forensics_cred_widgets = []
-
-        # Initial load
-        self.root.after(1000, self._forensics_refresh)
+        # Loaded whenever the tab is shown (_on_tab_changed), not a second after
+        # the window opens, whether anyone looks or not. show_in_vault leaves
+        # (protocol, server, port, client, kind) here for that load to select.
+        self._forensics_focus = None
 
     def _forensics_refresh(self):
         """Reload all forensics data from the database."""
@@ -2509,8 +2084,23 @@ class NetSentinelGUI:
                      f"Protocols: {', '.join(stats.get('protocols_seen', [])) or 'none'}  |  "
                      f"Encrypted: {'Yes (AES)' if stats.get('encrypted') else 'XOR fallback'}")
 
-            # Load credentials (masked)
-            self._forensics_show_credentials(db.search_credentials())
+            # Load credentials (masked), at the entry show_in_vault asked for
+            credentials = db.search_credentials()
+            focus, self._forensics_focus = self._forensics_focus, None
+            if focus is None:
+                self._forensics_show_credentials(credentials)
+            else:
+                self._forensics_search_var.set('')
+                self._forensics_proto_var.set('All')
+                protocol, server, port, client, kind = focus
+                entry = presentation.find_vault_entry(credentials, protocol, server, port,
+                                                      client=client, credential_type=kind)
+                self._forensics_show_credentials(credentials, select=entry)
+                if entry is None:
+                    self._forensics_detail(
+                        f"The vault has no {protocol} entry for "
+                        f"{presentation.endpoint(server, port)}. It is kept only while "
+                        "forensics.save_credentials is on, and Clear All Data removes it.")
 
             # Load services
             self._forensics_show_services(db.get_all_services())
@@ -2534,85 +2124,92 @@ class NetSentinelGUI:
         except Exception:
             pass
 
-    def _forensics_show_credentials(self, credentials):
-        """Display credential list."""
-        for w in self._forensics_cred_widgets:
-            w.destroy()
-        self._forensics_cred_widgets.clear()
+    def _forensics_show_credentials(self, credentials, select=None):
+        """Fill the table, newest first; select (a vault entry) is selected and shown."""
+        tree = self._forensics_tree
+        tree.delete(*tree.get_children())
+        self._forensics_rows = {}
+        rows, total = presentation.vault_rows(credentials)
+        if select is not None and select not in rows:
+            rows = [select] + rows[:-1] if len(rows) >= presentation.VAULT_ROWS_SHOWN else [select] + rows
+        chosen = None
+        for cred in rows:
+            item = tree.insert('', 'end', values=(
+                cred.get('time_str', ''), cred.get('protocol', '?'),
+                cred.get('credential_type', '?'),
+                f"{cred.get('source_ip', '?')} → "
+                f"{presentation.endpoint(cred.get('destination_ip', '?'), cred.get('port'))}",
+                cred.get('value', '')))
+            self._forensics_rows[item] = cred
+            if cred is select:
+                chosen = item
+        if chosen is not None:
+            tree.selection_set(chosen)
+            tree.see(chosen)
+            self._forensics_show_selected()     # now, not when the select event comes round
+        if total > len(rows):
+            note = (f"Showing the newest {len(rows):,} of {total:,}. Search to find the others.")
+        elif not total:
+            note = ("No credentials found. They are captured from unencrypted protocols "
+                    "(FTP, HTTP, Telnet and the like) while monitoring or analyzing a capture.")
+        else:
+            note = "Select one to see what was found."
+        if chosen is None:
+            self._forensics_detail(note)
 
-        if not credentials:
-            lbl = tk.Label(self._forensics_cred_frame, text="No credentials found.\n\n"
-                "Credentials are captured from unencrypted protocols\n"
-                "(FTP, HTTP, Telnet, etc.) during live monitoring\n"
-                "or PCAP analysis.",
-                font=('Segoe UI', 9), fg=COLORS['text_dim'],
-                bg=COLORS['bg_card'], justify='left')
-            lbl.pack(padx=10, pady=20)
-            self._forensics_cred_widgets.append(lbl)
+    def _forensics_selected(self):
+        selected = self._forensics_tree.selection()
+        return self._forensics_rows.get(selected[0]) if selected else None
+
+    def _forensics_detail(self, text):
+        box = self._forensics_cred_detail
+        box.config(state='normal')
+        box.delete('1.0', 'end')
+        box.insert('end', text)
+        box.config(state='disabled')
+        has_id = bool((self._forensics_selected() or {}).get('id'))
+        for button in (self._forensics_reveal_btn, self._forensics_copy_btn):
+            button.config(state='normal' if has_id else 'disabled')
+
+    def _forensics_show_selected(self):
+        cred = self._forensics_selected()
+        if cred is None:
             return
+        lines = [
+            f"{cred.get('protocol', '?')} {cred.get('credential_type', '?')}, "
+            f"last seen {cred.get('time_str', '') or '?'}",
+            f"From {cred.get('source_ip', '?')} to "
+            f"{presentation.endpoint(cred.get('destination_ip', '?'), cred.get('port'))}",
+            f"Value (masked): {cred.get('value', '')}",
+        ]
+        for key, value in (cred.get('extra') or {}).items():
+            if value:
+                lines.append(f"{key}: {value}")
+        self._forensics_detail('\n'.join(lines))
 
-        for cred in credentials:
-            frame = tk.Frame(self._forensics_cred_frame, bg=COLORS['bg_panel'],
-                            padx=8, pady=6)
-            frame.pack(fill='x', padx=2, pady=2)
-            self._forensics_cred_widgets.append(frame)
+    def _forensics_reveal_selected(self):
+        cred = self._forensics_selected()
+        if cred and cred.get('id'):
+            self._forensics_reveal(cred['id'], cred.get('protocol', '?'),
+                                   cred.get('destination_ip', '?'), cred.get('port', '?'))
 
-            # Protocol badge + type
-            proto = cred.get('protocol', '?')
-            cred_type = cred.get('credential_type', '?')
-            badge_color = COLORS['red'] if proto in ('FTP', 'Telnet', 'VNC') else COLORS['yellow']
+    def _forensics_copy_selected(self):
+        cred = self._forensics_selected()
+        if cred and cred.get('id'):
+            self._forensics_copy(cred['id'])
 
-            header = tk.Frame(frame, bg=COLORS['bg_panel'])
-            header.pack(fill='x')
-
-            tk.Label(header, text=f" {proto} ", font=('Consolas', 8, 'bold'),
-                    fg=COLORS['bg_dark'], bg=badge_color).pack(side='left')
-            tk.Label(header, text=f"  {cred_type}", font=('Consolas', 9, 'bold'),
-                    fg=COLORS['text'], bg=COLORS['bg_panel']).pack(side='left')
-            tk.Label(header, text=cred.get('time_str', ''),
-                    font=('Consolas', 8), fg=COLORS['text_dim'],
-                    bg=COLORS['bg_panel']).pack(side='right')
-
-            # Connection info
-            src = cred.get('source_ip', '?')
-            dst = cred.get('destination_ip', '?')
-            port = cred.get('port', '?')
-            tk.Label(frame, text=f"{src} → {dst}:{port}",
-                    font=('Consolas', 9), fg=COLORS['accent'],
-                    bg=COLORS['bg_panel'], anchor='w').pack(fill='x')
-
-            # Masked value
-            val = cred.get('value', '?')
-            tk.Label(frame, text=f"Value: {val}",
-                    font=('Consolas', 9), fg=COLORS['yellow'],
-                    bg=COLORS['bg_panel'], anchor='w').pack(fill='x')
-
-            # Extra info
-            extra = cred.get('extra', {})
-            if extra:
-                for k, v in extra.items():
-                    if v:
-                        tk.Label(frame, text=f"{k}: {v}",
-                                font=('Consolas', 8), fg=COLORS['text_dim'],
-                                bg=COLORS['bg_panel'], anchor='w').pack(fill='x')
-
-            # Reveal button
-            cred_id = cred.get('id', '')
-            if cred_id:
-                btn_frame = tk.Frame(frame, bg=COLORS['bg_panel'])
-                btn_frame.pack(fill='x', pady=(4, 0))
-                reveal_btn = tk.Button(btn_frame, text="🔓 Reveal Full Value",
-                    font=('Segoe UI', 8), bg=COLORS['bg_input'],
-                    fg=COLORS['yellow'], relief='flat', cursor='hand2',
-                    command=lambda cid=cred_id, p=proto, d=dst, pt=port:
-                        self._forensics_reveal(cid, p, d, pt))
-                reveal_btn.pack(side='left')
-
-                copy_btn = tk.Button(btn_frame, text="📋 Copy",
-                    font=('Segoe UI', 8), bg=COLORS['bg_input'],
-                    fg=COLORS['text_dim'], relief='flat', cursor='hand2',
-                    command=lambda cid=cred_id: self._forensics_copy(cid))
-                copy_btn.pack(side='left', padx=4)
+    def show_in_vault(self, protocol, server, port, client='', credential_type=''):
+        """
+        Open the vault at the entry an alert or exposure is about, so what it
+        found can be checked: an alert says only that a credential was seen.
+        """
+        # Switching tabs refreshes the vault (_on_tab_changed), whenever Tk gets
+        # round to it; that refresh finds the entry, so it is not overwritten.
+        self._forensics_focus = (protocol, server, port, client, credential_type)
+        if self.notebook.select() == str(self._tab_forensics):
+            self._forensics_refresh()
+        else:
+            self.notebook.select(self._tab_forensics)
 
     def _forensics_reveal(self, cred_id, protocol, dst, port):
         """Show the full unmasked credential value."""
@@ -2657,7 +2254,10 @@ class NetSentinelGUI:
                      relief='flat', padx=12, command=popup.destroy
             ).pack(side='left', padx=4)
         else:
-            messagebox.showinfo("Not Found", "Raw value not available for this credential.")
+            # By default only the masked value is kept (forensics_db.store_credential).
+            messagebox.showinfo(
+                "Not kept", "Only the masked value was kept. The vault stores full values "
+                "only when forensics.store_raw_credentials is on in config.json.")
 
     def _forensics_copy(self, cred_id):
         """Copy credential to clipboard."""
@@ -2681,7 +2281,13 @@ class NetSentinelGUI:
 
         from src.forensics import SECURE_EQUIVALENTS, PROTOCOL_EXPLOITATION, DEFAULT_EXPLOITATION
 
-        for svc in services:
+        # The riskiest first, and a few hundred at most: a building network lists
+        # one service per controller.
+        shown = sorted(services, key=lambda s: -presentation.severity_rank(s.get('risk')))
+        if len(shown) > SERVICES_SHOWN:
+            st.insert('end', f"The {SERVICES_SHOWN} riskiest of {len(shown):,}.\n\n", 'header')
+            shown = shown[:SERVICES_SHOWN]
+        for svc in shown:
             risk = svc.get('risk', 'MEDIUM')
             tag = risk.lower() if risk.lower() in ('critical', 'high', 'medium') else 'medium'
             port = svc.get('port', 0)
@@ -2884,6 +2490,19 @@ class NetSentinelGUI:
                  fg=COLORS['text_dim'], bg=COLORS['bg_card'], anchor='w'
                  ).pack(fill='x')
 
+        bacnet_card = Card(scroll_frame, title="BUILDING AUTOMATION, BACNET (applies at next start)")
+        bacnet_card.pack(fill='x', padx=8, pady=(0, 8))
+        self._add_setting_choice(bacnet_card, 'bacnet.mode', 'BACnet traffic', BACNET_CHOICES,
+                                 'watch')
+        tk.Label(bacnet_card, text=(
+            "Watch: discovery from another computer, writes and device resets are alerts. "
+            "This PC runs the building's controls: its own discovery, polling and writes are "
+            "expected, and BACnet is not listed as an unencrypted service; resets, and writes "
+            "from any other computer, are still alerts. Off: BACnet is left out of the "
+            "capture altogether."),
+            font=('Segoe UI', 8), fg=COLORS['text_dim'], bg=COLORS['bg_card'],
+            anchor='w', justify='left', wraplength=560).pack(fill='x')
+
         audit_card = Card(scroll_frame, title="NETWORK AUDIT")
         audit_card.pack(fill='x', padx=8, pady=(0, 8))
         self._add_setting_toggle(
@@ -2970,6 +2589,19 @@ class NetSentinelGUI:
             tree.insert('', 'end', values=(
                 row['description'], row['state'], data_sources.when(row.get('updated')),
                 f"{row['entries']:,}" if row.get('entries') else '', row.get('note', '')))
+
+    def _add_setting_choice(self, parent, key, label, choices, default):
+        """A drop-down of (value, text) pairs; the form reads back the value."""
+        row = tk.Frame(parent, bg=COLORS['bg_card'])
+        row.pack(fill='x', pady=3)
+        tk.Label(row, text=label, font=('Segoe UI', 9), fg=COLORS['text_dim'],
+                 bg=COLORS['bg_card'], width=30, anchor='w').pack(side='left')
+        current = self.app.config.get(*key.split('.'), default=default)
+        texts = dict(choices)
+        var = tk.StringVar(value=texts.get(current, texts[default]))
+        ttk.Combobox(row, textvariable=var, values=[t for _, t in choices], state='readonly',
+                     width=36).pack(side='left', padx=8)
+        self._setting_widgets[key] = _Choice(var, choices)
 
     def _add_setting_toggle(self, parent, key, label, default):
         # A checkbox, because a text box saved "False" as a string, which is true.
@@ -3220,58 +2852,59 @@ class NetSentinelGUI:
                 messagebox.showwarning("Monitoring did not start", error)
 
     def _on_new_alert(self, alert):
-        """Called from background thread when new alert arrives."""
-        # Schedule GUI update on main thread
-        try:
-            self.root.after(0, self._add_alert_to_gui, alert)
-        except Exception:
-            pass
+        """Called from a background thread when an alert arrives. No Tk here:
+        _drain_alerts picks it up on the main thread."""
+        self._pending_alerts.append(alert)
 
-    def _add_alert_to_gui(self, alert):
-        """Add an alert widget to the alerts tab."""
-        # Check filter
+    def _drain_alerts(self):
+        """
+        Add the alerts that arrived since the last call, in one go, twice a second.
+        Each used to be drawn as it came, so a burst of a few hundred was as many
+        redraws in a row.
+        """
+        batch = []
+        while self._pending_alerts:
+            try:
+                batch.append(self._pending_alerts.popleft())
+            except IndexError:
+                break
+        if batch:
+            try:
+                self._add_alerts_to_gui(batch)
+            except Exception as e:
+                logger.debug("Adding alerts to the window failed: %s", e)
+        self.root.after(ALERT_BATCH_MS, self._drain_alerts)
+
+    def _add_alerts_to_gui(self, alerts):
+        """Alerts in the order they came: to the Alerts tab (as its filter
+        allows) and the dashboard's most recent."""
         sev_filter = self._alert_filter.get() if hasattr(self, '_alert_filter') else 'ALL'
-        if sev_filter != 'ALL' and alert.severity != sev_filter:
-            # Still store the widget reference for later filter changes,
-            # but don't display it now
-            pass
-        item = AlertListItem(self._alerts_scroll_frame, alert.to_dict(), actions=self._alert_actions)
-        item.pack(fill='x', padx=4, pady=2)
-        self._alert_widgets.insert(0, item)
+        shown = [a.to_dict() for a in alerts
+                 if sev_filter in ('ALL', '') or a.severity == sev_filter]
+        if shown:
+            self._alerts_table.add(shown)
+        self._update_recent_alerts()
 
-        # If filter is active and this alert doesn't match, hide it
-        if sev_filter != 'ALL' and alert.severity != sev_filter:
-            item.pack_forget()
-
-        # Limit displayed
-        while len(self._alert_widgets) > 200:
-            old = self._alert_widgets.pop()
-            old.destroy()
+    def _current_alert(self, alert_id):
+        """A stored alert as it is now, for its detail window; None if it is gone."""
+        alert = self.app.alert_manager.get_alert(alert_id)
+        return alert.to_dict() if alert is not None else None
 
     def _refresh_alerts_display(self):
         """Re-render alerts tab based on current filter selection."""
         sev_filter = self._alert_filter.get()
 
-        # Clear existing widgets
-        for w in self._alert_widgets:
-            w.destroy()
-        self._alert_widgets.clear()
-
-        # Reload from alert manager, then apply the display filter
+        # Reload from the alert manager (newest first), then apply the display filter
         alerts = presentation.filter_alerts(
-            self.app.alert_manager.get_alerts(limit=500), severity=sev_filter)[:200]
-
-        for alert in reversed(alerts):  # oldest first so newest on top
-            item = AlertListItem(self._alerts_scroll_frame, alert.to_dict(), actions=self._alert_actions)
-            item.pack(fill='x', padx=4, pady=2)
-            self._alert_widgets.insert(0, item)
+            self.app.alert_manager.get_alerts(limit=self.app.alert_manager.max_stored),
+            severity=sev_filter)
+        self._alerts_table.show(a.to_dict() for a in alerts[:ALERTS_SHOWN])
 
     def _clear_all_alerts(self):
         if messagebox.askyesno("Clear Alerts", "Clear all alerts?"):
             self.app.alert_manager.clear_alerts()
-            for w in self._alert_widgets:
-                w.destroy()
-            self._alert_widgets.clear()
+            self._alerts_table.clear()
+            self._update_recent_alerts()
 
     def _show_rule_record(self):
         """Per rule: alerts, and how many were judged real or a false positive."""
@@ -3430,17 +3063,7 @@ class NetSentinelGUI:
             return
         self._last_alert_id = latest_id
 
-        for w in self._recent_alerts_frame.winfo_children():
-            w.destroy()
-
-        if not alerts:
-            tk.Label(self._recent_alerts_frame, text="No alerts yet",
-                    font=('Segoe UI', 9), fg=COLORS['text_dim'],
-                    bg=COLORS['bg_card']).pack(pady=20)
-            return
-
-        for alert in alerts[:5]:
-            AlertListItem(self._recent_alerts_frame, alert.to_dict(), actions=self._alert_actions).pack(fill='x', pady=1)
+        self._recent_alerts.show(alert.to_dict() for alert in alerts[:5])
 
     def _update_packet_log(self):
         """Update the packet log text widget."""
@@ -3689,8 +3312,11 @@ class NetSentinelGUI:
         # Auto-refresh
         self.root.after(3000, self._devices_refresh)
 
-    def _devices_refresh(self):
-        """Refresh the device inventory display."""
+    def _devices_refresh(self, once=False):
+        """Refresh the device inventory display, while its tab is on screen."""
+        if not (once or self._tab_shown(self._tab_devices)):
+            self.root.after(5000, self._devices_refresh)
+            return
         try:
             data = self.app.device_learner.get_summary()
             bl = self.app.baseline_whitelist.get_stats()
@@ -3726,7 +3352,8 @@ class NetSentinelGUI:
 
         # Always rescheduled: gated on monitoring, the loop ran once at startup,
         # before anyone pressed Start, and never again.
-        self.root.after(5000, self._devices_refresh)
+        if not once:
+            self.root.after(5000, self._devices_refresh)
 
     # ──────────────────────────────────────────────────────────────────────────
     # Tab: Exposures (src/exposures.py)
@@ -3755,6 +3382,12 @@ class NetSentinelGUI:
             tk.Button(buttons, text=text, command=lambda s=state: self._exposure_set(s),
                       bg=COLORS['bg_input'], fg=COLORS['text'], font=('Segoe UI', 9),
                       relief='flat').pack(side='left', padx=4)
+        # For a plaintext login: the vault entry behind it, to see what was found.
+        self._exposure_vault_btn = tk.Button(
+            buttons, text='Open in vault', command=self._exposure_open_in_vault,
+            bg=COLORS['bg_input'], fg=COLORS['text'], font=('Segoe UI', 9), relief='flat',
+            state='disabled')
+        self._exposure_vault_btn.pack(side='left', padx=4)
 
         tk.Label(parent,
                  text="What is set up unsafely: plaintext logins, unencrypted services, software "
@@ -3784,6 +3417,9 @@ class NetSentinelGUI:
         self.root.after(3000, self._exposures_refresh)
 
     def _exposures_refresh(self, once=False):
+        if not (once or self._tab_shown(self._tab_exposures)):
+            self.root.after(5000, self._exposures_refresh)
+            return
         try:
             registry = self.app.exposures
             counts = registry.counts()
@@ -3817,6 +3453,9 @@ class NetSentinelGUI:
     def _exposure_details(self):
         selected = self._exposures_tree.selection()
         entry = self._exposures_by_id.get(selected[0]) if selected else None
+        self._exposure_vault_btn.config(
+            state='normal' if entry is not None and entry.get('kind') == 'credential'
+            else 'disabled')
         if entry is None:
             self._exposures_detail.config(text="Select an exposure to see what to do about it.")
             return
@@ -3824,6 +3463,26 @@ class NetSentinelGUI:
         self._exposures_detail.config(text=(
             f"{entry['description']}\n\nWhat to do: {entry.get('recommendation') or '—'}\n"
             f"Seen from: {clients} · first seen {entry.get('time_first', '')}"))
+
+    def _exposure_open_in_vault(self):
+        """The vault entry behind a plaintext-login exposure. Its key is
+        ('credential', protocol, kind, server, port) (exposures.exposure_key)."""
+        selected = self._exposures_tree.selection()
+        entry = self._exposures_by_id.get(selected[0]) if selected else None
+        if entry is None or entry.get('kind') != 'credential':
+            return
+        key = list(entry.get('key') or []) + [''] * 5
+        clients = entry.get('clients') or ['']
+        self.show_in_vault(key[1], entry.get('device', ''), entry.get('port', 0),
+                           client=clients[-1], credential_type=key[2])
+
+    def _open_alert_in_vault(self, alert_dict):
+        """AlertActions.open_vault: a credential alert's vault entry."""
+        ev = alert_dict.get('evidence') or {}
+        self.show_in_vault(ev.get('protocol', ''), alert_dict.get('dst_ip', ''),
+                           alert_dict.get('dst_port', 0), client=alert_dict.get('src_ip', ''),
+                           credential_type=ev.get('credential_type', ''))
+        self.root.lift()
 
     def _exposure_set(self, state):
         selected = self._exposures_tree.selection()
@@ -3896,8 +3555,11 @@ class NetSentinelGUI:
 
         self.root.after(3000, self._incidents_refresh)
 
-    def _incidents_refresh(self):
-        """Refresh the incidents display."""
+    def _incidents_refresh(self, once=False):
+        """Refresh the incidents display, while its tab is on screen."""
+        if not (once or self._tab_shown(self._tab_incidents)):
+            self.root.after(5000, self._incidents_refresh)
+            return
         try:
             stats = self.app.alert_correlator.get_stats()
             incidents = self.app.alert_correlator.get_incidents(limit=30)
@@ -3951,7 +3613,8 @@ class NetSentinelGUI:
         except Exception as e:
             logger.debug("Incidents refresh error: %s", e)
 
-        self.root.after(5000, self._incidents_refresh)   # see _devices_refresh
+        if not once:
+            self.root.after(5000, self._incidents_refresh)   # see _devices_refresh
 
     # ──────────────────────────────────────────────────────────────────────────
     # Tab: PCAP Capture (live capture export)
@@ -4039,8 +3702,11 @@ class NetSentinelGUI:
         except Exception as e:
             messagebox.showerror("Error", f"Recording error: {e}")
 
-    def _capture_refresh(self):
-        """Refresh capture status and file list."""
+    def _capture_refresh(self, once=False):
+        """Refresh capture status and file list, while its tab is on screen."""
+        if not (once or self._tab_shown(self._tab_capture)):
+            self.root.after(5000, self._capture_refresh)
+            return
         try:
             stats = self.app.pcap_writer.get_buffer_stats()
             status = f"Ring buffer: {stats['buffer_packets']} packets ({stats['buffer_span_sec']}s)"
@@ -4057,11 +3723,43 @@ class NetSentinelGUI:
         except Exception as e:
             logger.debug("Capture refresh error: %s", e)
 
-        self.root.after(5000, self._capture_refresh)   # see _devices_refresh
+        if not once:
+            self.root.after(5000, self._capture_refresh)   # see _devices_refresh
 
     # ──────────────────────────────────────────────────────────────────────────
     # Helpers
     # ──────────────────────────────────────────────────────────────────────────
+
+    def _tab_shown(self, tab):
+        """
+        Is this tab the one on screen? The Devices, Exposures, Incidents and
+        Capture tabs each rebuilt their whole page every five seconds, seen or
+        not and monitoring or not. On a building network, with hundreds of
+        controllers in the device list and on the Exposures page, the window
+        stalled every few seconds even with monitoring stopped.
+        """
+        try:
+            return (self.root.state() not in ('withdrawn', 'iconic')
+                    and self.notebook.select() == str(tab))
+        except tk.TclError:
+            return False
+
+    def _on_tab_changed(self):
+        """Draw the tab just opened now, not at its next five-second turn."""
+        try:
+            shown = self.notebook.select()
+        except tk.TclError:
+            return
+        refresh = {
+            str(self._tab_devices): self._devices_refresh,
+            str(self._tab_exposures): self._exposures_refresh,
+            str(self._tab_incidents): self._incidents_refresh,
+            str(self._tab_capture): self._capture_refresh,
+        }.get(shown)
+        if refresh is not None:
+            refresh(once=True)
+        elif shown == str(self._tab_forensics):
+            self._forensics_refresh()
 
     _format_bytes = staticmethod(presentation.format_bytes)
 

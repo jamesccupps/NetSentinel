@@ -193,8 +193,10 @@ class PcapAnalyzer:
         )
 
         # Forensics engine for credential/security scanning
+        from src.config import bacnet_mode
         from src.forensics import NetworkForensics
-        forensics = NetworkForensics(forensics_db=self.forensics_db)
+        forensics = NetworkForensics(forensics_db=self.forensics_db, net_env=self.net_env,
+                                     bacnet_mode=bacnet_mode(self.config))
 
         first_ts = last_ts = None
         try:

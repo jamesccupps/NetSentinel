@@ -17,6 +17,7 @@ Analyzes packet captures for:
 Designed for PCAP analysis but can also run on live traffic.
 """
 
+import ipaddress
 import re
 import logging
 import base64
@@ -24,7 +25,7 @@ import itertools
 from collections import defaultdict, Counter, deque
 from datetime import datetime
 
-from src.ipcache import is_private as _is_private
+from src.ipcache import is_multicast_addr, is_private as _is_private
 
 logger = logging.getLogger("NetSentinel.Forensics")
 
@@ -125,6 +126,15 @@ BACNET_CONFIRMED_SERVICES = {
     17: 'DeviceCommunicationControl',
     20: 'ReinitializeDevice — DEVICE RESET',
 }
+
+# BACnet/IP's UDP ports (0xBAC0 to 0xBACF), as config.BACNET_CAPTURE_EXCLUSION.
+BACNET_PORT_RANGE = range(47808, 47824)
+
+
+def is_bacnet_traffic(pkt_info):
+    """UDP to or from one of BACnet/IP's ports."""
+    return pkt_info.protocol == 'UDP' and (pkt_info.dst_port in BACNET_PORT_RANGE
+                                           or pkt_info.src_port in BACNET_PORT_RANGE)
 
 
 def bacnet_request(payload):
@@ -1156,8 +1166,14 @@ class NetworkForensics:
     alerts, flow classifications, and a narrative timeline.
     """
 
-    def __init__(self, forensics_db=None):
+    def __init__(self, forensics_db=None, net_env=None, bacnet_mode='watch'):
         self.db = forensics_db  # ForensicsDB for persistent storage
+        # This PC's addresses come from net_env (read live: they change with
+        # the network). bacnet_mode is config.bacnet_mode()'s answer.
+        self._net_env = net_env
+        self.bacnet_mode = bacnet_mode if bacnet_mode in ('watch', 'workstation', 'off') else 'watch'
+        # Told each BACnet device that announces itself (I-Am), for the device list.
+        self.on_bacnet_device = None
         # Credential findings (bounded; see BoundedLog for why len() is a total)
         self.credentials_found = BoundedLog(MAX_CREDENTIALS)
         self.sensitive_data = BoundedLog(MAX_SENSITIVE)
@@ -1260,6 +1276,10 @@ class NetworkForensics:
         self.packets_scanned += 1
         if self.packets_scanned % 5000 == 0:
             self._bound_context()
+        # Live capture already leaves BACnet out in its filter (config.capture_filter);
+        # this is for captures opened in the File Analyzer.
+        if self.bacnet_mode == 'off' and is_bacnet_traffic(pkt_info):
+            return
 
         # Update flow
         flow_key = (
@@ -1423,8 +1443,37 @@ class NetworkForensics:
                          'sent to it can be read on the way'),
                 'advice_port': 80}
 
+    def _is_own(self, ip):
+        """Is ip one of this PC's own addresses?"""
+        return bool(ip) and ip in (getattr(self._net_env, 'local_ips', None) or ())
+
+    def _addressed_to_many(self, ip):
+        """A broadcast or multicast address. Without the subnet to go on, a /24's
+        broadcast (.255), the commonest; this PC's own subnet may not be the
+        building network's."""
+        if not ip:
+            return False
+        if ip == '255.255.255.255' or ip.endswith('.255') or is_multicast_addr(ip):
+            return True
+        subnet = getattr(self._net_env, 'local_subnet', None)
+        if not subnet:
+            return False
+        try:
+            return (ipaddress.ip_address(ip)
+                    == ipaddress.ip_network(subnet, strict=False).broadcast_address)
+        except ValueError:
+            return False
+
+    def _bacnet_is_routine(self, pkt_info):
+        """On a building-controls PC (bacnet.mode 'workstation') BACnet's lack of
+        encryption is the site's known condition, not a finding: listed, it was
+        one "Unencrypted BACnet Service" per controller, hundreds of them."""
+        return self.bacnet_mode == 'workstation' and is_bacnet_traffic(pkt_info)
+
     def _check_insecure_protocol(self, pkt_info):
         """Flag insecure protocol usage."""
+        if self._bacnet_is_routine(pkt_info):
+            return
         port, _ = service_ports(pkt_info)
         service = (INSECURE_PROTOCOLS[port] if port in INSECURE_PROTOCOLS
                    and runs_over(port, pkt_info.protocol) else None)
@@ -1432,6 +1481,11 @@ class NetworkForensics:
             service = self._odd_port_http(pkt_info, port)
         if service is not None and pkt_info.payload_size > 0:
             self.unencrypted_packets += 1
+            # Sent to everyone, so no device's service: BACnet controllers answer
+            # discovery to the broadcast address, and that address was listed as
+            # an "Unencrypted BACnet Service" of its own.
+            if self._addressed_to_many(pkt_info.dst_ip):
+                return
             key = (pkt_info.dst_ip, port)
             if key not in self.insecure_services:
                 advice_port = service.get('advice_port', port)
@@ -1466,6 +1520,8 @@ class NetworkForensics:
 
     def _flag_unencrypted_data(self, pkt_info):
         """Flag unencrypted data transfer even without payload access."""
+        if self._bacnet_is_routine(pkt_info):
+            return
         port, _ = service_ports(pkt_info)
         if (port in INSECURE_PROTOCOLS and pkt_info.payload_size > 5
                 and runs_over(port, pkt_info.protocol)):
@@ -1824,11 +1880,12 @@ class NetworkForensics:
                         reg_value = int.from_bytes(payload[10:12], 'big')
                         details += f", Register {reg_addr} = {reg_value}"
 
+                    # The write is the finding; it is no credential. Filed in the
+                    # vault as one too, it was also a "Plaintext Credential" alert
+                    # saying to change a password nobody had sent.
                     self._add_sensitive_data('Modbus WRITE',
                         f'Modbus write command to industrial equipment: {details}',
                         src, dst, port, ts, risk='CRITICAL')
-                    self._add_credential('Modbus/SCADA', 'control_command',
-                        details, src, dst, port, ts, raw_value=details)
                 else:
                     # Read commands — still noteworthy, someone is polling
                     self._add_timeline_event(ts, 'scada',
@@ -1849,23 +1906,12 @@ class NetworkForensics:
             # BACnet/IP: starts with 0x81 (BACnet Virtual Link Control)
             if payload and len(payload) >= 4:
                 bvlc_type = payload[0]
-                bvlc_function = payload[1] if len(payload) > 1 else 0
-
-                BVLC_FUNCTIONS = {
-                    0x00: 'BVLC-Result',
-                    0x01: 'Write-Broadcast-Distribution-Table',
-                    0x02: 'Read-Broadcast-Distribution-Table',
-                    0x04: 'Forwarded-NPDU',
-                    0x0a: 'Original-Unicast-NPDU',
-                    0x0b: 'Original-Broadcast-NPDU',
-                }
 
                 # BACnet/IP is type 0x81 with its own length in bytes 2-3. Both,
                 # because one port is no proof: an SSDP search whose random
                 # source port was 47808 was "BACnet" HIGH.
                 bvlc_len = int.from_bytes(payload[2:4], 'big')
                 if bvlc_type == 0x81 and bvlc_len == len(payload):
-                    bvlc_name = BVLC_FUNCTIONS.get(bvlc_function, f'Function 0x{bvlc_function:02x}')
                     request = bacnet_request(payload)
                     if request:
                         apdu_type, service, apdu_start = request
@@ -1874,35 +1920,46 @@ class NetworkForensics:
                                     else BACNET_CONFIRMED_SERVICES)
                         svc_name = services.get(service, f'Service {service}')
                         is_unconfirmed = apdu_type == 1
+                        # bacnet.mode 'workstation': this PC runs the building's
+                        # controls, so what it sends and what it is sent is its
+                        # job: it discovers, polls and writes all day.
+                        workstation = self.bacnet_mode == 'workstation'
+                        routine = workstation and (self._is_own(src) or self._is_own(dst))
 
                         # Discovery — someone scanning for BACnet devices
                         if is_unconfirmed and service == 8:  # Who-Is
-                            self._add_timeline_event(ts, 'bacnet',
-                                f"BACnet Who-Is discovery: {src} scanning for devices")
-                            self._add_sensitive_data('BACnet Discovery',
-                                f'BACnet device discovery scan from {src}',
-                                src, dst, port, ts, risk='MEDIUM')
+                            if not routine:
+                                self._add_timeline_event(ts, 'bacnet',
+                                    f"BACnet Who-Is discovery: {src} scanning for devices")
+                                self._add_sensitive_data('BACnet Discovery',
+                                    f'BACnet device discovery scan from {src}',
+                                    src, dst, port, ts, risk='MEDIUM')
 
                         elif is_unconfirmed and service == 0:  # I-Am response
-                            self._add_timeline_event(ts, 'bacnet',
-                                f"BACnet I-Am: device at {src} responded to discovery")
-                            self._add_credential('BACnet', 'device_identity',
-                                f"BACnet device at {src} responding to discovery",
-                                src, dst, port, ts,
-                                raw_value=f"BACnet device at {src}, BVLC: {bvlc_name}")
+                            # A device saying what it is. No secret is in it: as a
+                            # vault "credential" every controller on a building
+                            # network was a CRITICAL "Plaintext Credential (BACnet)",
+                            # filed under the broadcast address, saying to change
+                            # its password. It goes to the device list instead.
+                            if self.on_bacnet_device is not None:
+                                try:
+                                    self.on_bacnet_device(src)
+                                except Exception as e:
+                                    logger.debug("BACnet device note failed: %s", e)
+                            if not workstation:
+                                self._add_timeline_event(ts, 'bacnet',
+                                    f"BACnet I-Am: device at {src} responded to discovery")
 
                         # Write commands — someone controlling the building
                         elif not is_unconfirmed and service in (15, 16):
-                            self._add_sensitive_data('BACnet WRITE',
-                                f'BACnet write command: {svc_name} — '
-                                f'building equipment being controlled by {src}',
-                                src, dst, port, ts, risk='CRITICAL')
-                            self._add_credential('BACnet', 'control_command',
-                                f'{svc_name} from {src}',
-                                src, dst, port, ts,
-                                raw_value=f'{svc_name}, payload: {payload[apdu_start:apdu_start+50].hex()}')
+                            if not routine:
+                                self._add_sensitive_data('BACnet WRITE',
+                                    f'BACnet write command: {svc_name} — '
+                                    f'building equipment being controlled by {src}',
+                                    src, dst, port, ts, risk='CRITICAL')
 
-                        # Device reset — very dangerous
+                        # Device reset — very dangerous, and rare enough to report
+                        # whoever sends it.
                         elif not is_unconfirmed and service == 20:
                             self._add_sensitive_data('BACnet RESET',
                                 f'BACnet ReinitializeDevice command from {src} — '
@@ -1911,10 +1968,11 @@ class NetworkForensics:
 
                         # Read property — monitoring/surveillance
                         elif not is_unconfirmed and service in (12, 14):
-                            self._add_timeline_event(ts, 'bacnet',
-                                f"BACnet ReadProperty: {src} reading from {dst}")
+                            if not routine:
+                                self._add_timeline_event(ts, 'bacnet',
+                                    f"BACnet ReadProperty: {src} reading from {dst}")
 
-                        else:
+                        elif not routine:
                             self._add_timeline_event(ts, 'bacnet',
                                 f"BACnet {apdu_name}: {svc_name} — {src} → {dst}")
                 # Anything else on the port is not BACnet. It used to be "BACnet/IP

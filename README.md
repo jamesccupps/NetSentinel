@@ -32,7 +32,9 @@ TLS stack stands out even when everything it sends is encrypted.
 
 **Network Forensics** — Scans for plaintext credentials (50+ protocol patterns), insecure services, sensitive data in transit. Findings go to an encrypted vault; by default only **masked** values are stored. See [Credential storage](#credential-storage) before enabling raw storage.
 
-**Passive Device Learning** — Automatically discovers and classifies every device on your local network (gateway, workstation, IoT, printer, camera, server) from ARP, DHCP, mDNS, and traffic patterns alone. Remote internet hosts are not treated as devices.
+**Passive Device Learning** — Automatically discovers and classifies every device on your local network (gateway, workstation, IoT, printer, camera, server, building controller) from ARP, DHCP, mDNS, BACnet, and traffic patterns alone. Remote internet hosts are not treated as devices.
+
+**Building automation (BACnet)** — Settings → Building automation, or `bacnet.mode`. **Watch it** (the default): BACnet discovery from another computer, writes and device resets are alerts. **This PC runs the building's controls**: its own discovery, polling and writes are expected, and BACnet is not listed as an unencrypted service; resets, and writes from any other computer, still alert. **Off**: BACnet is left out of the capture. A controller announcing itself is listed as a device, not filed as a credential.
 
 **Exposures** — What is set up unsafely, kept apart from what is happening: plaintext logins, unencrypted services, devices answering SNMP's default community, software with known exploited flaws, bad certificates. Each is one entry per device and issue, alerted on once and rated at most HIGH (CRITICAL is for signs of an attack); it alerts again only if it gets worse or comes back after you mark it fixed. Accept one you have decided to live with. In the **Exposures** tab and on the dashboard.
 
@@ -256,6 +258,7 @@ Configuration lives in `~/.netsentinel/config.json` (created on first run with d
 | `capture` | `alert_min_free_mb` | 1024 | Alert captures are never deleted; below this much free disk, new ones are skipped |
 | `threat_intel` | `abuse_ch_auth_key` | `""` | Free key from auth.abuse.ch: URLhaus, ThreatFox, MalwareBazaar |
 | `vulns` | `enabled` | true | Check devices' software against known exploited vulnerabilities |
+| `bacnet` | `mode` | watch | `watch`, `workstation` (this PC runs the building's controls) or `off` |
 
 An old default that a saved `config.json` kept is replaced once, at start, when a
 later version changed it: the capture filter that hid HTTPS until September 2026,

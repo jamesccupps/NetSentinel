@@ -25,8 +25,10 @@ sys.path.insert(1, os.path.dirname(os.path.abspath(__file__)))  # tests/, for _t
 import _test_support  # noqa: E402,F401
 from _test_support import reset_config  # noqa: E402
 
+from test_bacnet_mode import i_am  # noqa: E402
 from test_dga_names import GENERATED, ONEDRIVE_SYNC, WEB_PAGES, dga_findings  # noqa: E402
 from test_dns_tunnel import encoded, query  # noqa: E402
+from test_fourth_review import confirmed, who_is  # noqa: E402
 from test_gateway_threats import EDGE, _GeoIP, cef  # noqa: E402
 from test_lan_threats import arp, dhcp_payload, name_query, name_response, pkt  # noqa: E402
 from test_path_probes import tcp_traceroute, traceroute_pings  # noqa: E402
@@ -76,12 +78,12 @@ class _Lan:
 class _Pipeline:
     """Forensics, the app's forensics-to-alert step and its gateway, with an exposures list."""
 
-    def __init__(self, registry=None):
+    def __init__(self, registry=None, **forensics_options):
         from src.alert_verify import AlertVerifier
         from src.app import NetSentinelApp
         from src.exposures import ExposureRegistry
         from src.forensics import NetworkForensics
-        self.forensics = NetworkForensics()
+        self.forensics = NetworkForensics(**forensics_options)
         self.raised = []
         app = NetSentinelApp.__new__(NetSentinelApp)
         app.forensics, app.ids_engine, app.baseline_whitelist = self.forensics, None, None
@@ -99,6 +101,19 @@ class _Pipeline:
             self.forensics.analyze_packet(p)
         self.app._check_forensics_alerts()
         return self.raised
+
+
+# A PC that runs a building's controls, and its network.
+BAS_PC, CONTROLLER, BAS_BROADCAST = '192.168.10.40', '192.168.10.141', '192.168.10.255'
+
+
+def building_pipeline(mode):
+    """_Pipeline on the building-controls PC, with bacnet.mode as given."""
+    return _Pipeline(net_env=SimpleNamespace(local_ips={BAS_PC}), bacnet_mode=mode)
+
+
+def bacnet(src, dst, payload, ts=T0):
+    return udp(src, 47808, dst, 47808, payload, ts=ts)
 
 
 def gateway_app(geoip=None):
@@ -278,6 +293,18 @@ class TestAttacksStillAlert(unittest.TestCase):
         [answer] = self.assertRaised(raised, 'FORENSICS-CREDENTIAL', 'HIGH',
                                      title="Device answers SNMP's default community")
         self.assertEqual(answer.evidence['severity_before_exposure_cap'], 'CRITICAL')
+
+    def test_a_bacnet_write_from_another_computer(self):
+        """On the building-controls PC, its own writes are routine; anyone else's is not."""
+        for mode in ('watch', 'workstation'):
+            raised = building_pipeline(mode).feed(
+                bacnet(EVIL, CONTROLLER, confirmed(service=15, invoke=1)))
+            self.assertRaised(raised, 'FORENSICS-SENSITIVE-DATA', 'HIGH', title='BACnet WRITE')
+
+    def test_a_building_controller_reset_from_anywhere(self):
+        raised = building_pipeline('workstation').feed(
+            bacnet(BAS_PC, CONTROLLER, confirmed(service=20, invoke=2)))
+        self.assertRaised(raised, 'FORENSICS-SENSITIVE-DATA', 'HIGH', title='BACnet RESET')
 
     def test_a_ping_flood_at_one_host(self):
         ids, alerts = ping_engine()
@@ -492,6 +519,24 @@ class TestFalseAlarmsStayQuiet(unittest.TestCase):
                 src_ip='45.60.35.228', src_port=443, dst_ip=PC, dst_port=port),
                 now=T0 + hour * 3600)['report'])
         self.assertEqual(seen, [True, False, False])
+
+    def test_building_controllers_answering_discovery(self):
+        """Each was a CRITICAL "[CONFIRMED] Plaintext Credential (BACnet)", under the
+        broadcast address, saying to change its password: no secret is in an I-Am."""
+        raised = _Pipeline().feed(*(bacnet(f'192.168.10.{150 + i}', BAS_BROADCAST, i_am(),
+                                           ts=T0 + i) for i in range(40)))
+        self.assertEqual([a.rule_id for a in raised], [])
+
+    def test_a_building_controls_pc_polling_and_writing_all_day(self):
+        """bacnet.mode 'workstation': this PC's own BACnet is its job."""
+        packets = [bacnet(BAS_PC, BAS_BROADCAST, who_is())]
+        for i in range(30):
+            packets.append(bacnet(BAS_PC, CONTROLLER, confirmed(service=12, invoke=i % 256),
+                                  ts=T0 + i))
+            packets.append(bacnet(BAS_PC, CONTROLLER, confirmed(service=15, invoke=i % 256),
+                                  ts=T0 + i + 0.5))
+        raised = building_pipeline('workstation').feed(*packets)
+        self.assertEqual([a.rule_id for a in raised], [])
 
     def test_home_assistants_token_on_four_days(self):
         """Four CRITICAL alerts for one standing condition; now one, at HIGH."""

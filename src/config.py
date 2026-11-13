@@ -323,10 +323,41 @@ DEFAULT_CONFIG = {
         "keep_days": 30,
         "max_mb": 500,
     },
+    "bacnet": {
+        # Building automation (BACnet/IP, UDP 47808). "watch": discovery from
+        # another host, writes and resets are alerts. "workstation": this PC runs
+        # the building's controls, so its own discovery, reads and writes are
+        # expected and BACnet is not listed as an unencrypted service. "off":
+        # BACnet is left out of the capture altogether. See bacnet_mode().
+        "mode": "watch",
+    },
     "migrations": {
         "applied": [],                  # STALE_DEFAULTS already handled
     },
 }
+
+BACNET_MODES = ('watch', 'workstation', 'off')
+# BACnet/IP's range (0xBAC0 to 0xBACF); a site with several BACnet networks
+# runs them on 47809 and up.
+BACNET_CAPTURE_EXCLUSION = 'not udp portrange 47808-47823'
+
+
+def bacnet_mode(config):
+    """The bacnet.mode setting, or 'watch' when it is missing or not one of
+    BACNET_MODES (it is typed by hand in config.json too)."""
+    mode = str(config.get('bacnet', 'mode', default='watch') or '').strip().lower()
+    return mode if mode in BACNET_MODES else 'watch'
+
+
+def capture_filter(config):
+    """The capture's BPF filter: capture.bpf_filter, with BACnet left out when
+    bacnet.mode is 'off'. Left out in the filter, so the driver drops it and
+    none of it is parsed here: on a building-controls PC it is most of the
+    traffic."""
+    bpf = str(config.get('capture', 'bpf_filter', default='') or '').strip()
+    if bacnet_mode(config) == 'off':
+        return f"{BACNET_CAPTURE_EXCLUSION} and ({bpf})" if bpf else BACNET_CAPTURE_EXCLUSION
+    return bpf
 
 # Defaults a saved config froze in place. save() writes every value, so a
 # default changed in a later version never reached an install that had saved

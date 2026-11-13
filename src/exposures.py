@@ -274,6 +274,12 @@ class ExposureRegistry:
                 # next alert.
                 if e.get('kind') == 'certificate' and is_private(str(e.get('device', ''))):
                     continue
+                # A BACnet device announcing itself was filed as a plaintext
+                # login, under the broadcast address it answered to. It never was
+                # one (forensics_db.NOT_CREDENTIALS), and nothing raises it now.
+                if e.get('kind') == 'credential' and list(e.get('key') or [])[1:3] == [
+                        'BACnet', 'device_identity']:
+                    continue
                 e['first_seen'], e['last_seen'] = float(e['first_seen']), float(e['last_seen'])
                 e['count'] = int(e['count'])
                 e.setdefault('clients', [])

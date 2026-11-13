@@ -51,8 +51,14 @@ def _usable_mac(mac):
     except ValueError:
         return False
 
+BACNET_PORT = 47808
+
 # Behavioral classification rules (port-based heuristics)
 _DEVICE_SIGNATURES = {
+    # First, because a controller often has a web page too. 47808 is added only
+    # for a device that announced itself over BACnet (note_bacnet_device): a
+    # building-controls PC sends from that port as well.
+    'building_controller': {'listen_ports': {BACNET_PORT}, 'min_match': 1},
     'printer':    {'listen_ports': {515, 631, 9100}, 'min_match': 1},
     'camera':     {'listen_ports': {554, 8554}, 'min_match': 1},
     'dns_server': {'listen_ports': {53}, 'min_match': 1},
@@ -223,6 +229,18 @@ class DeviceLearner:
         if now - self._last_classify > self._classify_interval:
             self._last_classify = now
             self._classify_all()
+
+    def note_bacnet_device(self, ip):
+        """A device announced itself over BACnet (I-Am): it is a building
+        controller. Not this PC, which answers discovery too when it runs the
+        building's controls."""
+        if not self._is_local_device(ip) or ip in (getattr(self.net_env, 'local_ips', None) or ()):
+            return
+        with self._lock:
+            dev = self._get_or_create(ip)
+            if BACNET_PORT not in dev.services_seen:
+                dev.services_seen.add(BACNET_PORT)
+                self._classify_device(dev)
 
     def observe_dhcp(self, mac, ip, hostname="", vendor_class=""):
         """Called when DHCP traffic reveals device info."""

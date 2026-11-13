@@ -202,8 +202,10 @@ class NetSentinelApp:
         self.forensics_db = ForensicsDB(self.config)
 
         # Live forensics engine: credential scanning, insecure protocol detection
+        from src.config import bacnet_mode
         from src.forensics import NetworkForensics
-        self.forensics = NetworkForensics(forensics_db=self.forensics_db)
+        self.forensics = NetworkForensics(forensics_db=self.forensics_db, net_env=self.net_env,
+                                          bacnet_mode=bacnet_mode(self.config))
 
         # PCAP File Analyzer
         from src.pcap_analyzer import PcapAnalyzer
@@ -222,6 +224,9 @@ class NetSentinelApp:
         # Passive device learner: discovers and profiles devices from traffic
         from src.device_learner import DeviceLearner
         self.device_learner = DeviceLearner(self.config, net_env=self.net_env)
+        # A BACnet device announcing itself is a building controller in the
+        # device list (it used to be a "credential" in the vault).
+        self.forensics.on_bacnet_device = self.device_learner.note_bacnet_device
 
         # Baseline whitelist: learns normal domains/IPs/ports automatically
         from src.baseline_whitelist import BaselineWhitelist

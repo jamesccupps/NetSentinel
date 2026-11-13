@@ -116,7 +116,10 @@ class TestWheel(unittest.TestCase):
         with open(gui.__file__, encoding='utf-8') as f:
             source = f.read()
         self.assertEqual(source.count('bind_all('), 3, 'only wheel_scrollable binds it')
-        self.assertEqual(source.count('wheel_scrollable('), 10)
+        # The definition and four pages. The Forensics Vault's credentials, the
+        # Alerts tab and the File Analyzer's alerts are tables now, which scroll
+        # themselves, and the vault's unused first draft is gone.
+        self.assertEqual(source.count('wheel_scrollable('), 5)
 
 
 if __name__ == '__main__':

@@ -1109,7 +1109,8 @@ class CaptureEngine:
         if stop.is_set() or stop is not self._stop_event:
             return      # a late restart from a run that has already been stopped
         iface = self._select_interface()
-        bpf = self.config.get('capture', 'bpf_filter', default='')
+        from src.config import capture_filter
+        bpf = capture_filter(self.config)
         sniff_options = self._supported_sniff_kwargs({
             'promisc': self.config.get('capture', 'promiscuous', default=True),
             'snaplen': self.config.get('capture', 'snap_length', default=65535),

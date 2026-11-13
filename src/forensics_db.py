@@ -63,6 +63,16 @@ except ImportError:  # pragma: no cover - dependency is declared in requirements
 
 
 # Named so the value is obvious at the call site instead of being a bare bool.
+# Filed as credentials before 1.16.2, though none holds a secret: a BACnet
+# device announcing itself (I-Am) and BACnet and Modbus write commands. On a
+# building network that was one CRITICAL "Plaintext Credential" per controller,
+# saying to change a password, and thousands of rows in the vault.
+NOT_CREDENTIALS = frozenset({
+    ('BACnet', 'device_identity'),
+    ('BACnet', 'control_command'),
+    ('Modbus/SCADA', 'control_command'),
+})
+
 KEY_SOURCE_PASSPHRASE = 'passphrase(scrypt)'
 KEY_SOURCE_MACHINE = 'machine-derived(obfuscation only)'
 
@@ -192,6 +202,15 @@ class ForensicsDB:
         self._services = self._load_json(self._services_file)
         self._sensitive = self._load_encrypted(self._sensitive_file)
         self._log = self._load_json(self._log_file)
+
+        # Findings filed as credentials that never were (NOT_CREDENTIALS).
+        kept = [c for c in self._credentials
+                if (c.get('protocol'), c.get('credential_type')) not in NOT_CREDENTIALS]
+        if len(kept) != len(self._credentials):
+            logger.info("Vault: dropped %d device announcements and control commands "
+                        "that were filed as credentials", len(self._credentials) - len(kept))
+            self._credentials = kept
+            self._save_encrypted(self._creds_file, self._credentials)
 
         # Index for O(1) duplicate detection instead of scanning every stored credential
         self._cred_index = {self._dedup_key(c): c for c in self._credentials}

@@ -23,6 +23,7 @@ __all__ = [
     'format_timestamp', 'threat_level', 'severity_rank', 'severity_at_least',
     'protocol_breakdown', 'filter_alerts', 'sort_alerts', 'top_talkers',
     'summarise_alert_counts', 'truncate_middle',
+    'endpoint', 'vault_rows', 'find_vault_entry', 'VAULT_ROWS_SHOWN',
 ]
 
 SEVERITY_ORDER = {'LOW': 0, 'MEDIUM': 1, 'HIGH': 2, 'CRITICAL': 3}
@@ -205,3 +206,52 @@ def _searchable(alert):
     parts = [_get(alert, f) for f in
              ('title', 'description', 'src_ip', 'dst_ip', 'category', 'rule_id')]
     return ' '.join(str(p) for p in parts if p).lower()
+
+
+# ─── Addresses and the forensics vault ───────────────────────────────────────
+
+def endpoint(ip, port):
+    """'ip:port', or the address alone when the port is not known (0 or none):
+    an alert's detail showed a BACnet device's source as 'address:0'."""
+    if not ip:
+        return ''
+    return f"{ip}:{port}" if port not in (None, '', 0, '0') else str(ip)
+
+
+# The vault table shows this many, newest first; search finds the rest. It drew
+# every entry as its own row of widgets, and a building network's thousands
+# made the desktop window slow to open and stall on every scroll.
+VAULT_ROWS_SHOWN = 2000
+
+
+def vault_rows(credentials, limit=VAULT_ROWS_SHOWN):
+    """(the newest `limit` vault entries, newest first; how many there are)."""
+    rows = sorted(credentials, key=lambda c: c.get('timestamp') or 0, reverse=True)
+    return rows[:limit], len(rows)
+
+
+def find_vault_entry(credentials, protocol, server, port, client='', credential_type=''):
+    """
+    The vault entry an alert or exposure is about, or None: one with the same
+    protocol, server and port, preferring the same client and kind of
+    credential, then the newest. Matched on what the alert carries, since
+    alerts never had the vault entry's id.
+    """
+    def same(a, b):
+        return str(a or '') == str(b or '')
+
+    def port_of(value):
+        try:
+            return int(value or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    matches = [c for c in credentials
+               if same(c.get('protocol'), protocol) and same(c.get('destination_ip'), server)
+               and port_of(c.get('port')) == port_of(port)]
+    if not matches:
+        return None
+    return max(matches, key=lambda c: (
+        bool(client) and same(c.get('source_ip'), client),
+        bool(credential_type) and same(c.get('credential_type'), credential_type),
+        c.get('timestamp') or 0))
