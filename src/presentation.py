@@ -24,6 +24,7 @@ __all__ = [
     'protocol_breakdown', 'filter_alerts', 'sort_alerts', 'top_talkers',
     'summarise_alert_counts', 'truncate_middle',
     'endpoint', 'vault_rows', 'find_vault_entry', 'VAULT_ROWS_SHOWN',
+    'network_rows',
 ]
 
 SEVERITY_ORDER = {'LOW': 0, 'MEDIUM': 1, 'HIGH': 2, 'CRITICAL': 3}
@@ -255,3 +256,72 @@ def find_vault_entry(credentials, protocol, server, port, client='', credential_
         bool(client) and same(c.get('source_ip'), client),
         bool(credential_type) and same(c.get('credential_type'), credential_type),
         c.get('timestamp') or 0))
+
+
+# ─── This network ─────────────────────────────────────────────────────────────
+
+def _address(text):
+    import ipaddress
+    try:
+        return ipaddress.ip_address(str(text).split('%')[0])
+    except ValueError:
+        return None
+
+
+def network_rows(env, adapter=None):
+    """
+    "This network" on both dashboards, as (label, value) rows: this PC's
+    address on the network it captures, the subnet, gateway, DHCP and DNS
+    servers, the adapter, and this PC's other addresses. env is
+    NetworkEnvironment.get_summary(); adapter is CaptureEngine.interface_info().
+    NetSentinel found all of this at start and used it for detection, and
+    neither dashboard showed any of it.
+
+    Link-local addresses (169.254.x.x, fe80::) are left out: Windows gives one
+    to every adapter that is not connected anywhere.
+    """
+    env = env or {}
+    adapter = adapter or {}
+    if not env.get('detected'):
+        return [('This PC', 'Not detected yet')]
+    usable = []
+    for text in env.get('local_ips') or ():
+        addr = _address(text)
+        if addr is not None and not (addr.is_link_local or addr.is_loopback) and text not in usable:
+            usable.append(text)
+    # IPv4 first, each in order: the list comes from a set, and the panel
+    # should not reshuffle on every refresh.
+    usable.sort(key=lambda a: (_address(a).version, _address(a)))
+    subnet = env.get('local_subnet') or ''
+    in_subnet = []
+    if subnet:
+        import ipaddress
+        try:
+            network = ipaddress.ip_network(subnet, strict=False)
+            in_subnet = [a for a in usable if _address(a) in network]
+        except ValueError:
+            pass
+    ipv4 = [a for a in usable if _address(a).version == 4]
+    # The captured adapter's own address; else the one on the subnet. A VPN's
+    # address (Tailscale's 100.x) is this PC's too, but not on this network.
+    own = _address(adapter.get('ip') or '')
+    if own is not None and not (own.is_link_local or own.is_loopback or own.is_unspecified):
+        primary = str(own)
+    else:
+        primary = next(iter(in_subnet or ipv4 or usable), '')
+    rows = [('This PC', primary or 'No address found')]
+    if subnet:
+        rows.append(('Subnet', subnet))
+    for label, key in (('Gateway', 'gateways'), ('DHCP server', 'dhcp_servers'),
+                       ('DNS servers', 'dns_servers')):
+        values = [str(v) for v in env.get(key) or () if v]
+        if values:
+            rows.append((label, ', '.join(values)))
+    name, description = adapter.get('name') or '', adapter.get('description') or ''
+    if name:
+        rows.append(('Adapter', f"{name} ({description})" if description and description != name
+                     else name))
+    others = [a for a in usable if a != primary]
+    if others:
+        rows.append(('Other addresses', ', '.join(others)))
+    return rows

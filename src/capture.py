@@ -609,6 +609,31 @@ class CaptureEngine:
             logger.error("Could not auto-detect interface: %s", e)
             return None
 
+    def interface_info(self):
+        """
+        The adapter the capture uses, or would at its next start: name,
+        description and IPv4 address, for the dashboards' "This network".
+        Without _select_interface's logging: the dashboards ask every few seconds.
+        """
+        if not SCAPY_AVAILABLE:
+            return {}
+        try:
+            iface = conf.iface if self.interface == 'auto' else self.interface
+        except Exception:
+            return {}
+        if iface is None:
+            return {}
+        if isinstance(iface, str):
+            return {'name': iface}
+        name = str(getattr(iface, 'name', '') or iface)
+        description = str(getattr(iface, 'description', '') or '')
+        try:
+            ip = str(getattr(iface, 'ip', '') or '')
+        except Exception:
+            ip = ''
+        return {'name': name, 'description': description if description != name else '',
+                'ip': ip}
+
     @staticmethod
     def _extract_dns(dns, info):
         """

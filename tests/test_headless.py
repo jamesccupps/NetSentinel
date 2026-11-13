@@ -114,6 +114,9 @@ class _StubApp:
         return {'folder': 'f', 'zip': 'f.zip', 'alerts': 4, 'groups': 4, 'digests': 0,
                 'files': 3, 'bytes': 1000, 'masked': 0}
 
+    def network_rows(self):
+        return [('This PC', '192.168.10.32'), ('Gateway', '192.168.10.1')]
+
     def get_dashboard_data(self):
         return {
             'capture': {'packets_captured': 12345, 'bytes_captured': 987654,

@@ -1203,6 +1203,20 @@ class NetSentinelApp:
                 'dropped': stats.get('packets_dropped', 0),
                 'alerts': alerts.stats.get('total', 0) if alerts is not None else 0}
 
+    def network_rows(self):
+        """This network, as (label, value) rows for both dashboards."""
+        from src import presentation
+        try:
+            adapter = self.capture_engine.interface_info()
+        except Exception as e:
+            logger.debug("Adapter lookup failed: %s", e)
+            adapter = {}
+        env = self.net_env.get_summary()
+        # Every address: the summary keeps five of a set, which can leave out
+        # the one this PC has on the network it captures.
+        env['local_ips'] = list(getattr(self.net_env, 'local_ips', None) or env.get('local_ips') or ())
+        return presentation.network_rows(env, adapter)
+
     def get_dashboard_data(self):
         """Aggregate data for the GUI dashboard."""
         cap_stats = self.capture_engine.get_stats()

@@ -446,6 +446,17 @@ class HeadlessServer:
         with open(os.path.join(WEBUI_DIR, entry[0]), 'rb') as f:
             return f.read(), entry[1], {}
 
+    def _network_rows(self):
+        """This network's rows (NetSentinelApp.network_rows); none rather than no overview."""
+        rows = getattr(self.app, 'network_rows', None)
+        if rows is None:
+            return []
+        try:
+            return [list(row) for row in rows()]
+        except Exception as e:
+            logger.debug("Network rows failed: %s", e)
+            return []
+
     def _route_overview(self, params):
         data = self.app.get_dashboard_data()
         cap = data.get('capture', {})
@@ -492,6 +503,7 @@ class HeadlessServer:
             'top_talkers': talkers_out,
             # CC BY 4.0: DB-IP must be credited wherever its data is shown.
             'geoip_attribution': geo.get_stats()['attribution'] if geo is not None else None,
+            'network': self._network_rows(),
             'devices': {'total': devices.get('total_devices', 0),
                         'active_last_hour': devices.get('active_last_hour', 0)},
             'incidents_active': data.get('correlator', {}).get('active_incidents', 0),

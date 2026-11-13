@@ -496,6 +496,10 @@ async function refreshOverview() {
     ['Memory', res.available ? fmtBytes(res.rss_bytes) : '—'],
     ['Threads', res.available ? fmtNum(res.threads) : '—'],
   ];
+  // This PC's address, subnet, gateway, DHCP and DNS servers, adapter: rows
+  // made by the server (presentation.network_rows), as text.
+  $('network').replaceChildren(...(o.network || []).flatMap(([label, value]) =>
+    [h('dt', null, label), h('dd', null, value)]));
   $('engine').replaceChildren(...facts.flatMap((f) => typeof f === 'string'
     ? [h('div', { class: 'group' }, f)]
     : [h('dt', null, f[0]), h('dd', { title: f[2] || null }, f[1])]));

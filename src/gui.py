@@ -1054,6 +1054,14 @@ class NetSentinelGUI:
                                        highlightthickness=0, height=150)
         self._proto_canvas.pack(fill='both', expand=True)
 
+        # This PC's address and the network around it (presentation.network_rows)
+        network_card = Card(bottom_frame, title="THIS NETWORK")
+        network_card.pack(side='left', fill='both', expand=True, padx=4)
+        self._network_rows = tk.Frame(network_card, bg=COLORS['bg_card'])
+        self._network_rows.pack(fill='both', expand=True)
+        self._network_shown = None
+        self.root.after(500, self._refresh_network)
+
         # Recent alerts mini
         recent_card = Card(bottom_frame, title="RECENT ALERTS")
         recent_card.pack(side='left', fill='both', expand=True, padx=(4, 0))
@@ -1062,6 +1070,27 @@ class NetSentinelGUI:
                                          lookup=self._current_alert, limit=5, height=5,
                                          columns=('time', 'severity', 'title'))
         self._recent_alerts.pack(fill='both', expand=True)
+
+    def _refresh_network(self):
+        """Fill THIS NETWORK, and again every 30 seconds, monitoring or not: the
+        address can change (DHCP, a VPN coming up)."""
+        try:
+            rows = self.app.network_rows()
+            if rows != self._network_shown:
+                self._network_shown = rows
+                for widget in self._network_rows.winfo_children():
+                    widget.destroy()
+                for i, (label, value) in enumerate(rows):
+                    tk.Label(self._network_rows, text=label, font=('Segoe UI', 9),
+                             fg=COLORS['text_dim'], bg=COLORS['bg_card'], anchor='nw'
+                             ).grid(row=i, column=0, sticky='nw', padx=(4, 12), pady=1)
+                    tk.Label(self._network_rows, text=value, font=('Consolas', 9),
+                             fg=COLORS['text'], bg=COLORS['bg_card'], anchor='w',
+                             justify='left', wraplength=300
+                             ).grid(row=i, column=1, sticky='w', pady=1)
+        except Exception as e:
+            logger.debug("Network panel refresh failed: %s", e)
+        self.root.after(30000, self._refresh_network)
 
     def _make_metric_card(self, parent, label, value, color=None):
         card = Card(parent)
