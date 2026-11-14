@@ -454,8 +454,14 @@ IRC_NICK_RE = re.compile(rb'NICK\s+(\S+)', re.IGNORECASE)
 PRIVATE_KEY_RE = re.compile(rb'-----BEGIN\s+(?:RSA\s+)?PRIVATE\s+KEY-----')
 CERTIFICATE_RE = re.compile(rb'-----BEGIN\s+CERTIFICATE-----')
 
-# Credit card patterns (basic)
-CC_PATTERN_RE = re.compile(rb'(?:4\d{15}|5[1-5]\d{14}|3[47]\d{13}|6(?:011|5\d{2})\d{12})')
+# Credit card patterns (basic). The number must stand on its own: 16 digits in
+# the middle of a hash, a longer number or a word are not a card. Apt's by-hash
+# paths are SHA-256s, and one in ten 16-digit runs inside them passes Luhn. A
+# percent-escape before it (%22, %3D in an encoded form or JSON) still counts.
+CC_PATTERN_RE = re.compile(
+    rb'(?:(?<![0-9A-Za-z])|(?<=%[0-9A-Fa-f]{2}))'
+    rb'(?:4\d{15}|5[1-5]\d{14}|3[47]\d{13}|6(?:011|5\d{2})\d{12})'
+    rb'(?![0-9A-Za-z])')
 
 # SSN pattern
 SSN_RE = re.compile(rb'\b\d{3}-\d{2}-\d{4}\b')

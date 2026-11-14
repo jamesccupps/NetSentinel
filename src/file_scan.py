@@ -191,8 +191,11 @@ _GENERIC = [
 ]
 
 _PII = [
+    # Not inside a word or a hex run: one in ten 16-digit stretches of a
+    # SHA-256 passes Luhn. A percent-escape before it (%3D) still counts.
     ('card_number', 'Payment card number', 'CRITICAL',
-     re.compile(r'(?<![\d-])([3-6]\d{3}(?:[ -]?\d{2,4}){3,4})(?![\d-])'), 1),
+     re.compile(r'(?:(?<![0-9A-Za-z-])|(?<=%[0-9A-Fa-f]{2}))'
+                r'([3-6]\d{3}(?:[ -]?\d{2,4}){3,4})(?![0-9A-Za-z-])'), 1),
     ('ssn', 'US Social Security number', 'HIGH',
      re.compile(r'(?<![\d-])((?!000|666|9\d\d)\d{3}-(?!00)\d{2}-(?!0000)\d{4})(?![\d-])'), 1),
 ]

@@ -26,6 +26,7 @@ import _test_support  # noqa: E402,F401
 from _test_support import reset_config  # noqa: E402
 
 from test_bacnet_mode import i_am  # noqa: E402
+from test_card_boundaries import apt_by_hash, card_post  # noqa: E402
 from test_dga_names import GENERATED, ONEDRIVE_SYNC, WEB_PAGES, dga_findings  # noqa: E402
 from test_dns_tunnel import encoded, query  # noqa: E402
 from test_fourth_review import confirmed, who_is  # noqa: E402
@@ -301,6 +302,10 @@ class TestAttacksStillAlert(unittest.TestCase):
                 bacnet(EVIL, CONTROLLER, confirmed(service=15, invoke=1)))
             self.assertRaised(raised, 'FORENSICS-SENSITIVE-DATA', 'HIGH', title='BACnet WRITE')
 
+    def test_a_card_number_posted_over_plain_http(self):
+        raised = _Pipeline().feed(card_post())
+        self.assertRaised(raised, 'FORENSICS-SENSITIVE-DATA', 'HIGH', title='Credit Card')
+
     def test_a_building_controller_reset_from_anywhere(self):
         raised = building_pipeline('workstation').feed(
             bacnet(BAS_PC, CONTROLLER, confirmed(service=20, invoke=2)))
@@ -537,6 +542,11 @@ class TestFalseAlarmsStayQuiet(unittest.TestCase):
                                   ts=T0 + i + 0.5))
         raised = building_pipeline('workstation').feed(*packets)
         self.assertEqual([a.rule_id for a in raised], [])
+
+    def test_an_apt_download_by_its_hash(self):
+        """A HIGH "[CONFIRMED] Credit Card" on 11-13: apt in WSL asking for a file by
+        its SHA-256, sixteen digits of which passed Luhn."""
+        self.assertEqual(_Pipeline().feed(apt_by_hash()), [])
 
     def test_home_assistants_token_on_four_days(self):
         """Four CRITICAL alerts for one standing condition; now one, at HIGH."""
