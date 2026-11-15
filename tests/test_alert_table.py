@@ -20,7 +20,7 @@ sys.path.insert(1, os.path.dirname(os.path.abspath(__file__)))  # tests/, for _t
 
 import _test_support  # noqa: E402,F401
 
-from src import gui  # noqa: E402
+gui = _test_support.import_gui()       # None where tkinter cannot be imported
 
 CONTROLLER = '192.168.50.31'
 
@@ -34,6 +34,7 @@ def alert(i, severity='HIGH', **fields):
     return a
 
 
+@unittest.skipIf(gui is None, 'tkinter is not available')
 class _WithTk(unittest.TestCase):
 
     def setUp(self):
@@ -98,6 +99,7 @@ class TestAlertTable(_WithTk):
                          [('Alert 5, verified', actions), ('Alert 6', actions)])
 
 
+@unittest.skipIf(gui is None, 'tkinter is not available')
 class TestAlertsArriveInBatches(unittest.TestCase):
     """No Tk from the threads that raise alerts; the window takes them twice a second."""
 

@@ -138,7 +138,10 @@ class TestTheBrowserDashboard(_ApiTestCase):
 class TestTheDesktopDashboard(unittest.TestCase):
 
     def setUp(self):
-        import tkinter as tk
+        try:
+            import tkinter as tk
+        except ImportError as e:            # Linux without libtk
+            self.skipTest(f'tkinter is not available: {e}')
         try:
             self.root = tk.Tk()
         except tk.TclError as e:           # no display (GitHub's Linux runners)
@@ -148,7 +151,7 @@ class TestTheDesktopDashboard(unittest.TestCase):
 
     def test_the_card_shows_the_rows_and_redraws_only_when_they_change(self):
         import tkinter as tk
-        from src import gui
+        gui = _test_support.import_gui(self)
         rows = [[('This PC', PC), ('Gateway', '192.168.10.1')]]
         g = gui.NetSentinelGUI.__new__(gui.NetSentinelGUI)
         g.root = self.root

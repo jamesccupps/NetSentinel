@@ -193,7 +193,9 @@ class TestCaptureFilter(unittest.TestCase):
         self.assertEqual(bacnet_mode(reset_config(**{'bacnet.mode': None})), 'watch')
 
     def test_the_settings_form_keeps_the_mode_a_word(self):
-        from src.gui import _Choice, BACNET_CHOICES, settings_from_form
+        gui = _test_support.import_gui(self)
+        _Choice, BACNET_CHOICES, settings_from_form = (
+            gui._Choice, gui.BACNET_CHOICES, gui.settings_from_form)
         choice = _Choice(SimpleNamespace(get=lambda: BACNET_CHOICES[1][1]), BACNET_CHOICES)
         values, bad = settings_from_form({'bacnet.mode': choice.get()})
         self.assertEqual((values, bad), ({'bacnet.mode': 'workstation'}, []))

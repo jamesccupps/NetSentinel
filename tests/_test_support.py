@@ -26,7 +26,7 @@ import sys
 import tempfile
 import types
 
-__all__ = ['SCAPY_REAL', 'TEST_HOME', 'reset_config', 'destroy_tk']
+__all__ = ['SCAPY_REAL', 'TEST_HOME', 'reset_config', 'destroy_tk', 'import_gui']
 
 # ─── 1. Isolated HOME, established before anything imports src.config ─────────
 TEST_HOME = os.environ.get('NETSENTINEL_TEST_HOME')
@@ -97,3 +97,17 @@ def destroy_tk(case):
         case.root = None
     del root
     gc.collect()
+
+
+def import_gui(case=None):
+    """
+    src.gui, or the test skipped where tkinter cannot be imported (Linux
+    without libtk): those were errors, not skips. With no case, None.
+    """
+    try:
+        from src import gui
+    except ImportError as e:
+        if case is None:
+            return None
+        case.skipTest(f'tkinter is not available: {e}')
+    return gui

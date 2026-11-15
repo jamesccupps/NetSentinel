@@ -599,7 +599,7 @@ class TestTyposInSettings(unittest.TestCase):
                              (2048 * 1024 * 1024, 24 * 3600))
 
     def test_the_settings_form_refuses_a_non_number(self):
-        from src.gui import settings_from_form
+        settings_from_form = _test_support.import_gui(self).settings_from_form
         values, bad = settings_from_form({
             'ids.port_scan_threshold': '15x', 'syslog.port': '5,514',
             'ml.contamination': '0.1', 'ids.brute_force_threshold': ' 12 ',
@@ -673,7 +673,6 @@ class TestReleaseWorkflow(unittest.TestCase):
         self.assertEqual(title.group(1), 'NetSentinel ${TAG#v}')
 
     def test_actions_are_pinned_by_commit_and_keep_no_credentials(self):
-        import re
         for name, job in self.jobs.items():
             for step in job['steps']:
                 uses = step.get('uses')
@@ -730,7 +729,7 @@ class TestAboutDialog(unittest.TestCase):
 
     def test_it_shows_the_running_version_and_no_stale_counts(self):
         import inspect
-        from src import gui
+        gui = _test_support.import_gui(self)
         source = inspect.getsource(gui.NetSentinelGUI._show_about)
         self.assertIn('{__version__}', source)
         for stale in ('Version 1.0.0', '12 signature rules', '6 free feeds'):

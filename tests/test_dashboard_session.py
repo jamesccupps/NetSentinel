@@ -131,7 +131,7 @@ class TestALinkFromTheApp(_ApiTestCase):
                          401)
 
     def test_the_desktop_app_opens_the_link_not_the_bare_address(self):
-        from src import gui
+        gui = _test_support.import_gui(self)
         g = gui.NetSentinelGUI.__new__(gui.NetSentinelGUI)
         g.app = type('App', (), {'web_server': self.server})()
         with mock.patch('webbrowser.open') as opened:

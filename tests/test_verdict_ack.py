@@ -120,7 +120,7 @@ class TestTheDashboardRoute(_ApiTestCase):
 class TestTheDesktopApp(unittest.TestCase):
 
     def test_the_actions_go_through_the_app(self):
-        from src.gui import AlertActions
+        AlertActions = _test_support.import_gui(self).AlertActions
         calls = []
 
         class _App:
@@ -140,7 +140,7 @@ class TestTheDesktopApp(unittest.TestCase):
 
     def test_a_stored_alert_row_carries_them(self):
         import inspect
-        from src import gui
+        gui = _test_support.import_gui(self)
         source = inspect.getsource(gui.NetSentinelGUI)
         # The Alerts tab's table and the dashboard's recent alerts (test_alert_table).
         self.assertEqual(source.count('AlertTable(parent, actions=self._alert_actions,'), 1)
