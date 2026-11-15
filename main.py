@@ -246,6 +246,11 @@ def main(argv=None):
     logger.info("NetSentinel %s Starting...", APP_VERSION)
     logger.info("=" * 60)
 
+    # Hold this exe for as long as it runs, so a restart starts these bytes and
+    # not a file another program put in its place (src/launch_guard.py).
+    from src.launch_guard import hold_own_exe
+    hold_own_exe()
+
     if not is_admin():
         if sys.platform == 'win32':
             try:

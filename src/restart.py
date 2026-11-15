@@ -39,11 +39,23 @@ def relaunch_environment(environ=None):
     return env
 
 
-def relaunch(monitor=False):
-    """Start the new copy, detached from this one. The caller then exits."""
+def relaunch(monitor=False, popen=None):
+    """
+    Start the new copy, detached from this one. The caller then exits.
+
+    The exe is started through this process's hold on it (launch_guard), so it
+    is the same file this copy started from: a program running as the owner
+    could otherwise rename it and put its own in its place, to be started as
+    Administrator with no prompt.
+    """
+    from src.launch_guard import own_exe_hold, start_held
+    command = relaunch_command(monitor=monitor)
     flags = 0
     if os.name == 'nt':
         flags = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
-    return subprocess.Popen(relaunch_command(monitor=monitor), cwd=os.getcwd(),
-                            env=relaunch_environment(), creationflags=flags,
-                            close_fds=True)
+    kwargs = dict(cwd=os.getcwd(), env=relaunch_environment(), creationflags=flags,
+                  close_fds=True)
+    hold = own_exe_hold(command[0]) if getattr(sys, 'frozen', False) else None
+    if hold is not None:
+        return start_held(command, held_file=hold, popen=popen, **kwargs)
+    return (popen or subprocess.Popen)(command, **kwargs)

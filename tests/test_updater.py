@@ -214,6 +214,7 @@ class TestHandingOver(_Folder):
     def test_the_new_exe_is_started_to_finish_with_the_same_arguments(self):
         started = []
         u = self.updater(github())
+        u.download(u.check())              # hand_over starts only what it checked
         u.hand_over(os.path.join(self.dir, up.UPDATE_NAME), monitor=True,
                     argv=[self.exe, '--review', 'D:\\review', '--monitor'],
                     popen=lambda cmd, **kw: started.append(cmd))

@@ -223,6 +223,7 @@ class Updater:
         self.last_error = ''
         self._lock = threading.Lock()
         self._thread = None
+        self._downloaded = {}       # path -> the signed SHA-256 it was checked against
 
     @property
     def can_install(self):
@@ -312,14 +313,23 @@ class Updater:
             except OSError:
                 pass
             raise
+        self._downloaded[os.path.normcase(os.path.abspath(target))] = sha256
         return target
 
     def hand_over(self, update_exe, monitor=False, argv=None, popen=None):
         """
         Start the checked exe to finish the update once this copy exits. The
         caller then shuts down. Returns the started process.
+
+        Started held, and only if its SHA-256 is still the signed one
+        (src/launch_guard.py): it sits beside the exe, often in a folder the
+        owner's ordinary programs can write, from the check until the click.
         """
+        from src.launch_guard import LaunchRefused, start_held
         from src.restart import relaunch_command, relaunch_environment
+        sha256 = self._downloaded.get(os.path.normcase(os.path.abspath(update_exe)))
+        if sha256 is None:
+            raise UpdateError("That file was not downloaded and checked here.")
         args = relaunch_command(argv=argv, executable=self.exe_path, frozen=True,
                                 monitor=monitor)[1:]
         command = [update_exe, '--finish-update', os.path.abspath(self.exe_path),
@@ -327,9 +337,12 @@ class Updater:
         flags = 0
         if os.name == 'nt':
             flags = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
-        return (popen or subprocess.Popen)(
-            command, cwd=os.getcwd(), env=relaunch_environment(), creationflags=flags,
-            close_fds=True)
+        try:
+            return start_held(command, sha256=sha256, popen=popen, cwd=os.getcwd(),
+                              env=relaunch_environment(), creationflags=flags,
+                              close_fds=True)
+        except LaunchRefused as e:
+            raise UpdateError(f"{e} Nothing was installed.") from e
 
 
 def _own_pids(exe_path):
@@ -377,13 +390,19 @@ def finish_update(target, pids, args, source=None, popen=None, timeout=120):
     place, keep the old one as TARGET.old, and start TARGET with ARGS.
     Returns a process exit code.
     """
+    from src.launch_guard import LaunchRefused, held, sha256_of, start_held
     source = source or sys.executable
     wanted = [int(p) for p in str(pids or '').split(',') if p.strip().isdigit()]
     _wait_for_exit(wanted, timeout)
     old, staged = target + '.old', target + '.new'
     moved = False
+    installed = None            # the SHA-256 of what was put in place
     try:
-        shutil.copyfile(source, staged)
+        # Copied through a held handle, so what is put in place is what was read.
+        with held(source) as src, open(staged, 'wb') as out:
+            installed = sha256_of(src)
+            src.seek(0)
+            shutil.copyfileobj(src, out)
         if os.path.exists(old):
             _retry(lambda: os.remove(old))
         # The old exe can stay locked for a moment after its process ends.
@@ -391,6 +410,7 @@ def finish_update(target, pids, args, source=None, popen=None, timeout=120):
         moved = True
         os.replace(staged, target)
     except OSError as e:
+        installed = None
         logger.error("Could not install the update: %s", e)
         if moved and not os.path.exists(target):
             try:
@@ -405,9 +425,15 @@ def finish_update(target, pids, args, source=None, popen=None, timeout=120):
     flags = 0
     if os.name == 'nt':
         flags = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
-    (popen or subprocess.Popen)([target] + list(args), cwd=os.path.dirname(target) or None,
-                                env=relaunch_environment(), creationflags=flags,
-                                close_fds=True)
+    # Held, and the update only if it is still what was copied: between the
+    # move and the start, another program could put a file of its own there.
+    try:
+        start_held([target] + list(args), sha256=installed, popen=popen,
+                   cwd=os.path.dirname(target) or None, env=relaunch_environment(),
+                   creationflags=flags, close_fds=True)
+    except LaunchRefused as e:
+        logger.error("Not starting NetSentinel after the update: %s", e)
+        return 1
     return 0
 
 
