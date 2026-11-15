@@ -62,6 +62,17 @@ class UnifiApiError(RuntimeError):
     """The controller could not be reached or did not answer as expected."""
 
 
+def _private_open(path):
+    """A text file for writing, readable by its owner only from the moment it
+    exists (where the platform has modes)."""
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        os.chmod(path, 0o600)           # it may have existed with another mode
+    except OSError:
+        pass
+    return os.fdopen(fd, 'w', encoding='utf-8')
+
+
 #: Names the controller reports that are not really device names.
 _PLACEHOLDER_NAMES = frozenset({'', 'unknown', 'n/a', 'null', 'none'})
 
@@ -140,6 +151,12 @@ class UnifiClient:
         self.host = host.rstrip('/')
         if not self.host.startswith(('http://', 'https://')):
             self.host = 'https://' + self.host
+        # Over http the API key or password crosses the network in the clear,
+        # and a --fingerprint pin cannot apply: it was accepted silently.
+        if self.host.startswith('http://') and not insecure:
+            raise UnifiApiError(
+                f'refusing {self.host}: over http the key goes in the clear and no '
+                'certificate pin applies. Use https, or --insecure to accept that.')
         self.api_key = api_key
         self.username = username
         self.password = password
@@ -554,7 +571,9 @@ def write_profile(profile, path):
     if os.path.exists(path):
         os.replace(path, path + '.bak')
     temporary = path + '.tmp'
-    with open(temporary, 'w', encoding='utf-8') as handle:
+    # Owner-only from the start: chmod after the move left it readable by
+    # others until then.
+    with _private_open(temporary) as handle:
         handle.write(_HEADER + '\n' + text)
         handle.flush()
         os.fsync(handle.fileno())

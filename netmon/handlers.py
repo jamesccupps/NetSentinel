@@ -649,14 +649,17 @@ def os_build(event, rule, state):
 
     # The rest of the site is the more useful comparison: a build nobody else is
     # running is a machine nobody is managing, whatever the vendor's dates say.
+    # Against the build most of the site runs, not the highest: one Insider PC
+    # put every other machine "behind" (outside review, 2026-11-14).
     others = [b for d, b in seen.items() if d != device]
-    behind_peers = bool(others) and build < max(others)
+    usual = max(set(others), key=lambda b: (others.count(b), b)) if others else 0
+    behind_peers = bool(others) and build < usual
 
     if build not in unsupported and build >= floor and not behind_peers:
         return None
 
     why = ('is out of support' if build in unsupported
-           else f'is behind the rest of the site (highest seen: {max(others)})'
+           else f'is behind the rest of the site (most run {usual})'
            if behind_peers else f'is below the site minimum of {floor}')
     return _finding(
         rule, event, key=str(build),

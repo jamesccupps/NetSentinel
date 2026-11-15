@@ -423,6 +423,14 @@ def _check_operators(condition):
                     raise RuleError(
                         f'{field_name}: unknown operator {operator!r}; known '
                         f'operators are {", ".join(sorted(_OPERATORS))}')
+                if operator == 'matches':
+                    # Compiled here, so a bad pattern fails at load and at
+                    # --check, not on every event that reaches it.
+                    try:
+                        re.compile(str(expected[operator]), re.IGNORECASE)
+                    except re.error as e:
+                        raise RuleError(f'{field_name}: bad pattern '
+                                        f'{expected[operator]!r}: {e}') from None
 
 
 class RuleSet:

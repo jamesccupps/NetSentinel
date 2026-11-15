@@ -180,9 +180,11 @@ class _Handler(BaseHTTPRequestHandler):
             return self._send_json({'error': 'not found', 'path': parsed.path}, 404)
         try:
             payload = route(parse_qs(parsed.query))
-        except Exception as e:
+        except Exception:
+            # The detail goes to the log, not to whoever asked: it can name
+            # paths and internals (outside review, 2026-11-14).
             logger.exception("serving %s", parsed.path)
-            return self._send_json({'error': 'internal error', 'detail': str(e)}, 500)
+            return self._send_json({'error': 'internal error'}, 500)
         return self._send_json(payload)
 
     # ─── POST ────────────────────────────────────────────────────────────
@@ -254,9 +256,9 @@ class _Handler(BaseHTTPRequestHandler):
 
         try:
             payload, status = route(body)
-        except Exception as e:
+        except Exception:
             logger.exception("handling %s", parsed.path)
-            return self._send_json({'error': 'internal error', 'detail': str(e)}, 500)
+            return self._send_json({'error': 'internal error'}, 500)
         return self._send_json(payload, status)
 
     def _drain(self, length):

@@ -77,7 +77,9 @@ _TAGS = {Severity.CRITICAL: 'rotating_light', Severity.HIGH: 'warning',
          Severity.INFO: 'information_source'}
 
 #: Public ntfy servers, where a topic is readable by anyone who knows its name.
-_OPEN_SERVERS = ('ntfy.sh', 'https://ntfy.sh', 'http://ntfy.sh')
+# The public server, however it is written: a port, a "www." and a trailing dot
+# all reached it, and only the bare name was refused without a token.
+_PUBLIC_NTFY = 'ntfy.sh'
 
 
 class NotifierConfig:
@@ -111,7 +113,8 @@ class NotifierConfig:
             raise AlertingError('no ntfy topic configured')
 
         host = self.server.split('//')[-1].split('/')[0].lower()
-        if host in ('ntfy.sh',) and not self.token:
+        host = host.rsplit('@', 1)[-1].split(':')[0].rstrip('.')
+        if (host == _PUBLIC_NTFY or host.endswith('.' + _PUBLIC_NTFY)) and not self.token:
             raise AlertingError(
                 'refusing to publish to a public ntfy topic without a token. '
                 'Anyone who guesses the topic name would receive every alert — '

@@ -357,6 +357,12 @@ class RingBuffer:
             stamp = time.strftime('%Y%m%d-%H%M%S', time.localtime(around))
             out_path = os.path.join(self.directory,
                                     f'{_EXTRACT_PREFIX}{stamp}.pcap')
+            # Two findings in one second wrote one name, the second over the
+            # first's capture (outside review, 2026-11-14).
+            n = 2
+            while os.path.exists(out_path):
+                out_path = os.path.join(self.directory, f'{_EXTRACT_PREFIX}{stamp}-{n}.pcap')
+                n += 1
 
         from netmon.leakcheck import Restricted, frame_layout
 

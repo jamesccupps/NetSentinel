@@ -353,8 +353,22 @@ def combine(*terms, op='and'):
         return ''
     if len(live) == 1:
         return live[0]
-    return f' {op} '.join(t if t.startswith('(') or ' ' not in t else f'({t})'
+    return f' {op} '.join(t if _one_group(t) or ' ' not in t else f'({t})'
                           for t in live)
+
+
+def _one_group(term):
+    """Whether term is a single parenthesised group. Starting with '(' was the
+    test, so '(a) or (b)' joined by 'and' lost its grouping."""
+    term = term.strip()
+    if not (term.startswith('(') and term.endswith(')')):
+        return False
+    depth = 0
+    for i, ch in enumerate(term):
+        depth += {'(': 1, ')': -1}.get(ch, 0)
+        if depth == 0 and i < len(term) - 1:
+            return False                     # closed before the end: two groups
+    return depth == 0
 
 
 def _keyword_block(drop_hosts=None, drop_ports=None, drop_port_protocol='tcp',

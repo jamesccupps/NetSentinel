@@ -198,7 +198,10 @@ def save_state(state, path):
     """
     os.makedirs(os.path.dirname(path) or '.', exist_ok=True)
     temporary = path + '.tmp'
-    with open(temporary, 'w', encoding='utf-8') as handle:
+    # Owner-only from the start: chmod after the move left it readable by
+    # others until then.
+    from netmon.sources.unifi_api import _private_open
+    with _private_open(temporary) as handle:
         json.dump(state, handle, indent=1, sort_keys=True, default=str)
         handle.flush()
         os.fsync(handle.fileno())
