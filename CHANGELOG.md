@@ -1,6 +1,6 @@
 # NetSentinel Changelog
 
-## Unreleased — An outside review, worked through
+## v1.17.0 — An outside review, worked through
 
 **2778 unit tests** plus 14 integration checks. The fixes for a full outside
 review of 1.16.4 (2026-11-14), plus one false alarm.

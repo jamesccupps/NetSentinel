@@ -68,7 +68,7 @@ That keeps other programs on the computer, of any account and without
 Administrator rights, from reading alerts and captured findings or using the
 controls of a process that runs elevated, and keeps web pages from driving it.
 It does not protect against a program that can already read your browser's
-cookies or act as Administrator. Since v1.16.5; before, the page carried the
+cookies or act as Administrator. Since v1.17.0; before, the page carried the
 token and any local program could fetch it.
 
 ## Operating NetSentinel safely

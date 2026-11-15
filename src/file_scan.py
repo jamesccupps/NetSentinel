@@ -311,7 +311,7 @@ def mask(kind, value):
     return value[:show] + '*' * 8
 
 
-# A value masked before 1.16.5: the first 3 characters (8 of a token, 6 of an
+# A value masked before 1.17.0: the first 3 characters (8 of a token, 6 of an
 # API key, 20 of a SIP header) and a star for each one hidden, so a 4-character
 # password was three quarters shown. Alert history and the vault kept them.
 _OLD_MASK = re.compile(r'(?<![^\s:])([^\s:*]{1,20})(\*{1,20})(?!\S)')

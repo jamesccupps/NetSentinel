@@ -225,7 +225,7 @@ class AlertManager:
                 for item in data:
                     evidence = item.get('evidence') or {}
                     if item.get('rule_id') == 'FORENSICS-CREDENTIAL' and 'value' in evidence:
-                        # Masked before 1.16.5: the first characters and the length.
+                        # Masked before 1.17.0: the first characters and the length.
                         evidence['value'] = remask(evidence['value'])
                     alert = Alert(
                         rule_id=item.get('rule_id', ''),

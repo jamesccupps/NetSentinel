@@ -238,7 +238,7 @@ class ForensicsDB:
 
     def _scrub_old_masks(self):
         """
-        Findings stored before 1.16.5: masked values that showed the first 3
+        Findings stored before 1.17.0: masked values that showed the first 3
         characters and the length, and session cookies kept whole (the first
         80 characters of the header, the session itself). Masked as today and
         cut to the cookies' names, once, and saved.
