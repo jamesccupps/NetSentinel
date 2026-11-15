@@ -13,9 +13,7 @@ import os
 import sys
 import time
 import json
-import types
 import shutil
-import tempfile
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))

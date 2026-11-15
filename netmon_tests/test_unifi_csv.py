@@ -13,7 +13,6 @@ one thing it exists to catch.
 """
 
 import gzip
-import io
 import os
 import sys
 import tempfile

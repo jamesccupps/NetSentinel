@@ -29,7 +29,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(
 import _test_support  # noqa: E402,F401
 
 from netmon.profile import SiteProfile  # noqa: E402
-from netmon.sources.pcap import PcapError, packet_to_events, read_pcap  # noqa: E402
+from netmon.sources.pcap import PcapError, read_pcap  # noqa: E402
 from netmon_tests.test_bacnet import (bvlc, confirmed, context_uint,  # noqa: E402
                                       npdu, object_id, unconfirmed)
 

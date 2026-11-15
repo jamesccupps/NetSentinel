@@ -19,8 +19,8 @@ logger = logging.getLogger("NetSentinel.Capture")
 
 try:
     from scapy.all import (
-        sniff, conf, get_if_list, get_if_addr,
-        IP, IPv6, TCP, UDP, ICMP, DNS, ARP, Raw, Ether
+        sniff, conf,
+        IP, IPv6, TCP, UDP, ICMP, DNS, ARP, Ether
     )
     from scapy.packet import NoPayload
     SCAPY_AVAILABLE = True

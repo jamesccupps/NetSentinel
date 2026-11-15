@@ -469,7 +469,6 @@ class Notifier:
 
     def _deliver(self, record, topic=None, priority=None, tags=None):
         severity = record.get('severity', Severity.MEDIUM)
-        message = record.get('description') or record.get('title') or ''
 
         headers = {
             'Title': _header_safe(record.get('title') or record.get('rule', '')),

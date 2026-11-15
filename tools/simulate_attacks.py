@@ -23,10 +23,7 @@ import argparse
 import threading
 
 try:
-    from scapy.all import (
-        IP, TCP, UDP, ICMP, DNS, DNSQR, ARP, Ether, Raw,
-        send, sendp, sr1, conf
-    )
+    from scapy.all import IP, TCP, ICMP, send
     SCAPY_AVAILABLE = True
 except ImportError:
     SCAPY_AVAILABLE = False

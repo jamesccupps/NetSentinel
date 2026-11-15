@@ -44,7 +44,6 @@ from __future__ import annotations
 import csv
 import datetime
 import gzip
-import io
 import logging
 import os
 import re

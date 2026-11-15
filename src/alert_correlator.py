@@ -113,7 +113,6 @@ class Incident:
         n = self.alert_count
         cats = sorted(self.categories)
         src_list = sorted(self.source_ips)[:3]
-        dst_list = sorted(self.dest_ips)[:3]
 
         src_str = ', '.join(src_list)
         if len(self.source_ips) > 3:

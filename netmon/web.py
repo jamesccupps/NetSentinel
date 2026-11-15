@@ -42,7 +42,6 @@ Nothing here touches the network. It reads files and shows what is in them.
 
 from __future__ import annotations
 
-import html
 import ipaddress
 import json
 import logging
@@ -57,7 +56,7 @@ from urllib.parse import parse_qs, urlparse
 import yaml
 
 from netmon import bpf
-from netmon.events import Severity, Tier
+from netmon.events import Severity
 from netmon.profile import ProfileError, SiteProfile, load_profile
 from netmon.rules_engine import RuleError, load_rules
 

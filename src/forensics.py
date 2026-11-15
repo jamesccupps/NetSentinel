@@ -2210,9 +2210,7 @@ class NetworkForensics:
             # ── General transaction metadata logging ──────────
             if cmd_match and not last4_match and not entry_cred_match:
                 account_match = SKIDATA_ACCOUNT_RE.search(payload)
-                pricing_match = SKIDATA_PRICING_RE.search(payload)
                 account = account_match.group(1).decode('utf-8', errors='replace') if account_match else ''
-                pricing = pricing_match.group(1).decode('utf-8', errors='replace') if pricing_match else ''
 
                 self._add_timeline_event(ts, 'parking_cmd',
                     f"Parking {cmd_type}: ticket={ticket_num}, "
@@ -2574,9 +2572,6 @@ class NetworkForensics:
             return
 
         try:
-            # DHCP message type is at byte offset 0
-            op = payload[0]  # 1=request, 2=reply
-            htype = payload[1]  # Hardware type (1=Ethernet)
             hlen = payload[2]   # Hardware address length
 
             # Client MAC at offset 28-33

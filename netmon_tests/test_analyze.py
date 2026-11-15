@@ -17,7 +17,7 @@ from contextlib import redirect_stderr, redirect_stdout
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from netmon.analyze import Analyzer, _main, format_findings  # noqa: E402
-from netmon.events import Event, Severity, Tier  # noqa: E402
+from netmon.events import Severity, Tier  # noqa: E402
 from netmon.profile import load_profile  # noqa: E402
 from netmon.rules_engine import load_rules  # noqa: E402
 from netmon.sources.unifi_csv import COLUMNS  # noqa: E402

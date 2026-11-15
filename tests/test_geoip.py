@@ -9,7 +9,6 @@ addresses whose first bit is 1 have a record, the rest do not), so the real
 import gzip
 import os
 import shutil
-import struct
 import sys
 import tempfile
 import unittest

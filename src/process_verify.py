@@ -308,7 +308,6 @@ class ProcessVerifier:
             checks['virustotal'] = vt_result
             if vt_result.get('found'):
                 detections = vt_result.get('detections', 0)
-                total = vt_result.get('total', 0)
                 if detections == 0:
                     score += 2
                 elif detections <= 2:

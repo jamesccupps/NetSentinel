@@ -33,19 +33,6 @@ import logging
 
 logger = logging.getLogger("NetSentinel.AlertVerify")
 
-try:
-    import urllib.request
-    import json
-    URLLIB_AVAILABLE = True
-except ImportError:
-    URLLIB_AVAILABLE = False
-
-try:
-    import psutil
-    PSUTIL_AVAILABLE = True
-except ImportError:
-    PSUTIL_AVAILABLE = False
-
 
 class AlertVerdict:
     FALSE_POSITIVE = "FALSE_POSITIVE"

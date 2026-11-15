@@ -11,8 +11,6 @@ surface in the codebase, and the verifier decides what severity the user sees.
 import os
 import sys
 import csv
-import time
-import types
 import shutil
 import tempfile
 import unittest
