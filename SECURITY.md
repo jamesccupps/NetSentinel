@@ -74,6 +74,11 @@ token and any local program could fetch it.
 ## Operating NetSentinel safely
 
 - It must run elevated to capture packets. Treat it as privileged software.
+- Keep `NetSentinel.exe` in a folder only administrators can write, such as
+  Program Files. NetSentinel holds its own exe while it runs and starts an
+  update only as it was checked, but in a folder your ordinary programs can
+  write (Downloads, a Scoop folder in your profile), one of them could
+  replace the exe before you next start it.
 - `~/.netsentinel/` holds captured credentials, alert history and your
   VirusTotal API key. It is created `0700` with files `0600` where the platform
   supports it; on Windows, check the ACLs yourself.

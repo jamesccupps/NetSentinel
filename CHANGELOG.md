@@ -1,5 +1,54 @@
 # NetSentinel Changelog
 
+## Unreleased — An outside review, worked through
+
+**2778 unit tests** plus 14 integration checks. The fixes for a full outside
+review of 1.16.4 (2026-11-14), plus one false alarm.
+
+Changes you will notice:
+- **The browser dashboard opens only from NetSentinel**: Open in Browser in
+  the window, or Open dashboard on the tray icon (headless prints a link to
+  its console). Any program on the PC could read the old page's token and
+  use the controls of a process running as Administrator. Typing the address
+  or a bookmark now shows how to open it; after a restart, open it again
+  from NetSentinel.
+- **Reverse DNS of alerts' addresses is off by default** (Settings, Threat
+  data): an attacker's own name server saw the question. VirusTotal lookups
+  stay off unless you give a key.
+
+Fixed:
+- A file hash in a download (apt in WSL) was a HIGH "[CONFIRMED] Credit
+  Card", and a SHA-256 in a scanned file a CRITICAL card: a card number now
+  has to stand on its own.
+- Passwords found in traffic showed their first 3 characters and length,
+  and session cookies were stored whole. Secrets are masked as file scans
+  mask them (nothing of one under 8 characters, always 8 stars), cookies
+  keep only their names, and what was stored before is masked again when it
+  loads.
+- A number typed in quotes in config.json could stop NetSentinel starting
+  (alerts.max_stored) or stop all analysis silently (capture.max_pps).
+  Every number is now read as a number when the config loads.
+- Restart and the updater start an exe that cannot be swapped between the
+  check and the start; NetSentinel holds its own exe while it runs.
+- config.json, the known-good program hashes and confirmed false positives
+  changed by another program are noticed and logged; the hashes are not
+  trusted.
+- "Redis No Auth" was every Redis session with a password; incidents grouped
+  unrelated alerts because this PC was their source; packets between two
+  other hosts were blamed on a local program by port number (two ad-server
+  alerts named tailscaled.exe); a flow's replies were never counted;
+  off-hours activity needed one 50 KB packet; the first alert for every
+  address scored "no reverse DNS" before any answer came.
+- A new network or VPN is noticed within a minute; DNS and DHCP servers
+  are found on Windows in any language.
+- State that grew while NetSentinel ran is bounded, and the vault is no
+  longer rewritten whole for every finding.
+- CSV exports quote cells Excel would run as formulas; `review build --out`
+  no longer empties a folder that is not a bundle.
+- netmon: a filter is never a tcpdump option; canary times are UTC; a
+  snooze cannot be NaN; every BACnet write alerts; quiet hours follow
+  site.timezone; long-running state forgets by age; and smaller fixes.
+
 ## v1.16.4 — This network, on both dashboards
 
 **2638 unit tests** plus 14 integration checks. From 1.10.x or later this
