@@ -35,6 +35,7 @@ attacker's business and, if it was right, far too much to write down.
 
 from __future__ import annotations
 
+import calendar
 import hmac
 import json
 import logging
@@ -213,10 +214,13 @@ def _timestamp(raw):
         text = str(raw.get(key) or '').strip()
         if not text:
             continue
+        # utc_time is UTC; mktime would read it as the sensor's local time and
+        # put the hit, and the capture cut around it, hours off.
+        to_epoch = calendar.timegm if key == 'utc_time' else time.mktime
         for shape in ('%Y-%m-%d %H:%M:%S.%f', '%Y-%m-%d %H:%M:%S',
                       '%Y-%m-%dT%H:%M:%S.%f', '%Y-%m-%dT%H:%M:%S'):
             try:
-                return time.mktime(time.strptime(text.replace('Z', ''), shape))
+                return float(to_epoch(time.strptime(text.replace('Z', ''), shape)))
             except ValueError:
                 continue
     return time.time()

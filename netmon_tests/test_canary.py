@@ -234,6 +234,22 @@ class TestParsing(unittest.TestCase):
         self.assertEqual(time.strftime('%H:%M', time.localtime(parsed['ts'])),
                          '03:14')
 
+    def test_utc_time_is_read_as_utc(self):
+        """
+        mktime read utc_time as the sensor's local time: a hit at 10:00 UTC was
+        filed at 15:00 on a sensor in New York, and the capture cut around it
+        held none of the attacker's packets. mktime is faked as five hours
+        behind UTC, so this fails the same way wherever the tests run.
+        """
+        import calendar
+        from unittest import mock
+        behind = lambda t: calendar.timegm(t) + 5 * 3600     # noqa: E731
+        with mock.patch('netmon.canary.time.mktime', side_effect=behind):
+            utc = parse_event(record(utc_time='2026-11-14 10:00:00.000000'))
+            local = parse_event(record(local_time='2026-11-14 05:00:00'))
+        self.assertEqual(utc['ts'], calendar.timegm((2026, 11, 14, 10, 0, 0)))
+        self.assertEqual(local['ts'], utc['ts'])   # the local fields stay local
+
     def test_several_time_formats_parse(self):
         for text in ('2026-10-13 03:14:00', '2026-10-13 03:14:00.123456',
                      '2026-10-13T03:14:00', '2026-10-13T03:14:00.5Z'):
