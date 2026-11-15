@@ -212,6 +212,8 @@ class ForensicsDB:
             self._credentials = kept
             self._save_encrypted(self._creds_file, self._credentials)
 
+        self._scrub_old_masks()
+
         # Index for O(1) duplicate detection instead of scanning every stored credential
         self._cred_index = {self._dedup_key(c): c for c in self._credentials}
         self._service_index = {f"{s['ip']}:{s['port']}": s for s in self._services}
@@ -225,6 +227,36 @@ class ForensicsDB:
             self.key_source, "stored" if self.store_raw else "masked only",
             self.retention_days, f", pruned {removed}" if removed else "",
         )
+
+    def _scrub_old_masks(self):
+        """
+        Findings stored before 1.16.5: masked values that showed the first 3
+        characters and the length, and session cookies kept whole (the first
+        80 characters of the header, the session itself). Masked as today and
+        cut to the cookies' names, once, and saved.
+        """
+        from src.file_scan import remask
+        from src.forensics import cookie_names_value, session_cookie_names
+        creds_changed = sensitive_changed = 0
+        for cred in self._credentials:
+            masked = cred.get('value_masked')
+            if isinstance(masked, str) and remask(masked) != masked:
+                cred['value_masked'] = remask(masked)
+                creds_changed += 1
+        for item in self._sensitive:
+            value = item.get('value')
+            if item.get('data_type') == 'Session Cookie' and isinstance(value, str) \
+                    and not value.startswith('names: ') and value != 'value not kept':
+                names = session_cookie_names(value)
+                item['value'] = cookie_names_value(names) if names else 'value not kept'
+                sensitive_changed += 1
+        if creds_changed:
+            self._save_encrypted(self._creds_file, self._credentials)
+        if sensitive_changed:
+            self._save_encrypted(self._sensitive_file, self._sensitive)
+        if creds_changed or sensitive_changed:
+            logger.info("Vault: masked %d stored credentials again and cut %d stored session "
+                        "cookies to their names", creds_changed, sensitive_changed)
 
     @staticmethod
     def _dedup_key(entry):

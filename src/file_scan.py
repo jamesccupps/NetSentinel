@@ -305,8 +305,28 @@ def mask(kind, value):
         return '**** **** **** ' + digits[-4:]
     if kind == 'ssn':
         return '***-**-' + value[-4:]
+    # Nothing of a short secret, and always eight stars: a star per hidden
+    # character told the length, which matters most when it is short.
     show = 4 if len(value) >= 16 else 2 if len(value) >= 8 else 0
-    return value[:show] + '*' * min(max(len(value) - show, 4), 12)
+    return value[:show] + '*' * 8
+
+
+# A value masked before 1.16.5: the first 3 characters (8 of a token, 6 of an
+# API key, 20 of a SIP header) and a star for each one hidden, so a 4-character
+# password was three quarters shown. Alert history and the vault kept them.
+_OLD_MASK = re.compile(r'(?<![^\s:])([^\s:*]{1,20})(\*{1,20})(?!\S)')
+
+
+def remask(text):
+    """A value masked the old way, masked as mask() does now; anything else as it is."""
+    def one(m):
+        visible, stars = m.groups()
+        if len(stars) == 8 and len(visible) in (2, 4):
+            return m.group(0)                   # already today's form
+        length = len(visible) + len(stars)
+        show = 4 if length >= 16 else 2 if length >= 8 else 0
+        return visible[:show] + '*' * 8
+    return _OLD_MASK.sub(one, text) if isinstance(text, str) else text
 
 
 def ip_scope(addr):

@@ -218,10 +218,15 @@ class AlertManager:
         """Load alerts from disk and reconstruct Alert objects."""
         if os.path.exists(self.db_path):
             try:
-                with open(self.db_path) as f:
+                with open(self.db_path, encoding='utf-8') as f:
                     data = json.load(f)
+                from src.file_scan import remask
                 from src.ids_engine import Alert
                 for item in data:
+                    evidence = item.get('evidence') or {}
+                    if item.get('rule_id') == 'FORENSICS-CREDENTIAL' and 'value' in evidence:
+                        # Masked before 1.16.5: the first characters and the length.
+                        evidence['value'] = remask(evidence['value'])
                     alert = Alert(
                         rule_id=item.get('rule_id', ''),
                         severity=item.get('severity', 'LOW'),

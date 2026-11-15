@@ -323,7 +323,8 @@ HTTP_POST_CRED_RE = re.compile(
 )
 
 # HTTP Cookie headers (may contain session tokens)
-HTTP_COOKIE_RE = re.compile(rb'Cookie:\s*(.+?)(?:\r?\n)', re.IGNORECASE)
+# Not the end of "Set-Cookie:", which HTTP_SET_COOKIE_RE reads: one header was two findings.
+HTTP_COOKIE_RE = re.compile(rb'(?<![\w-])Cookie:\s*(.+?)(?:\r?\n)', re.IGNORECASE)
 HTTP_SET_COOKIE_RE = re.compile(rb'Set-Cookie:\s*(.+?)(?:\r?\n)', re.IGNORECASE)
 
 # HTTP Authorization headers (Bearer tokens, API keys). The value ends at the
@@ -987,6 +988,28 @@ SECURE_EQUIVALENTS = {
     27017: 'MongoDB with TLS and SCRAM authentication',
     31769: 'Skidata inter-gate communication with TLS + authenticated commands',
 }
+
+
+_SESSION_WORDS = ('session', 'auth', 'token', 'sid')
+
+
+def session_cookie_names(header, set_cookie=False):
+    """
+    The names of session-like cookies in a Cookie or Set-Cookie header, never
+    their values. A Set-Cookie line sets one cookie; the rest is attributes.
+    """
+    pairs = header.split(';')[:1] if set_cookie else header.split(';')
+    names = []
+    for pair in pairs:
+        name = pair.split('=', 1)[0].strip()[:40]
+        if name and '=' in pair and any(w in name.lower() for w in _SESSION_WORDS)                 and name not in names:
+            names.append(name)
+    return names[:5]
+
+
+def cookie_names_value(names):
+    """What the vault and the File Analyzer show for a session cookie."""
+    return f"names: {', '.join(names)} (values not kept)"
 
 
 def credential_alert(cred):
@@ -1670,6 +1693,11 @@ class NetworkForensics:
             words = match.group(1).split() if match else []
             if words and words[0].lower() not in (b'basic', b'digest'):
                 token = match.group(1).strip().decode('utf-8', errors='replace')
+                # Shown as its scheme and the masked token: masking "Bearer abc..."
+                # whole would show only "Bear".
+                scheme, _, secret = token.partition(' ')
+                shown_token = (f'{scheme} {self._mask(secret.strip())}' if secret.strip()
+                               else self._mask(token))
                 host_for_token = ''
                 hm = HTTP_HOST_RE.search(payload)
                 if hm:
@@ -1678,12 +1706,12 @@ class NetworkForensics:
                                if host_matches(host_for_token, v[0])), None)
                 if vendor:
                     self._add_credential(f'HTTP Auth Token ({vendor[1]})', 'token',
-                        self._mask(token, show=8) + f' via {host_for_token}', src, dst, port, ts,
+                        shown_token + f' via {host_for_token}', src, dst, port, ts,
                         extra={'host': host_for_token, 'note': vendor[2]},
                         raw_value=token, risk='LOW', recommendation=vendor[2])
                 else:
                     self._add_credential('HTTP Auth Token', 'token',
-                        self._mask(token, show=8), src, dst, port, ts,
+                        shown_token, src, dst, port, ts,
                         extra={'host': host_for_token} if host_for_token else None,
                         raw_value=token)
 
@@ -1692,7 +1720,7 @@ class NetworkForensics:
             if match:
                 key = match.group(1).decode('utf-8', errors='replace')
                 self._add_credential('API Key', 'key',
-                    self._mask(key, show=6), src, dst, port, ts, raw_value=key)
+                    self._mask(key), src, dst, port, ts, raw_value=key)
 
             # POST form data with passwords
             match = (HTTP_POST_CRED_RE.search(payload)
@@ -1715,12 +1743,17 @@ class NetworkForensics:
             # Internal web UIs (UniFi, Pi-hole, HA) legitimately use session cookies
             is_internal_dst = is_private_address(dst)
             if not is_internal_dst:
-                for regex in (HTTP_COOKIE_RE, HTTP_SET_COOKIE_RE):
+                for regex, set_cookie in ((HTTP_COOKIE_RE, False), (HTTP_SET_COOKIE_RE, True)):
                     match = regex.search(payload)
                     if match:
-                        cookie = match.group(1).decode('utf-8', errors='replace')
-                        if any(s in cookie.lower() for s in ('session', 'auth', 'token', 'sid')):
-                            self._add_sensitive_data('Session Cookie', cookie[:80], src, dst, port, ts)
+                        header = match.group(1).decode('utf-8', errors='replace')
+                        names = session_cookie_names(header, set_cookie)
+                        if names:
+                            # Names only: the value is the session, and the
+                            # sensitive store keeps what it is given.
+                            self._add_sensitive_data(
+                                'Session Cookie', cookie_names_value(names), src, dst, port,
+                                ts, evidence={'cookie_names': ', '.join(names)})
 
         # ─── Telnet ──────────────────────────────────────────
         if port == 23 or sport == 23:
@@ -1809,7 +1842,7 @@ class NetworkForensics:
             if match:
                 sip_auth = match.group(1).decode('utf-8', errors='replace')
                 self._add_credential('SIP/VoIP', 'digest_auth',
-                    self._mask(sip_auth, show=20), src, dst, port, ts, raw_value=sip_auth)
+                    self._mask(sip_auth), src, dst, port, ts, raw_value=sip_auth)
 
         # ─── RTSP (Cameras) ─────────────────────────────────
         if port == 554 or sport == 554:
@@ -3261,11 +3294,16 @@ class NetworkForensics:
             return False
 
     @staticmethod
-    def _mask(value, show=3):
-        """Mask a credential value for safe display."""
-        if len(value) <= show:
-            return '*' * len(value)
-        return value[:show] + '*' * min(len(value) - show, 20)
+    def _mask(value):
+        """
+        A credential as it may be shown: the file scanner's rule (file_scan.mask),
+        nothing of one under 8 characters, 2 of one under 16, 4 of a longer one,
+        and always eight stars. It showed the first 3 (8 of a token, 20 of a SIP
+        header) and the exact length, so a 4-character password was three
+        quarters shown, in alerts.json, on /api/alerts and in the alert window.
+        """
+        from src.file_scan import mask
+        return mask('password', str(value))
 
     @staticmethod
     def _format_bytes(b):
