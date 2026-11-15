@@ -35,6 +35,9 @@ KEV_URL = 'https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulner
 NVD_URL = ('https://services.nvd.nist.gov/rest/json/cves/2.0'
            '?hasKev&resultsPerPage={per_page}&startIndex={start}')
 NVD_PAGE = 2000
+# KEV holds under 2,000 CVEs: far more than that is not an answer to trust,
+# and totalResults would otherwise set how many pages are asked for.
+NVD_MAX_RESULTS = 20000
 NVD_PAGE_GAP_SEC = 6.5
 NVD_NOTICE = 'This product uses the NVD API but is not endorsed or certified by the NVD.'
 
@@ -254,6 +257,8 @@ class Catalog:
                 NVD_URL.format(per_page=NVD_PAGE, start=start), MAX_NVD_BYTES))
             batch = page.get('vulnerabilities') or []
             total = int(page.get('totalResults', len(batch)))
+            if total > NVD_MAX_RESULTS:
+                raise ValueError(f'NVD reports {total} results, more than {NVD_MAX_RESULTS}')
             items.extend(batch)
             if not batch:
                 break

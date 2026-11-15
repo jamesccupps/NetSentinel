@@ -52,6 +52,8 @@ def _usable_mac(mac):
         return False
 
 BACNET_PORT = 47808
+# ARP targets kept per host: gateway detection asks for more than 10.
+ARP_TARGETS_KEPT = 32
 
 # Behavioral classification rules (port-based heuristics)
 _DEVICE_SIGNATURES = {
@@ -209,9 +211,22 @@ class DeviceLearner:
                         base = '.'.join(parts[-2:])
                         dev.dns_domains[base] += 1
 
-                # ARP tracking for gateway detection
+                # ARP tracking for gateway detection. Only "more than 10" is ever
+                # asked, so a few more than that are kept per host, for as many
+                # hosts as the device table: it grew for as long as it ran
+                # (outside review, 2026-11-14, N10).
                 if pkt_info.protocol == "ARP" and pkt_info.dst_ip:
-                    self._arp_response_targets[pkt_info.src_ip].add(pkt_info.dst_ip)
+                    targets = self._arp_response_targets.get(pkt_info.src_ip)
+                    if targets is None:
+                        if len(self._arp_response_targets) >= self.max_devices:
+                            # The likeliest gateways (most targets) stay, half the table.
+                            ranked = sorted(self._arp_response_targets.items(),
+                                            key=lambda kv: -len(kv[1]))
+                            self._arp_response_targets = defaultdict(
+                                set, ranked[:max(1, self.max_devices // 2)])
+                        targets = self._arp_response_targets[pkt_info.src_ip]
+                    if len(targets) < ARP_TARGETS_KEPT:
+                        targets.add(pkt_info.dst_ip)
 
                 # mDNS service advertisements
                 if pkt_info.dns_query and pkt_info.dst_port == 5353:

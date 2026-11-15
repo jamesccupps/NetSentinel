@@ -73,6 +73,12 @@ NOT_CREDENTIALS = frozenset({
     ('Modbus/SCADA', 'control_command'),
 })
 
+# New findings are written at most this often (save_pending, flush). Each
+# write re-encrypts the whole vault, so writing on every finding was quadratic:
+# a parking device's heartbeat token, new every minute, rewrote a growing
+# vault every minute per device (outside review, 2026-11-14, N10).
+VAULT_SAVE_EVERY_SEC = 30
+
 KEY_SOURCE_PASSPHRASE = 'passphrase(scrypt)'
 KEY_SOURCE_MACHINE = 'machine-derived(obfuscation only)'
 
@@ -196,6 +202,8 @@ class ForensicsDB:
         # Set when a duplicate only refreshed an in-memory timestamp. flush() persists
         # those lazily instead of re-encrypting the whole vault on every repeat packet.
         self._dirty_creds = False
+        self._pending = set()           # 'creds', 'sensitive', 'log': new, not yet written
+        self._last_save = None
 
         # Load existing data
         self._credentials = self._load_encrypted(self._creds_file)
@@ -335,7 +343,8 @@ class ForensicsDB:
 
             self._credentials.append(entry)
             self._cred_index[key] = entry
-            self._save_encrypted(self._creds_file, self._credentials)
+            # Written with its log line, by _add_log's _save_soon just below.
+            self._pending.add('creds')
 
         # Log metadata only. No credential material — not even the masked value,
         # because _mask() reveals the leading characters of short secrets.
@@ -387,7 +396,8 @@ class ForensicsDB:
         }
         with self._lock:
             self._sensitive.append(entry)
-            self._save_encrypted(self._sensitive_file, self._sensitive)
+            # Written with its log line, by _add_log's _save_soon just below.
+            self._pending.add('sensitive')
 
         self._add_log('sensitive_data', {
             'data_type': data_type,
@@ -485,12 +495,38 @@ class ForensicsDB:
 
     # ─── Internal ─────────────────────────────────────────────
 
+    def _save_soon(self, which):
+        """Under the lock: write now if the last write was VAULT_SAVE_EVERY_SEC
+        ago (or there was none), else at the next save_pending or flush."""
+        self._pending.add(which)
+        if self._last_save is None or time.monotonic() - self._last_save >= VAULT_SAVE_EVERY_SEC:
+            self._write_pending()
+
+    def _write_pending(self):
+        if 'creds' in self._pending:
+            self._save_encrypted(self._creds_file, self._credentials)
+            self._dirty_creds = False
+        if 'sensitive' in self._pending:
+            self._save_encrypted(self._sensitive_file, self._sensitive)
+        if 'log' in self._pending:
+            self._save_json(self._log_file, self._log)
+        self._pending.clear()
+        self._last_save = time.monotonic()
+
+    def save_pending(self):
+        """Write new findings not yet written. The app calls this every few
+        seconds, so a crash loses at most that much."""
+        with self._lock:
+            if self._pending:
+                self._write_pending()
+
     def flush(self):
-        """Persist deferred in-memory updates. Called on shutdown."""
+        """Persist everything deferred, timestamps of repeats included. Called on shutdown."""
         with self._lock:
             if self._dirty_creds:
-                self._save_encrypted(self._creds_file, self._credentials)
-                self._dirty_creds = False
+                self._pending.add('creds')
+            if self._pending:
+                self._write_pending()
 
     def _add_log(self, finding_type, metadata, timestamp):
         """Add entry to the forensics log. Metadata only — never credential material."""
@@ -504,7 +540,7 @@ class ForensicsDB:
             # Cap log at 10,000 entries
             if len(self._log) > 10000:
                 self._log = self._log[-5000:]
-            self._save_json(self._log_file, self._log)
+            self._save_soon('log')
 
     def _save_encrypted(self, filepath, data):
         """Save data as encrypted JSON, atomically and owner-only."""

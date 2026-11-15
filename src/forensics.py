@@ -37,6 +37,9 @@ MAX_SECURITY_FINDINGS = 2000
 MAX_TIMELINE = 5000
 MAX_FLOWS = 20000
 MAX_CONTEXT_IPS = 20000
+# Insecure services and DHCP devices kept: well past a LAN's, short of a scan's.
+MAX_SERVICES = 5000
+MAX_DHCP_DEVICES = 5000
 
 
 class BoundedLog:
@@ -1209,6 +1212,10 @@ class NetworkForensics:
 
         # Security audit findings
         self.insecure_services = {}  # {(ip, port): service_info}
+        # Keys of insecure_services changed since the app last looked
+        # (take_services_touched): it walked every one not yet alerted on, on
+        # every packet, and those under 5 packets never left that list.
+        self.services_touched = set()
         self._seen_on = {}           # _seen_today: key -> when last reported
         self.security_findings = BoundedLog(MAX_SECURITY_FINDINGS)
 
@@ -1293,15 +1300,37 @@ class NetworkForensics:
         for key in oldest[:max(1, len(oldest) // 4)]:
             del self.flows[key]
 
+    def take_services_touched(self):
+        """The insecure services changed since the last call, and forget them."""
+        touched, self.services_touched = self.services_touched, set()
+        return touched
+
     def _bound_context(self):
         """The session-context maps grow per address; clear them past a cap."""
         for store in (self._tls_ips, self._odd_http_servers, self._greeted,
                       self._cdn_ips, self._ip_to_domains,
                       self._dual_port_ips, self._http_methods, self._http_has_form_fields,
                       self._mdns_responders, self._llmnr_responders,
-                      self._redis_authed, self._redis_needs_auth, self._redis_pending):
+                      self._redis_authed, self._redis_needs_auth, self._redis_pending,
+                      # Dedup sets and per-server notes, which grew for as long as
+                      # it ran (outside review, 2026-11-14, N10).
+                      self._http_ua_alerted, self._http_attack_alerted, self._http_servers,
+                      self._smb_sessions, self._mdns_poisoning_alerts, self.services_touched,
+                      self._parking_geteip_seen):
             if len(store) > MAX_CONTEXT_IPS:
                 store.clear()
+        if len(self.insecure_services) > MAX_SERVICES:
+            # The ones that never got past a few packets go first, oldest first.
+            ranked = sorted(self.insecure_services.items(),
+                            key=lambda kv: (kv[1].get('packet_count', 0) >= 5,
+                                            kv[1].get('first_seen') or 0))
+            for key, _ in ranked[:len(self.insecure_services) - MAX_SERVICES]:
+                del self.insecure_services[key]
+        if len(self.dhcp_devices) > MAX_DHCP_DEVICES:
+            oldest = sorted(self.dhcp_devices,
+                            key=lambda mac: self.dhcp_devices[mac].get('last_seen') or 0)
+            for mac in oldest[:len(self.dhcp_devices) - MAX_DHCP_DEVICES]:
+                del self.dhcp_devices[mac]
 
     def analyze_packet(self, pkt_info, payload=None):
         """
@@ -1554,6 +1583,7 @@ class NetworkForensics:
                 }
             svc = self.insecure_services[key]
             svc['packet_count'] += 1
+            self.services_touched.add(key)
             svc['bytes'] += pkt_info.length
             svc['src_ips'].add(pkt_info.src_ip)
 
@@ -2208,12 +2238,12 @@ class NetworkForensics:
 
                 self._add_credential('ParkingCloud/GETEIP', 'heartbeat_token',
                     f"Device {device_id} (MAC {mac}) → WAN {wan_ip}, "
-                    f"token {token[:12]}...",
+                    f"token {self._mask(token)}",
                     src, dst, port, ts,
                     extra={
                         'device_mac': mac, 'device_id': device_id,
                         'wan_ip': wan_ip, 'cloud_server': dst,
-                        'token_preview': token[:12],
+                        'token_preview': self._mask(token),
                         'note': 'Rotating auth token for parking cloud service, '
                                 'cleartext and potentially replayable within 60s window',
                     },
@@ -2696,6 +2726,7 @@ class NetworkForensics:
                 'has_https': False,
             }
         svc['packet_count'] += 1
+        self.services_touched.add(key)
         svc['bytes'] += size
         if isinstance(svc['src_ips'], set):
             svc['src_ips'].add(client)

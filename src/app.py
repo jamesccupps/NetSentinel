@@ -834,12 +834,15 @@ class NetSentinelApp:
             if not self._credential_alerted_today(cred):
                 self._alert_gateway(credential_alert(cred))
 
-        # Check for new insecure services. Small and bounded by (ip, port) pairs on
-        # the LAN, so a full pass is fine — but skip it entirely when nothing is new.
-        pending_services = [
-            (k, v) for k, v in self.forensics.insecure_services.items()
-            if k not in self._forensics_alerted_services
-        ]
+        # Check the insecure services that changed since the last look. Every one
+        # not yet alerted on was walked on every packet, and one under 5 packets
+        # never left that list, so the cost per packet rose with uptime (outside
+        # review, 2026-11-14, N10). One under 5 is looked at again when it grows.
+        services = self.forensics.insecure_services
+        take = getattr(self.forensics, 'take_services_touched', None)
+        keys = take() if take is not None else list(services)
+        pending_services = [(k, services[k]) for k in keys
+                            if k in services and k not in self._forensics_alerted_services]
         for key, svc in pending_services:
             # A signed update or certificate check over plain HTTP is not exposed.
             # Not marked as alerted, so any other request to the same server is.
@@ -922,6 +925,9 @@ class NetSentinelApp:
             # or a killed process lost the whole session. At most once a minute.
             self.alert_manager.maybe_autosave()
             self._check_network_change()
+            vault = getattr(self, 'forensics_db', None)
+            if vault is not None:
+                vault.save_pending()        # new findings, written at most every few seconds
             exposures = getattr(self, 'exposures', None)
             if exposures is not None:
                 exposures.save()        # at most every 30 seconds, and only when changed

@@ -41,6 +41,10 @@ import subprocess
 from src.winpaths import program_files_dirs
 
 # Forensics security-finding types -> (rule id, alert category).
+# Distinct DNS names counted in a capture. Every query was kept in a list, so a
+# long capture held each one in memory (outside review, 2026-11-14, N10).
+MAX_DNS_NAMES = 200000
+
 _FINDING_RULES = {
     'insecure_protocol': ('FORENSICS-INSECURE-SVC', 'Insecure Service'),
     'malicious_user_agent': ('FORENSICS-USER-AGENT', 'Suspicious HTTP'),
@@ -145,7 +149,7 @@ class PcapAnalyzer:
             'unique_dst_ips': set(),
             'unique_src_ports': set(),
             'unique_dst_ports': set(),
-            'dns_queries': [],
+            'dns_queries': Counter(),       # name -> times asked, up to MAX_DNS_NAMES names
             'total_bytes': 0,
             'alerts_generated': 0,
             'alerts_by_severity': Counter(),
@@ -244,7 +248,11 @@ class PcapAnalyzer:
                 if pkt_info.dst_port:
                     stats['unique_dst_ports'].add(pkt_info.dst_port)
                 if pkt_info.dns_query:
-                    stats['dns_queries'].append(pkt_info.dns_query)
+                    names = stats['dns_queries']
+                    if pkt_info.dns_query in names or len(names) < MAX_DNS_NAMES:
+                        names[pkt_info.dns_query] += 1
+                    else:
+                        stats['dns_names_capped'] = True
 
                 # Run through IDS
                 try:
@@ -295,6 +303,11 @@ class PcapAnalyzer:
             stats['capture_start'] = datetime.fromtimestamp(first_ts).strftime('%Y-%m-%d %H:%M:%S')
             stats['capture_end'] = datetime.fromtimestamp(last_ts).strftime('%Y-%m-%d %H:%M:%S')
             stats['capture_duration'] = f"{last_ts - first_ts:.1f} seconds"
+
+        # The vault writes in batches (forensics_db.VAULT_SAVE_EVERY_SEC); a
+        # file's findings are written when it is done, monitoring or not.
+        if self.forensics_db is not None and hasattr(self.forensics_db, 'save_pending'):
+            self.forensics_db.save_pending()
 
         # Finalize forensics
         try:
@@ -348,8 +361,8 @@ class PcapAnalyzer:
         stats['unique_dst_ips'] = len(stats['unique_dst_ips'])
         stats['unique_src_ports'] = len(stats['unique_src_ports'])
         stats['unique_dst_ports'] = len(stats['unique_dst_ports'])
-        stats['unique_dns_queries'] = len(set(stats['dns_queries']))
-        stats['top_dns_queries'] = Counter(stats['dns_queries']).most_common(20)
+        stats['unique_dns_queries'] = len(stats['dns_queries'])
+        stats['top_dns_queries'] = stats['dns_queries'].most_common(20)
         stats['top_talkers'] = stats['top_talkers'].most_common(20)
         stats['top_destinations'] = stats['top_destinations'].most_common(20)
         stats['protocols'] = dict(stats['protocols'])

@@ -17,12 +17,12 @@ the UI to display.
 `maxminddb` is imported only when GeoIP is enabled, so NetSentinel runs without it.
 """
 
-import gzip
 import ipaddress
 import logging
 import os
 import threading
 import time
+import zlib
 from datetime import datetime, timezone
 
 logger = logging.getLogger("NetSentinel.GeoIP")
@@ -41,6 +41,19 @@ DATABASES = {
 }
 # Country Lite is ~10 MB compressed, ASN Lite ~5 MB; nothing legitimate is bigger.
 MAX_DOWNLOAD_BYTES = 200 * 1024 * 1024
+
+
+def _gunzip(data, limit):
+    """Decompress, stopping past limit bytes out. gzip.decompress inflated the
+    whole download before its size was checked, so a small file could fill
+    memory (outside review, 2026-11-14, N10)."""
+    inflater = zlib.decompressobj(wbits=31)
+    out = inflater.decompress(data, limit + 1)
+    if len(out) > limit or inflater.unconsumed_tail:
+        raise ValueError('database larger than expected')
+    return out
+
+
 CACHE_MAX = 20000
 
 
@@ -160,9 +173,7 @@ class GeoIP:
             tmp = final + '.download'
             try:
                 blob = self._fetch(url)
-                data = gzip.decompress(blob)
-                if len(data) > MAX_DOWNLOAD_BYTES:
-                    raise ValueError('database larger than expected')
+                data = _gunzip(blob, MAX_DOWNLOAD_BYTES)
                 with open(tmp, 'wb') as f:
                     f.write(data)
                     f.flush()
