@@ -413,7 +413,8 @@ def _packet_line(pkt, redact, include_payloads):
         return redact.text(f"{when}  ARP   {what} {arp.pdst} tell {arp.psrc} ({arp.hwsrc})", 300)
     layer = pkt[IP] if IP in pkt else (pkt[IPv6] if IPv6 in pkt else None)
     if layer is None:
-        return f"{when}  {pkt.summary()[:80]}"
+        # Redacted like every other line: a non-IP frame's summary names MACs.
+        return redact.text(f"{when}  {pkt.summary()[:80]}", 120)
     src, dst = redact.ip(layer.src), redact.ip(layer.dst)
     info, payload, proto = '', b'', 'IP'
     if TCP in pkt:
@@ -553,6 +554,11 @@ def build_bundle(directory, out_dir=None, *, pseudonymise=False, include_pcaps=F
     stamp = datetime.now().strftime('%Y%m%d_%H%M%S')
     folder = os.path.abspath(out_dir or os.path.join(directory, 'bundles', f'bundle_{stamp}'))
     if os.path.exists(folder):
+        # --out may name any folder; only a previous bundle is replaced.
+        if (out_dir and os.listdir(folder)
+                and not os.path.exists(os.path.join(folder, 'summary.md'))):
+            raise FileExistsError(f"{folder} is not empty and is not a review bundle; "
+                                  "choose another folder.")
         shutil.rmtree(folder)
     os.makedirs(os.path.join(folder, 'traffic'))
 

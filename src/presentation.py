@@ -325,3 +325,15 @@ def network_rows(env, adapter=None):
     if others:
         rows.append(('Other addresses', ', '.join(others)))
     return rows
+
+
+def spreadsheet_safe(value):
+    """
+    A CSV cell Excel will not run as a formula. A cell starting with = + - or @
+    is one, and alerts carry text from the network (a domain, a user agent, a
+    file name). The dashboard's export already guarded this; the desktop app's
+    two did not (outside review, 2026-11-14). Numbers are left as they are.
+    """
+    if isinstance(value, str) and value[:1] in ('=', '+', '-', '@', '\t', '\r'):
+        return "'" + value
+    return value

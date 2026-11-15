@@ -423,11 +423,6 @@ def parse_snmp(payload):
     pdu = SNMP_PDUS.get(payload[i + size]) if i + size < len(payload) else None
     return version, community, pdu
 
-# SQL connection strings in plaintext
-SQL_CONN_RE = re.compile(
-    rb'(?:password|pwd)\s*=\s*([^;\\s]{1,100})', re.IGNORECASE
-)
-
 # Redis AUTH command
 REDIS_AUTH_RE = re.compile(rb'AUTH\s+(\S+)', re.IGNORECASE)
 
@@ -436,9 +431,6 @@ MONGO_AUTH_RE = re.compile(rb'(?:authenticate|createUser|pwd)\s*[=:]\s*["\']?(\S
 
 # VNC authentication (RFB protocol challenge-response, flag the attempt)
 VNC_AUTH_RE = re.compile(rb'RFB\s+\d+\.\d+')
-
-# MQTT CONNECT packet (username/password fields)
-MQTT_USER_RE = re.compile(rb'[\x00-\x01][\x00-\xff]{0,4}([\x20-\x7e]{3,50})', re.DOTALL)
 
 # SIP Authorization
 SIP_AUTH_RE = re.compile(rb'(?:Authorization|Proxy-Authorization):\s*Digest\s+(.+?)(?:\r?\n)',
@@ -449,14 +441,12 @@ RSYNC_MODULE_RE = re.compile(rb'@RSYNCD:', re.IGNORECASE)
 
 # IRC credentials
 IRC_PASS_RE = re.compile(rb'PASS\s+(\S+)', re.IGNORECASE)
-IRC_NICK_RE = re.compile(rb'NICK\s+(\S+)', re.IGNORECASE)
 
 # Modbus/SCADA (any traffic on these ports is concerning)
 # No specific credential pattern — the protocol itself has no auth
 
-# Private keys or certificates in transit
+# Private keys in transit
 PRIVATE_KEY_RE = re.compile(rb'-----BEGIN\s+(?:RSA\s+)?PRIVATE\s+KEY-----')
-CERTIFICATE_RE = re.compile(rb'-----BEGIN\s+CERTIFICATE-----')
 
 # Credit card patterns (basic). The number must stand on its own: 16 digits in
 # the middle of a hash, a longer number or a word are not a card. Apt's by-hash
@@ -470,8 +460,6 @@ CC_PATTERN_RE = re.compile(
 # SSN pattern
 SSN_RE = re.compile(rb'\b\d{3}-\d{2}-\d{4}\b')
 
-# Email addresses in plaintext
-EMAIL_RE = re.compile(rb'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}')
 
 # ═══════════════════════════════════════════════════════════════════════════════
 #  PARKING SYSTEM PROTOCOL PATTERNS

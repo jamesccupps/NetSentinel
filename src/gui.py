@@ -1286,7 +1286,8 @@ class NetSentinelGUI:
             history_card,
             text="Feature vectors are saved every 5 seconds as lightweight CSV (~2.5 MB/day).\n"
                  "Historical data is used to retrain the ML model for better accuracy over time.\n"
-                 "Files older than 90 days are automatically pruned.",
+                 f"Files older than {self.app.config.get('ml', 'feature_history_days', default=90)} "
+                 "days are automatically pruned.",
             font=('Segoe UI', 8), fg=COLORS['text_dim'], bg=COLORS['bg_card'],
             justify='left', anchor='w', wraplength=600
         )
@@ -1887,8 +1888,9 @@ class NetSentinelGUI:
                 st.insert('end', f"{cred['protocol']} {cred['credential_type']}", 'alert_high')
                 st.insert('end', f" — {cred['source_ip']} → {cred['destination_ip']}:{cred['port']}\n")
                 st.insert('end', f"    Value: {cred['value']}\n")
-                if cred.get('extra'):
-                    for k, v in cred['extra'].items():
+                extra = cred.get('extra')
+                if isinstance(extra, dict):        # from a capture file: anything
+                    for k, v in extra.items():
                         if v:
                             st.insert('end', f"    {k}: {v}\n")
             st.insert('end', '\n')
@@ -2113,7 +2115,7 @@ class NetSentinelGUI:
                      f"Services: {stats['total_services']}  |  "
                      f"Sensitive: {stats['total_sensitive']}  |  "
                      f"Protocols: {', '.join(stats.get('protocols_seen', [])) or 'none'}  |  "
-                     f"Encrypted: {'Yes (AES)' if stats.get('encrypted') else 'XOR fallback'}")
+                     f"Encrypted: {'Yes (Fernet)' if stats.get('encrypted') else 'No (cryptography is missing)'}")
 
             # Load credentials (masked), at the entry show_in_vault asked for
             credentials = db.search_credentials()
@@ -2659,14 +2661,14 @@ class NetSentinelGUI:
                 "\n".join(f"  {key}: {raw[key]!r}" for key in bad))
             return
         for key, val in values.items():
-            self.app.config.set(*key.split('.'), val)
+            self.app.config.set(*key.split('.'), val, save=False)
         for key, entry in self._secret_widgets.items():
-            self.app.config.set(*key.split('.'), entry.get().strip())
+            self.app.config.set(*key.split('.'), entry.get().strip(), save=False)
 
         # Save blacklist
         bl_text = self._blacklist_text.get('1.0', 'end').strip()
         bl_ips = [ip.strip() for ip in bl_text.split('\n') if ip.strip()]
-        self.app.config.set('blacklists', 'ips', bl_ips)
+        self.app.config.set('blacklists', 'ips', bl_ips, save=False)
 
         self.app.config.save()
         # Several settings (priority, review mode, GeoIP, thresholds) are read when
@@ -2792,7 +2794,7 @@ class NetSentinelGUI:
 
         t.insert('end', '  IOC Scanner', 'h2')
         t.insert('end', ' — indicators of compromise\n')
-        t.insert('end', '  TOR exit nodes, DGA domains, DoH bypass, suspicious processes.\n\n', 'bullet')
+        t.insert('end', '  Tor relays, DGA domains, DoH bypass, suspicious processes.\n\n', 'bullet')
 
         t.insert('end', 'KEY FEATURES\n', 'h1')
         t.insert('end', '\n')
@@ -2824,7 +2826,7 @@ class NetSentinelGUI:
         t.insert('end', '  • Wireshark for tshark PCAP parsing (optional)\n', 'bullet')
         t.insert('end', '  • Data stored at: %USERPROFILE%\\.netsentinel\\\n\n', 'bullet')
 
-        t.insert('end', '12,000+ lines of Python', 'warn')
+        t.insert('end', 'Written in Python', 'warn')
         t.insert('end', ' — AI-assisted development\n')
 
         t.config(state='disabled')

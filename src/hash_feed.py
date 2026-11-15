@@ -4,12 +4,13 @@ File scans take the SHA-256 of every file and archive member, streamed, and
 look it up here: in lists of known-bad hashes kept on this machine. Nothing is
 looked up online, and no hash or file name ever leaves the machine.
 
-MalwareBazaar was meant to be the source. abuse.ch now asks for a (free)
-Auth-Key even for its bulk exports, and the old keyless export URLs answer
-410 Gone, so NetSentinel does not download it. A list fetched by hand (for
-example MalwareBazaar's full SHA-256 export, with your own Auth-Key) works
-when dropped into the lists folder, ~/.netsentinel/data/hash_lists/ by
-default: any text or CSV file whose lines hold 64-hex-digit SHA-256 values.
+abuse.ch asks for a (free) Auth-Key even for its bulk exports, and the old
+keyless export URLs answer 410 Gone. With the key set (Settings, Threat data:
+threat_intel.abuse_ch_auth_key), threat_intel downloads MalwareBazaar's
+SHA-256 list into the lists folder itself; without one, nothing is
+downloaded. Either way, a list fetched by hand works when dropped into the
+lists folder, ~/.netsentinel/data/hash_lists/ by default: any text or CSV
+file whose lines hold 64-hex-digit SHA-256 values.
 """
 
 import hashlib

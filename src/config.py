@@ -518,15 +518,18 @@ class Config:
                 return default
         return node
 
-    def set(self, *keys_and_value):
-        """Set a nested config value. Last arg is the value."""
+    def set(self, *keys_and_value, save=True):
+        """Set a nested config value. Last arg is the value. save=False leaves the
+        write to the caller, which sets many: Settings rewrote config.json once
+        per key."""
         keys = keys_and_value[:-1]
         value = keys_and_value[-1]
         node = self._data
         for key in keys[:-1]:
             node = node.setdefault(key, {})
         node[keys[-1]] = value
-        self.save()
+        if save:
+            self.save()
 
     @property
     def data(self):

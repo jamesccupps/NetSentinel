@@ -274,7 +274,7 @@ class AlertManager:
             return 0
 
         if format == 'json':
-            with open(filepath, 'w') as f:
+            with open(filepath, 'w', encoding='utf-8') as f:
                 json.dump(data, f, indent=2, default=str)
         elif format == 'csv':
             import csv
@@ -302,9 +302,11 @@ class AlertManager:
                         seen.add(k)
 
             with open(filepath, 'w', newline='', encoding='utf-8') as f:
+                from src.presentation import spreadsheet_safe
                 writer = csv.DictWriter(f, fieldnames=all_keys, extrasaction='ignore')
                 writer.writeheader()
-                writer.writerows(flat_rows)
+                writer.writerows({k: spreadsheet_safe(v) for k, v in row.items()}
+                                 for row in flat_rows)
 
         return len(data)
 

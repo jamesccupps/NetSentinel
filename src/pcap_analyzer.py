@@ -427,7 +427,8 @@ class PcapAnalyzer:
                         row = alert.to_dict()
                         # Flatten evidence for CSV
                         row['evidence'] = json.dumps(row.get('evidence', {}))
-                        writer.writerow(row)
+                        from src.presentation import spreadsheet_safe
+                        writer.writerow({k: spreadsheet_safe(v) for k, v in row.items()})
 
         logger.info("Results exported to %s", filepath)
 

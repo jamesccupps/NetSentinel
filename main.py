@@ -72,7 +72,11 @@ def request_admin():
     # subprocess.list2cmdline quotes arguments the way CommandLineToArgvW parses
     # them; " ".join breaks on any path containing a space.
     import subprocess
-    params = subprocess.list2cmdline(sys.argv)
+    # From source, sys.executable is python and argv[0] the script; frozen,
+    # sys.executable is the exe and argv[0] is the exe again, which would be
+    # passed to it as its own first argument.
+    args = sys.argv[1:] if getattr(sys, 'frozen', False) else sys.argv
+    params = subprocess.list2cmdline(args)
     # The working folder too: without one, the elevated copy starts in System32,
     # and a relative path such as --review captures would land there.
     rc = ctypes.windll.shell32.ShellExecuteW(
