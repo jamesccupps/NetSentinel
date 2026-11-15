@@ -563,7 +563,8 @@ class TestSyslogExport(_ApiTestCase):
         import urllib.request
         digest, size = hashlib.sha256(), 0
         url = f'{self.base}/api/unifi-logs/export?day={self.day}'
-        with urllib.request.urlopen(url, timeout=30) as r:
+        request = urllib.request.Request(url, headers={'Cookie': self.session})
+        with urllib.request.urlopen(request, timeout=30) as r:
             headers = dict(r.headers)
             while True:
                 chunk = r.read(64 * 1024)

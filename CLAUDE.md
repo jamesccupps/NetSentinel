@@ -162,11 +162,16 @@ device names (the hard rules below).
   hold only the ClientHello; whether that sits within this rule is the owner's
   call, raised with him 2026-10-29.)
 - The HTTP server binds to localhost by default and cannot change configuration.
-  Its controls (start/stop monitoring, acknowledge, verdicts, exposure states,
-  review bundles, network audits, the scan ignore list) need the per-process token the dashboard
-  page carries and are refused unless the server is bound to loopback; loopback
-  binds refuse foreign Host headers. Keep it that way. (Owner's decision,
-  2026-10-29; it replaced "cannot change monitoring".)
+  The page, every /api/ route but /health and /api/metrics, and every POST need
+  the per-process session cookie, which only a link NetSentinel opens hands out
+  (Open in Browser, the tray's Open dashboard, the link headless prints to its
+  console, never the log). The page never carries the token; it reads it from
+  /api/session. Its controls (start/stop monitoring, acknowledge, verdicts,
+  exposure states, review bundles, network audits, the scan ignore list) and
+  file uploads also need that token and are refused unless the server is bound
+  to loopback; loopback binds refuse foreign Host headers. Keep it that way.
+  (Owner's decisions, 2026-10-29, which replaced "cannot change monitoring", and
+  2026-11-15: other programs on the PC could read the token from the page.)
 - The syslog receiver (`src/syslog_receiver.py`) is the only thing listening off
   loopback: off until `syslog.enabled`, on the configured address only, it
   accepts only `syslog.allowed_senders`, never answers, and treats every message

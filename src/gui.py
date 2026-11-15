@@ -1449,7 +1449,9 @@ class NetSentinelGUI:
                 "The dashboard is not running. It starts with NetSentinel unless "
                 "--no-api was given; check the log for why it could not start.")
             return
-        webbrowser.open(server.url + page)
+        # A one-time link with the session: the dashboard opens from here only
+        # (src/headless.py), not for any program that asks the port for it.
+        webbrowser.open(server.open_url(page))
 
     # ─── Review mode ─────────────────────────────────────────────────────
 

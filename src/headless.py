@@ -18,15 +18,25 @@ A sensor that can be reconfigured over the network is a liability, and the
 failure modes of getting authentication wrong are worse than the inconvenience
 of editing config.json.
 
-**Controls on loopback only.** A POST can upload files to be scanned and, only
-while the server is bound to a loopback address, start or stop monitoring,
+**A session only from the app.** The page, every /api/ route but /health and
+/api/metrics, and every POST need the session cookie, and the only way to get it
+is a link NetSentinel itself opens: the desktop window's and the tray's Open in
+Browser make a one-time /open?key= link, and headless mode prints one to its
+console (never the log). The page used to carry the token, so any program on
+this PC, of any account and without rights, could fetch it and use the controls
+of a process running as Administrator (outside review, 2026-11-14, N1). The
+cookie is HttpOnly and SameSite=Strict, per process: after a restart, open the
+dashboard from NetSentinel again. /health is a liveness probe; /api/metrics is
+counters only, for a Prometheus scraper that cannot hold a cookie.
+
+**Controls on loopback only.** A POST can, only while the server is bound to a
+loopback address, upload files to be scanned, start or stop monitoring,
 acknowledge alerts, record verdicts, build a review bundle, run a network audit
 and edit the scan ignore list. Turning audits on, like every other setting, stays
-in the desktop app. Every POST needs the token embedded in the dashboard page: a
-custom header no other site can send without a CORS preflight this server never
-answers, so no web page can drive it. Bound to anything else, the controls are
-refused, because then the token is the only thing between a network and turning
-monitoring off.
+in the desktop app. Every POST needs, besides the cookie, the token the page
+reads from /api/session: a custom header no other site can send without a CORS
+preflight this server never answers. Bound to anything else, the controls and
+uploads are refused.
 
 **Only its own name.** Requests whose Host header is not a loopback name are
 refused while bound to loopback, which stops DNS rebinding from turning a
@@ -42,7 +52,9 @@ bad trade.
 
 Endpoints
 ---------
-    GET /                 the dashboard
+    GET /open?key=        a link the app opened: sets the session, goes to /
+    GET /                 the dashboard (with the session; else how to open it)
+    GET /api/session      the token for the page's POSTs
     GET /status.txt       human-readable status summary
     GET /health           liveness, for a supervisor or container probe
     GET /api/overview     what the dashboard's overview shows
@@ -56,7 +68,7 @@ Endpoints
     GET /api/scan         a file scan's progress and report, ?id=
     POST /api/scan/new, /api/scan/upload?id=&name=, /api/scan/upload-batch?id=,
          /api/scan/start?id=, /api/scan/cancel?id=
-                          upload files and scan them (token required)
+                          upload files and scan them (token, loopback binds only)
     GET /api/audit        the network audit: choices, progress, last report
     POST /api/monitoring/start, /api/monitoring/stop, /api/alerts/ack?id=,
          /api/alerts/ack-all, /api/alerts/verdict?id=&verdict=,
@@ -68,6 +80,7 @@ Endpoints
 """
 
 import hmac
+import http.cookies
 import json
 import logging
 import os
@@ -92,6 +105,14 @@ DASHBOARD_CSP = ("default-src 'self'; script-src 'self'; style-src 'self'; "
 # The dashboard knows these words: on them it fetches the page again for the new
 # token, since a page open across a restart holds the old process's one.
 TOKEN_REFUSED = 'missing or wrong token'
+# And on these, that the page has no session: it says to open it from the app.
+SESSION_REFUSED = 'no dashboard session'
+SESSION_COOKIE = 'netsentinel_session'
+# Readable without a session: a supervisor's liveness probe, and counters with
+# no address, name or alert text in them, for a scraper that holds no cookie.
+OPEN_ROUTES = frozenset({'/health', '/api/metrics'})
+# How long a link the desktop app opens stays usable: one browser start.
+OPEN_LINK_SECONDS = 300
 
 logger = logging.getLogger("NetSentinel.Headless")
 
@@ -194,10 +215,37 @@ class _Handler(BaseHTTPRequestHandler):
             return False
         return True
 
+    def _has_session(self):
+        cookies = http.cookies.SimpleCookie()
+        try:
+            cookies.load(self.headers.get('Cookie') or '')
+        except http.cookies.CookieError:
+            return False
+        morsel = cookies.get(SESSION_COOKIE)
+        return morsel is not None and hmac.compare_digest(
+            morsel.value.encode(), self.server.netsentinel_session.encode())
+
     def do_GET(self):
         if not self._host_allowed():
             return
         parsed = urlparse(self.path)
+        if parsed.path == '/open':
+            key = (parse_qs(parsed.query).get('key') or [''])[0]
+            if self.server.netsentinel_redeem(key):
+                cookie = (f'{SESSION_COOKIE}={self.server.netsentinel_session}; '
+                          'HttpOnly; SameSite=Strict; Path=/')
+                # Location without a fragment keeps the link's (#audit).
+                self._send_bytes(b'', 'text/plain', 303,
+                                 {'Location': '/', 'Set-Cookie': cookie})
+            else:
+                self._send_bytes(self.server.netsentinel_locked_page(), 'text/html; charset=utf-8',
+                                 403, {'Content-Security-Policy': DASHBOARD_CSP})
+            return
+        session = self._has_session()
+        if parsed.path in ('/', '/index.html') and not session:
+            self._send_bytes(self.server.netsentinel_locked_page(), 'text/html; charset=utf-8',
+                             401, {'Content-Security-Policy': DASHBOARD_CSP})
+            return
         static = self.server.netsentinel_static(parsed.path)
         if static is not None:
             data, content_type, headers = static
@@ -206,6 +254,9 @@ class _Handler(BaseHTTPRequestHandler):
         route = self.server.netsentinel_routes.get(parsed.path)
         if route is None:
             self._send_json({'error': 'not found', 'path': parsed.path}, status=404)
+            return
+        if not session and parsed.path not in OPEN_ROUTES:
+            self._send_json({'error': SESSION_REFUSED}, status=401)
             return
         try:
             params = parse_qs(parsed.query)
@@ -236,8 +287,11 @@ class _Handler(BaseHTTPRequestHandler):
             self._send_json({'error': 'method not allowed' if known else 'not found',
                              'path': parsed.path}, status=405 if known else 404)
             return
+        if not self._has_session():
+            self._send_json({'error': SESSION_REFUSED}, status=401)
+            return
         token = self.headers.get('X-NetSentinel-Token') or ''
-        if not hmac.compare_digest(token, self.server.netsentinel_token):
+        if not hmac.compare_digest(token.encode(), self.server.netsentinel_token.encode()):
             self._send_json({'error': TOKEN_REFUSED}, status=403)
             return
         origin = self.headers.get('Origin')
@@ -324,11 +378,16 @@ class HeadlessServer:
         self._httpd = None
         self._thread = None
         self.started_at = time.time()
-        # Per process: the dashboard page carries it, nothing else can read it.
+        # Per process. The page reads the token from /api/session, which needs
+        # the session cookie, which only a link from open_url() hands out.
         self.token = secrets.token_urlsafe(24)
+        self.session = secrets.token_urlsafe(32)
+        self._open_keys = {}               # key -> expiry, or None: reusable
+        self._open_lock = threading.Lock()
         self._scans = None
 
         self.routes = {
+            '/api/session': self._route_session,
             '/status.txt': self._route_index,
             '/health': self._route_health,
             '/api/overview': self._route_overview,
@@ -370,6 +429,47 @@ class HeadlessServer:
     def controls_allowed(self):
         return self.host in LOOPBACK_NAMES
 
+    def open_url(self, page='', reusable=False):
+        """
+        A link that opens the dashboard with a session, at page ('#audit'). Used
+        once, within OPEN_LINK_SECONDS, unless reusable: headless mode prints a
+        reusable one to its console, since nobody can click a new one there.
+        Never log it: the log is in a folder other programs can read.
+        """
+        key = secrets.token_urlsafe(24)
+        now = time.monotonic()
+        with self._open_lock:
+            self._open_keys = {k: t for k, t in self._open_keys.items()
+                               if t is None or t > now}
+            self._open_keys[key] = None if reusable else now + OPEN_LINK_SECONDS
+        return f'{self.url}open?key={key}{page}'
+
+    def _redeem(self, key):
+        if not key:
+            return False
+        with self._open_lock:
+            for known, expires in list(self._open_keys.items()):
+                if hmac.compare_digest(known.encode(), key.encode()):
+                    if expires is None:
+                        return True
+                    del self._open_keys[known]
+                    return expires > time.monotonic()
+        return False
+
+    def _locked_page(self):
+        """What / shows without a session: how to open it, and nothing else."""
+        return (
+            '<!doctype html><html lang="en"><head><meta charset="utf-8">'
+            '<meta name="viewport" content="width=device-width, initial-scale=1">'
+            '<title>NetSentinel Dashboard</title>'
+            '<link rel="stylesheet" href="/static/style.css"></head>'
+            '<body><main class="locked"><h1>Open the dashboard from NetSentinel</h1>'
+            '<p>For safety the dashboard opens only from NetSentinel itself: click '
+            '<b>Open in Browser</b> in its window, or <b>Open dashboard</b> on its tray '
+            'icon. Running headless, use the link it printed when it started.</p>'
+            '<p>A page left open across a restart of NetSentinel needs opening again '
+            'the same way.</p></main></body></html>').encode('utf-8')
+
     @property
     def url(self):
         host = '127.0.0.1' if self.host in ('0.0.0.0', '::', '') else self.host
@@ -400,6 +500,9 @@ class HeadlessServer:
         self._httpd.netsentinel_post_routes = self.post_routes
         self._httpd.netsentinel_static = self._static
         self._httpd.netsentinel_token = self.token
+        self._httpd.netsentinel_session = self.session
+        self._httpd.netsentinel_redeem = self._redeem
+        self._httpd.netsentinel_locked_page = self._locked_page
         self._httpd.netsentinel_allowed_hosts = (
             LOOPBACK_NAMES if self.host in LOOPBACK_NAMES else None)
         self._httpd.daemon_threads = True
@@ -436,7 +539,6 @@ class HeadlessServer:
         if path in ('/', '/index.html'):
             with open(os.path.join(WEBUI_DIR, 'index.html'), encoding='utf-8') as f:
                 page = f.read()
-            page = page.replace('__NETSENTINEL_TOKEN__', self.token)
             page = page.replace('__NETSENTINEL_VERSION__', __version__)
             return (page.encode('utf-8'), 'text/html; charset=utf-8',
                     {'Content-Security-Policy': DASHBOARD_CSP})
@@ -445,6 +547,10 @@ class HeadlessServer:
             return None
         with open(os.path.join(WEBUI_DIR, entry[0]), 'rb') as f:
             return f.read(), entry[1], {}
+
+    def _route_session(self, params):
+        """The token for the page's POSTs; reached only with the session cookie."""
+        return {'token': self.token, 'controls': self.controls_allowed}, 'application/json'
 
     def _network_rows(self):
         """This network's rows (NetSentinelApp.network_rows); none rather than no overview."""
@@ -532,19 +638,30 @@ class HeadlessServer:
     def _route_scan(self, params):
         return self._scan_sessions().get(_str_param(params, 'id')), 'application/json'
 
+    def _uploads_allowed(self):
+        """Uploads are parsed by a process running as Administrator: loopback only."""
+        if not self.controls_allowed:
+            raise RequestRefused(
+                'Uploading files to scan is only available while the dashboard is '
+                'bound to localhost. Use the desktop app, or the machine itself.')
+
     def _post_scan_new(self, params, body, length):
+        self._uploads_allowed()
         return self._scan_sessions().create(), 201
 
     def _post_scan_upload(self, params, body, length):
+        self._uploads_allowed()
         name = _str_param(params, 'name') or 'upload'
         stored = self._scan_sessions().add_file(_str_param(params, 'id'), name, body, length)
         return {'stored': stored}, 201
 
     def _post_scan_upload_batch(self, params, body, length):
+        self._uploads_allowed()
         stored = self._scan_sessions().add_batch(_str_param(params, 'id'), body, length)
         return {'stored': stored}, 201
 
     def _post_scan_start(self, params, body, length):
+        self._uploads_allowed()
         return self._scan_sessions().start(_str_param(params, 'id')), 202
 
     def _post_scan_cancel(self, params, body, length):
@@ -939,6 +1056,9 @@ def run_headless(app, host='127.0.0.1', port=DEFAULT_PORT, serve_api=True):
             server = HeadlessServer(app, host=host, port=port)
             server.start()
             logger.info("Dashboard: %s  Metrics: %sapi/metrics", server.url, server.url)
+            # To the console only: the log file is readable by other programs.
+            print(f"Open the dashboard with this link (keep it to yourself):\n"
+                  f"  {server.open_url(reusable=True)}", flush=True)
 
         logger.info("Running headless. Press Ctrl-C to stop.")
         while True:

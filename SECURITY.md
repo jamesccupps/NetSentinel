@@ -54,6 +54,23 @@ Since v1.5.0 only **masked** credential values are stored by default. Full
 plaintext secrets are retained only if you set
 `forensics.store_raw_credentials` to `true`.
 
+## What the dashboard's session does and does not protect
+
+The browser dashboard (`http://127.0.0.1:8737/`) opens only through a link
+NetSentinel itself opens: **Open in Browser**, the tray's **Open dashboard**, or
+the link `--headless` prints to its console. The link sets an `HttpOnly`,
+`SameSite=Strict` cookie for that browser, for the life of that NetSentinel
+process. Without it every page and API route except `/health` and
+`/api/metrics` (counters only) is refused, and every control also needs a token
+the page reads with its session.
+
+That keeps other programs on the computer, of any account and without
+Administrator rights, from reading alerts and captured findings or using the
+controls of a process that runs elevated, and keeps web pages from driving it.
+It does not protect against a program that can already read your browser's
+cookies or act as Administrator. Since v1.16.5; before, the page carried the
+token and any local program could fetch it.
+
 ## Operating NetSentinel safely
 
 - It must run elevated to capture packets. Treat it as privileged software.

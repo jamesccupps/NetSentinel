@@ -159,25 +159,36 @@ class _ApiTestCase(unittest.TestCase):
     def tearDown(self):
         self.server.stop()
 
-    def get(self, path):
-        with urllib.request.urlopen(self.base + path, timeout=5) as r:
+    @property
+    def session(self):
+        """The Cookie header a browser holds after a link from the app (open_url)."""
+        from src.headless import SESSION_COOKIE
+        return f'{SESSION_COOKIE}={self.server.session}'
+
+    def get(self, path, session=True):
+        request = urllib.request.Request(self.base + path,
+                                         headers={'Cookie': self.session} if session else {})
+        with urllib.request.urlopen(request, timeout=5) as r:
             return r.status, dict(r.headers), r.read().decode()
 
     def get_json(self, path):
         return json.loads(self.get(path)[2])
 
-    def request(self, path, data=None, headers=None, method=None):
+    def request(self, path, data=None, headers=None, method=None, session=True):
+        headers = dict(headers or {})
+        if session:
+            headers.setdefault('Cookie', self.session)
         req = urllib.request.Request(self.base + path, data=data, method=method,
-                                     headers=headers or {})
+                                     headers=headers)
         try:
             with urllib.request.urlopen(req, timeout=10) as r:
                 return r.status, r.read().decode()
         except urllib.error.HTTPError as e:
             return e.code, e.read().decode()
 
-    def post(self, path, data=b'', token=None, **headers):
+    def post(self, path, data=b'', token=None, session=True, **headers):
         headers['X-NetSentinel-Token'] = self.server.token if token is None else token
-        return self.request(path, data=data, headers=headers, method='POST')
+        return self.request(path, data=data, headers=headers, method='POST', session=session)
 
 
 class TestServerLifecycle(_ApiTestCase):
@@ -357,11 +368,12 @@ class TestResponseHardening(_ApiTestCase):
 class TestDashboard(_ApiTestCase):
     """The browser dashboard, and what keeps other web pages from driving it."""
 
-    def test_the_page_carries_the_token_and_a_strict_policy(self):
+    def test_the_page_has_a_strict_policy_and_never_the_token(self):
         status, headers, body = self.get('/')
         self.assertEqual(status, 200)
         self.assertTrue(headers['Content-Type'].startswith('text/html'))
-        self.assertIn(self.server.token, body)
+        self.assertNotIn(self.server.token, body)
+        self.assertNotIn(self.server.session, body)
         self.assertNotIn('__NETSENTINEL', body)
         self.assertIn("script-src 'self'", headers['Content-Security-Policy'])
         for path in ('/static/app.js', '/static/style.css'):
@@ -385,10 +397,10 @@ class TestDashboard(_ApiTestCase):
         self.assertEqual(self.post('/api/scan/new', token='wrong')[0], 403)
         self.assertEqual(self.post('/api/scan/new')[0], 201)
 
-    def test_a_page_open_across_a_restart_can_find_the_new_token(self):
-        """A tab opened before a restart held the old process's token, and every
-        button said "missing or wrong token" until the page was reloaded. On those
-        words the page now reads the new token from / and tries once more."""
+    def test_a_wrong_token_is_read_again_from_the_session(self):
+        """On "missing or wrong token" the page reads the token from /api/session,
+        which answers only with the session cookie, and tries once more. After a
+        restart the cookie is dead too, and the page says to open it from the app."""
         from src import headless
         status, reply = self.post('/api/alerts/ack-all', token='from-the-last-run')
         self.assertEqual(status, 403)
@@ -396,10 +408,12 @@ class TestDashboard(_ApiTestCase):
         with open(os.path.join(headless.WEBUI_DIR, 'app.js'), encoding='utf-8') as f:
             source = f.read()
         self.assertIn(f"const TOKEN_REFUSED = '{headless.TOKEN_REFUSED}'", source)
-        self.assertIn("fetch('/'", source)
-        self.assertIn(f'<meta name="netsentinel-token" content="{self.server.token}">',
-                      self.get('/')[2])
-        self.assertNotEqual(HeadlessServer(self.app).token, self.server.token)
+        self.assertIn(f"const SESSION_REFUSED = '{headless.SESSION_REFUSED}'", source)
+        self.assertIn("fetch('/api/session'", source)
+        self.assertEqual(self.get_json('/api/session')['token'], self.server.token)
+        other = HeadlessServer(self.app)
+        self.assertNotEqual(other.token, self.server.token)
+        self.assertNotEqual(other.session, self.server.session)
 
     def test_a_cross_origin_post_is_refused_even_with_the_token(self):
         status, _ = self.post('/api/scan/new', Origin='https://evil.example')

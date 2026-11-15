@@ -48,7 +48,7 @@ TLS stack stands out even when everything it sends is encrypted.
 
 **PCAP Export** — Ring buffer of raw packets with on-demand "save last 5 minutes" export and continuous recording with auto-rotation. Serious alerts automatically save the traffic that triggered them, narrowed to the hosts involved, so every CRITICAL finding opens in Wireshark. Those captures are kept for good, in their own folder.
 
-**Browser dashboard** — NetSentinel serves a dashboard at `http://127.0.0.1:8737/` while it runs: live traffic and bandwidth charts, protocol and top-talker breakdowns, alerts with severity filters and evidence, devices, incidents, file scanning, the network audit, and what NetSentinel itself costs in CPU and memory. On this computer it can also start and stop monitoring, acknowledge alerts, record verdicts and mark exposures fixed or accepted; those controls need the token the page carries and are refused unless the dashboard is bound to localhost. **Open in Browser** in the desktop app opens it; `--headless` runs the same dashboard with no window, as a server.
+**Browser dashboard** — NetSentinel serves a dashboard at `http://127.0.0.1:8737/` while it runs: live traffic and bandwidth charts, protocol and top-talker breakdowns, alerts with severity filters and evidence, devices, incidents, file scanning, the network audit, and what NetSentinel itself costs in CPU and memory. On this computer it can also start and stop monitoring, acknowledge alerts, record verdicts and mark exposures fixed or accepted; those controls are refused unless the dashboard is bound to localhost. It opens only from NetSentinel: **Open in Browser** in the desktop app, or **Open dashboard** on the tray icon, opens it with a one-time link, so no other program on the computer can read it or use its controls. `--headless` runs the same dashboard with no window, as a server, and prints its link.
 
 **Review mode** — `--review DIR` or Settings → Review mode saves the traffic behind every alert. **Build review bundle** turns it into a small, redacted text bundle (summary, alerts, a line-per-packet digest per group) to upload to Claude chat and ask which alerts are real; no payloads, query strings, cookies, credentials or tokens are written. Import the verdicts back, and confirmed false positives are not raised again.
 
@@ -129,14 +129,19 @@ setup.bat
 
 ```bash
 python main.py                 # desktop interface
-python main.py --headless      # no GUI, read-only HTTP API on 127.0.0.1:8737
+python main.py --headless      # no GUI, the dashboard on 127.0.0.1:8737 (prints its link)
 python main.py --help
 ```
 
 ### Browser dashboard and headless mode
 
 The desktop app serves a browser dashboard at `http://127.0.0.1:8737/` (or the
-next free port), and **Open in Browser** in its top bar opens it. The detection
+next free port), and **Open in Browser** in its top bar, or **Open dashboard** on
+the tray icon, opens it. The dashboard opens only that way: the link sets a
+session for that browser, so another program on the computer that asks the port
+gets nothing but a page saying how to open it. After NetSentinel restarts, open
+it again the same way. Headless, NetSentinel prints a link to its console when it
+starts (not to its log). The detection
 engine never needed a display, so it can also run as a sensor with no window at
 all — on a Raspberry Pi hanging off a SPAN port, in a container, or on a server —
 with `python main.py --headless` (or `NetSentinel.exe --headless`), and be read
@@ -150,6 +155,7 @@ and the browser tab shows how many alerts are open.
 
 | Endpoint | Returns |
 |---|---|
+| `GET /open?key=` | a link from NetSentinel: starts the session, then the dashboard |
 | `GET /` | the dashboard |
 | `GET /status.txt` | human-readable status summary |
 | `GET /api/overview` | what the dashboard's overview shows |
@@ -163,15 +169,17 @@ and the browser tab shows how many alerts are open.
 | `GET /api/incidents` | correlated incidents |
 | `GET /api/devices` | discovered devices on the local network |
 | `GET /api/metrics` | Prometheus text exposition |
-| `POST /api/scan/...` | upload files for the dashboard's file scan (needs the page's token) |
+| `POST /api/scan/...` | upload files for the dashboard's file scan (localhost only) |
 
-The API **binds to localhost by default** and cannot change configuration or
-monitoring. It serves captured credentials, device inventory and alert history,
-so `--host 0.0.0.0` logs a warning and should sit behind a firewall or an
-authenticating reverse proxy. While bound to localhost it refuses requests for
-any other host name, so a web page cannot read it through DNS rebinding, and
-uploads need a token that only the dashboard page carries, so no other site can
-drive them. `--no-api` runs with no listener and no dashboard.
+Everything but `/health` and `/api/metrics` needs the session a link from
+NetSentinel starts; scrape metrics without one. The API **binds to localhost by
+default** and cannot change configuration. It serves captured credentials,
+device inventory and alert history, so `--host 0.0.0.0` logs a warning and
+should sit behind a firewall; off localhost the controls and uploads are refused.
+While bound to localhost it refuses requests for any other host name, so a web
+page cannot read it through DNS rebinding, and every POST also needs a token the
+page reads with its session, so no other site can drive it. `--no-api` runs with
+no listener and no dashboard.
 
 Or build a standalone executable:
 
