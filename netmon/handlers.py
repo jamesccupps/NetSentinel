@@ -41,6 +41,28 @@ __all__ = ['new_device', 'overlapping_ip', 'dhcp_loop', 'unanswered_name',
            'beaconing', 'new_destination', 'upload_volume', 'inbound_volume']
 
 
+# `netmon serve` runs for months, and these kept every pair, name and day they
+# ever saw (outside review, 2026-11-14, N10). Each sweeps out what has aged out
+# about once an hour of event time, and caps what has no age.
+SWEEP_EVERY_SEC = 3600
+MAX_REMEMBERED = 100000
+
+
+def _sweep_due(state, now):
+    """True about once an hour of event time: time for a handler to forget."""
+    last = state.get('_swept')
+    if last is not None and 0 <= now - last < SWEEP_EVERY_SEC:
+        return False
+    state['_swept'] = now
+    return True
+
+
+def _cap(collection):
+    """Empty a dedup set or map that has grown past MAX_REMEMBERED."""
+    if len(collection) > MAX_REMEMBERED:
+        collection.clear()
+
+
 def _finding(rule, event, description, key='', device='', severity=None,
              tier=None, evidence=None, next_check=''):
     """Build a Finding with the rule's defaults, overridable per occurrence."""
@@ -112,7 +134,16 @@ def overlapping_ip(event, rule, state):
     it is worth reporting even though it is rarely an attack.
     """
     owners = state.setdefault('owners', {})
+    last_seen = state.setdefault('owner_seen', {})
     findings = []
+    if _sweep_due(state, event.ts):
+        # A device gone a week no longer owns its address: DHCP gives it to
+        # another, which was then "claimed by both" for good.
+        forget = float(rule.params.get('forget_sec', 7 * 86400))
+        for ip in [ip for ip, ts in last_seen.items() if event.ts - ts > forget]:
+            owners.pop(ip, None)
+            del last_seen[ip]
+        _cap(state.setdefault('reported', set()))
 
     # Source side only. A destination MAC is the *next hop* — on anything routed
     # that is the router, so pairing it with the destination address would
@@ -129,8 +160,10 @@ def overlapping_ip(event, rule, state):
         previous = owners.get(ip)
         if previous is None:
             owners[ip] = (mac, vlan)
+            last_seen[ip] = event.ts
             continue
         if previous[0] == mac:
+            last_seen[ip] = event.ts
             continue
 
         reported = state.setdefault('reported', set())
@@ -190,6 +223,9 @@ def dhcp_loop(event, rule, state):
         return None
 
     window = float(rule.params.get('window_sec', 600))
+    if _sweep_due(state, event.ts):
+        for old in [m for m, (start, _) in counts.items() if event.ts - start > window]:
+            del counts[old]
     first, count = counts.get(mac, (event.ts, 0))
     if event.ts - first > window:
         first, count = event.ts, 0
@@ -225,13 +261,18 @@ def unanswered_name(event, rule, state):
         return None
 
     answered = state.setdefault('answered', set())
+    window = float(rule.params.get('window_sec', 3600))
+    if _sweep_due(state, event.ts):
+        counts = state.setdefault('counts', {})
+        for pair in [p for p, (start, _) in counts.items() if event.ts - start > window]:
+            del counts[pair]
+        _cap(answered)
     if event.get('is_answer'):
         answered.add(name)
         return None
     if name in answered:
         return None
 
-    window = float(rule.params.get('window_sec', 3600))
     pair = (event.src_ip or event.src_mac, name)
     counts = state.setdefault('counts', {})
     first, count = counts.get(pair, (event.ts, 0))
@@ -282,6 +323,11 @@ def beaconing(event, rule, state):
                       MIN_OBSERVATIONS)
 
     series = state.setdefault('series', {})
+    if _sweep_due(state, event.ts):
+        # Up to 512 times were kept for every pair ever seen.
+        for idle in [p for p, t in series.items() if not t or event.ts - t[-1] > max_interval]:
+            del series[idle]
+        _cap(state.setdefault('reported', set()))
     pair = (event.src_ip, event.dst_ip)
     times = series.setdefault(pair, [])
     if times and event.ts - times[-1] > max_interval:
@@ -340,9 +386,19 @@ def new_destination(event, rule, state):
         return None
 
     started = state.setdefault('started_at', event.ts)
-    known = state.setdefault('known', {}).setdefault(event.src_ip, set())
+    everyone = state.setdefault('known', {})       # src -> {target: last seen}
+    if _sweep_due(state, event.ts):
+        # A destination not contacted for forget_sec is new again.
+        forget = float(rule.params.get('forget_sec', 90 * 86400))
+        for src in list(everyone):
+            targets = everyone[src]
+            for old in [t for t, ts in targets.items() if event.ts - ts > forget]:
+                del targets[old]
+            if not targets:
+                del everyone[src]
+    known = everyone.setdefault(event.src_ip, {})
     first_time = target not in known
-    known.add(target)
+    known[target] = event.ts
 
     learning = event.ts - started < float(rule.params.get('learn_sec', 604800))
     if learning or not first_time:
@@ -386,17 +442,30 @@ def upload_volume(event, rule, state):
         return None
 
     min_bytes = float(rule.params.get('min_bytes', 50 * 1024 * 1024))
-    totals = state.setdefault('daily', {})
+    # Per device, history_days of days. Every (device, day) was kept, and the
+    # whole map was read on each event over the floor.
+    days = state.setdefault('days', {})            # src_ip -> {day: bytes}
     day = int(event.ts // 86400)
     key = (event.src_ip, day)
-    totals[key] = totals.get(key, 0) + outbound
-    today = totals[key]
+    mine = days.setdefault(event.src_ip, {})
+    mine[day] = mine.get(day, 0) + outbound
+    today = mine[day]
+    keep = int(rule.params.get('history_days', 30))
+    if _sweep_due(state, event.ts):
+        for ip in list(days):
+            for old in [d for d in days[ip] if d < day - keep]:
+                del days[ip][old]
+            if not days[ip]:
+                del days[ip]
+        reported = state.setdefault('reported', set())
+        for old in [k for k in reported if k[1] < day - keep]:
+            reported.discard(old)
+        mine = days.setdefault(event.src_ip, mine)
 
     if today < min_bytes:
         return None
 
-    history = sorted(total for (ip, d), total in totals.items()
-                     if ip == event.src_ip and d != day)
+    history = sorted(total for d, total in mine.items() if d != day and d >= day - keep)
     if not history:
         return None                    # nothing to compare against yet
     median = history[len(history) // 2]
