@@ -306,6 +306,13 @@ class TestAttacksStillAlert(unittest.TestCase):
         raised = _Pipeline().feed(card_post())
         self.assertRaised(raised, 'FORENSICS-SENSITIVE-DATA', 'HIGH', title='Credit Card')
 
+    def test_a_redis_that_answers_anyone(self):
+        get = b'*2\r\n$3\r\nGET\r\n$3\r\nkey\r\n'
+        raised = _Pipeline().feed(tcp(PC, 50000, NAS, 6379, get, server=6379),
+                                  tcp(NAS, 6379, PC, 50000, b'$5\r\nvalue\r\n', server=6379,
+                                      ts=T0 + 0.01))
+        self.assertRaised(raised, 'FORENSICS-SENSITIVE-DATA', 'HIGH', title='Redis No Auth')
+
     def test_a_building_controller_reset_from_anywhere(self):
         raised = building_pipeline('workstation').feed(
             bacnet(BAS_PC, CONTROLLER, confirmed(service=20, invoke=2)))
@@ -547,6 +554,20 @@ class TestFalseAlarmsStayQuiet(unittest.TestCase):
         """A HIGH "[CONFIRMED] Credit Card" on 11-13: apt in WSL asking for a file by
         its SHA-256, sixteen digits of which passed Luhn."""
         self.assertEqual(_Pipeline().feed(apt_by_hash()), [])
+
+    def test_a_redis_session_with_a_password(self):
+        """Found by the outside review (N9): AUTH once, then every command packet
+        without it was a CRITICAL "Redis No Auth"."""
+        get = b'*2\r\n$3\r\nGET\r\n$3\r\nkey\r\n'
+        packets = [tcp(PC, 50000, NAS, 6379, b'*2\r\n$4\r\nAUTH\r\n$8\r\nexample1\r\n',
+                       server=6379),
+                   tcp(NAS, 6379, PC, 50000, b'+OK\r\n', server=6379, ts=T0 + 0.01)]
+        for i in range(1, 6):
+            packets += [tcp(PC, 50000, NAS, 6379, get, server=6379, ts=T0 + i),
+                        tcp(NAS, 6379, PC, 50000, b'$5\r\nvalue\r\n', server=6379,
+                            ts=T0 + i + 0.01)]
+        raised = _Pipeline().feed(*packets)
+        self.assertNotIn('Redis No Auth', ' '.join(a.title for a in raised))
 
     def test_home_assistants_token_on_four_days(self):
         """Four CRITICAL alerts for one standing condition; now one, at HIGH."""

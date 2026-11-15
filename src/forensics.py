@@ -1232,6 +1232,11 @@ class NetworkForensics:
 
         # IPs that have active TLS/HTTPS sessions
         self._tls_ips = set()  # {ip} — IPs we've seen on port 443
+        # Redis: clients seen authenticating to a server, servers that answered
+        # NOAUTH, and commands sent without either, waiting for the answer.
+        self._redis_authed = set()       # {(client, server)}
+        self._redis_needs_auth = set()   # {server}
+        self._redis_pending = {}         # {(client, server): ts}
         # (ip, port) sent an HTTP request on a port INSECURE_PROTOCOLS lacks
         self._odd_http_servers = set()
         # What LAN servers say they run (headers, greetings), once per server,
@@ -1293,7 +1298,8 @@ class NetworkForensics:
         for store in (self._tls_ips, self._odd_http_servers, self._greeted,
                       self._cdn_ips, self._ip_to_domains,
                       self._dual_port_ips, self._http_methods, self._http_has_form_fields,
-                      self._mdns_responders, self._llmnr_responders):
+                      self._mdns_responders, self._llmnr_responders,
+                      self._redis_authed, self._redis_needs_auth, self._redis_pending):
             if len(store) > MAX_CONTEXT_IPS:
                 store.clear()
 
@@ -1310,19 +1316,32 @@ class NetworkForensics:
         if self.bacnet_mode == 'off' and is_bacnet_traffic(pkt_info):
             return
 
-        # Update flow
+        # Update flow. One flow per conversation, keyed by the service's port
+        # (the server's, else the lower of the two, which both directions
+        # share), so a reply is the same flow and not a second one keyed by the
+        # client's port. src is the client and dst the server, fixed when the
+        # flow starts: they were set from every packet just before the test
+        # below, so dst_packets stayed 0, every flow read as one-way, and the
+        # classifier's direction ratios never matched.
+        sport, dport = pkt_info.src_port or 0, pkt_info.dst_port or 0
+        service = (getattr(pkt_info, 'server_port', 0)
+                   or (min(sport, dport) if sport and dport else dport))
+        if sport == service and dport != service:
+            client, server = pkt_info.dst_ip, pkt_info.src_ip
+        else:
+            client, server = pkt_info.src_ip, pkt_info.dst_ip
         flow_key = (
             min(pkt_info.src_ip, pkt_info.dst_ip),
             max(pkt_info.src_ip, pkt_info.dst_ip),
-            pkt_info.dst_port, pkt_info.protocol
+            service, pkt_info.protocol
         )
         if flow_key not in self.flows and len(self.flows) >= MAX_FLOWS:
             self._evict_flows()
         flow = self.flows[flow_key]
-        flow['src_ip'] = pkt_info.src_ip
-        flow['dst_ip'] = pkt_info.dst_ip
-        flow['dst_port'] = pkt_info.dst_port
-        flow['protocol'] = pkt_info.protocol
+        if not flow['src_ip']:
+            flow['src_ip'], flow['dst_ip'] = client, server
+            flow['dst_port'] = service
+            flow['protocol'] = pkt_info.protocol
         flow['packets'] += 1
         flow['bytes'] += pkt_info.length
         flow['payload_bytes'] += pkt_info.payload_size
@@ -1813,13 +1832,29 @@ class NetworkForensics:
                 redis_pass = match.group(1).decode('utf-8', errors='replace')
                 self._add_credential('Redis', 'auth_password',
                     self._mask(redis_pass), src, dst, port, ts, raw_value=redis_pass)
-            # Redis commands without auth = open database. Bracketed: "and" binds
-            # tighter than "or", so any payload containing GET counted.
-            if payload.startswith(b'*') and (b'SET' in payload or b'GET' in payload):
-                if not REDIS_AUTH_RE.search(payload):
+            # An open database is one that answers a client that never
+            # authenticated. AUTH is sent once per connection, so a command
+            # packet without AUTH in it, the old test, was every session with
+            # a password too. The server's answer settles it: data, or NOAUTH.
+            if port == 6379:
+                if match or (b'HELLO' in payload[:32].upper() and b'AUTH' in payload.upper()):
+                    self._redis_authed.add((src, dst))
+                    self._redis_pending.pop((src, dst), None)
+                elif (payload.startswith(b'*') and (b'SET' in payload or b'GET' in payload)
+                      and (src, dst) not in self._redis_authed
+                      and dst not in self._redis_needs_auth):
+                    self._redis_pending.setdefault((src, dst), ts)
+            elif sport == 6379:
+                pair = (dst, src)
+                if payload.startswith((b'-NOAUTH', b'-NOPERM', b'-WRONGPASS')):
+                    self._redis_needs_auth.add(src)
+                    self._redis_pending.pop(pair, None)
+                elif pair in self._redis_pending and payload[:1] and payload[:1] in b'+:$*_%#,(=~>':
+                    del self._redis_pending[pair]
                     self._add_sensitive_data('Redis No Auth',
-                        'Redis commands without authentication — database is open',
-                        src, dst, port, ts, risk='CRITICAL')
+                        'Redis answered commands from a client that never authenticated '
+                        '— database is open',
+                        dst, src, sport, ts, risk='CRITICAL')
 
         # ─── MongoDB ─────────────────────────────────────────
         if port == 27017 or sport == 27017:

@@ -127,6 +127,8 @@ class TestProtocolChecks(unittest.TestCase):
         self.assertNotIn('Redis No Auth', kinds(f))
         f.analyze_packet(tcp(PC, 50001, PI, 6379, payload=b'*2\r\n$3\r\nGET\r\n$3\r\nkey\r\n',
                              server=6379))
+        # Open is the server answering it (tests/test_flow_and_redis.py)
+        f.analyze_packet(tcp(PI, 6379, PC, 50001, payload=b'$5\r\nvalue\r\n', server=6379))
         self.assertIn('Redis No Auth', kinds(f))
 
     def test_a_few_bytes_on_port_502_are_not_modbus(self):
