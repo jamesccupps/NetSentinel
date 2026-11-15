@@ -57,9 +57,77 @@ def gateways_from_route_print(text):
     return gateways
 
 
+_INTERFACES_KEY = r'SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\Interfaces'
+
+
+def _addresses_in(value):
+    """IPv4 addresses in a registry value: a string (space or comma separated) or a list."""
+    text = ' '.join(value) if isinstance(value, (list, tuple)) else str(value or '')
+    found = []
+    for part in re.split(r'[\s,;]+', text):
+        try:
+            addr = ipaddress.IPv4Address(part)
+        except ValueError:
+            continue
+        if not addr.is_unspecified:
+            found.append(str(addr))
+    return found
+
+
+def registry_settings(local_ips=None, winreg=None):
+    """
+    {'dns': [...], 'dhcp': [...], 'gateways': [...]} from Windows' TCP/IP
+    settings, for the adapters holding one of local_ips. These read the same
+    in every language; ipconfig's output was matched in English and German
+    only, so on any other Windows no DNS or DHCP server was found (outside
+    review, 2026-11-14, N9). Empty lists off Windows. A static NameServer
+    wins over the one DHCP gave.
+    """
+    found = {'dns': [], 'dhcp': [], 'gateways': []}
+    if winreg is None:
+        try:
+            import winreg
+        except ImportError:
+            return found
+    local = set(detect_local_ips() if local_ips is None else local_ips)
+    try:
+        root = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, _INTERFACES_KEY)
+    except OSError:
+        return found
+    with root:
+        index = 0
+        while True:
+            try:
+                name = winreg.EnumKey(root, index)
+            except OSError:
+                break
+            index += 1
+            values = {}
+            try:
+                with winreg.OpenKey(root, name) as key:
+                    for value in ('DhcpIPAddress', 'IPAddress', 'NameServer', 'DhcpNameServer',
+                                  'DhcpServer', 'DhcpDefaultGateway', 'DefaultGateway'):
+                        try:
+                            values[value] = winreg.QueryValueEx(key, value)[0]
+                        except OSError:
+                            pass
+            except OSError:
+                continue
+            mine = set(_addresses_in(values.get('DhcpIPAddress'))
+                       + _addresses_in(values.get('IPAddress')))
+            if not mine & local:
+                continue        # an adapter that is not connected keeps its last settings
+            found['dns'] += (_addresses_in(values.get('NameServer'))
+                             or _addresses_in(values.get('DhcpNameServer')))
+            found['dhcp'] += _addresses_in(values.get('DhcpServer'))
+            found['gateways'] += (_addresses_in(values.get('DefaultGateway'))
+                                  + _addresses_in(values.get('DhcpDefaultGateway')))
+    return {k: list(dict.fromkeys(v)) for k, v in found.items()}
+
+
 def detect_default_gateway():
     """Detect the default gateway IP address."""
-    gateways = []
+    gateways = list(registry_settings()['gateways'])
 
     # Method 1: psutil + route table
     if PSUTIL_AVAILABLE:
@@ -142,7 +210,7 @@ def detect_dns_servers():
 
 def detect_configured_dns_servers():
     """The DNS servers this machine is actually configured to use."""
-    dns_servers = []
+    dns_servers = list(registry_settings()['dns'])
 
     # Method 1: Parse ipconfig /all
     try:
@@ -199,7 +267,7 @@ def detect_local_ips():
 
 def detect_dhcp_server():
     """Try to detect the DHCP server IP."""
-    dhcp_servers = []
+    dhcp_servers = list(registry_settings()['dhcp'])
     try:
         ipconfig = system_tool('ipconfig.exe')
         if not ipconfig:
@@ -216,7 +284,7 @@ def detect_dhcp_server():
                     dhcp_servers.append(match.group(1))
     except Exception:
         pass
-    return dhcp_servers
+    return list(dict.fromkeys(dhcp_servers))
 
 
 def get_local_subnet():
@@ -502,25 +570,31 @@ class NetworkEnvironment:
         self.known_devices = {}       # {ip: device_info_dict}
         self.known_device_macs = {}   # {mac_lower: device_info_dict}
         self.known_device_ips = set()
+        self._addresses = frozenset()   # local_ips when last detected
 
     def detect(self):
         """Run full network environment detection."""
         logger.info("Detecting network environment...")
 
-        self.gateways = detect_default_gateway()
-        self.configured_dns_servers = detect_configured_dns_servers()
-        self.dns_servers = list(set(self.configured_dns_servers) | set(WELL_KNOWN_DNS))
-        self.local_ips = detect_local_ips()
-        self.dhcp_servers = detect_dhcp_server()
-        self.local_subnet = get_local_subnet()
+        # Each value is built whole and then assigned: detect() runs again while
+        # the packet threads read these (refresh_if_changed).
+        gateways = detect_default_gateway()
+        configured = detect_configured_dns_servers()
+        dns_servers = list(set(configured) | set(WELL_KNOWN_DNS))
+        local_ips = detect_local_ips()
+        dhcp_servers = detect_dhcp_server()
+        subnet = get_local_subnet()
+        whitelist = set(gateways) | set(dns_servers) | set(local_ips) | set(dhcp_servers)
+        whitelist |= SPECIAL_ADDRESSES
 
-        # Build auto-whitelist
-        self.auto_whitelist_ips = set()
-        self.auto_whitelist_ips.update(self.gateways)
-        self.auto_whitelist_ips.update(self.dns_servers)
-        self.auto_whitelist_ips.update(self.local_ips)
-        self.auto_whitelist_ips.update(self.dhcp_servers)
-        self.auto_whitelist_ips.update(SPECIAL_ADDRESSES)
+        self.gateways = gateways
+        self.configured_dns_servers = configured
+        self.dns_servers = dns_servers
+        self.local_ips = local_ips
+        self.dhcp_servers = dhcp_servers
+        self.local_subnet = subnet
+        self.auto_whitelist_ips = whitelist
+        self._addresses = frozenset(local_ips)
 
         self.auto_whitelist_ports = set(NOISY_BENIGN_PORTS)
 
@@ -540,6 +614,21 @@ class NetworkEnvironment:
         logger.info("  Auto-whitelisted IPs: %d", len(self.auto_whitelist_ips))
 
         return self
+
+    def refresh_if_changed(self):
+        """
+        Detect again if this machine's addresses have changed since: a new
+        network, a VPN coming up, a cable plugged in. It was detected once, at
+        start, so afterwards this PC's addresses, gateway and subnet were the
+        first network's, and its own traffic on the new one looked like another
+        host's (outside review, 2026-11-14, N9). Cheap when nothing changed: an
+        address list, no programs run. True when it detected again.
+        """
+        if frozenset(detect_local_ips()) == self._addresses:
+            return False
+        logger.info("This machine's addresses changed; detecting the network again.")
+        self.detect()
+        return True
 
     def should_skip_ids(self, src_ip, dst_ip, dst_port=0, protocol=""):
         """

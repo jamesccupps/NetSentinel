@@ -16,6 +16,9 @@ logger = logging.getLogger("NetSentinel.App")
 # How long a restart waits for the last run's capture threads to exit.
 CAPTURE_EXIT_WAIT = 6
 
+# How often to look for a change of network (NetSentinelApp._check_network_change).
+NETWORK_CHECK_SEC = 60
+
 # Rules whose verification does file hashing, PowerShell and VirusTotal lookups.
 # Those run with 10-second timeouts, so doing them inline on the packet worker
 # stalls the whole capture pipeline exactly when something interesting happens.
@@ -899,12 +902,26 @@ class NetSentinelApp:
                 self._forensics_alerted_sensitive.add(item_key)
                 self._alert_gateway(sensitive_alert(item))
 
+    def _check_network_change(self, now=None):
+        """At most once a minute: detect the network again if this PC's
+        addresses changed (NetworkEnvironment.refresh_if_changed)."""
+        now = time.time() if now is None else now
+        if now - getattr(self, '_last_network_check', 0.0) < NETWORK_CHECK_SEC:
+            return False
+        self._last_network_check = now
+        try:
+            return self.net_env.refresh_if_changed()
+        except Exception as e:
+            logger.debug("Network re-detection failed: %s", e)
+            return False
+
     def _analysis_loop(self, stop):
         """Periodic ML analysis of traffic windows."""
         while not stop.wait(self._analysis_interval):
             # Alerts reached disk only when monitoring stopped cleanly, so a crash
             # or a killed process lost the whole session. At most once a minute.
             self.alert_manager.maybe_autosave()
+            self._check_network_change()
             exposures = getattr(self, 'exposures', None)
             if exposures is not None:
                 exposures.save()        # at most every 30 seconds, and only when changed

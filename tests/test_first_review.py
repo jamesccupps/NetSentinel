@@ -65,8 +65,10 @@ class TestGateway(unittest.TestCase):
         def system_tool(*parts):
             return os.path.join('C:\\Windows\\System32', *parts)
 
+        nothing = {'dns': [], 'dhcp': [], 'gateways': []}     # not this PC's real settings
         with mock.patch.object(net_detect, 'PSUTIL_AVAILABLE', True), \
                 mock.patch.object(net_detect, 'system_tool', side_effect=system_tool), \
+                mock.patch.object(net_detect, 'registry_settings', lambda *a, **k: nothing), \
                 mock.patch.object(net_detect.subprocess, 'run', side_effect=run):
             self.assertEqual(net_detect.detect_default_gateway(), [ROUTER])
 
