@@ -43,8 +43,8 @@ and what is left. Keep it current during long work (the owner asked for that).
 ```
 pip install scapy psutil scikit-learn numpy cryptography pyyaml maxminddb "py7zr>=1.0" python-evtx
 python -m unittest discover -s . -p "test_*.py"    # all tests in tests/ and netmon_tests/ (~2,500, ~1 min, ~65 skips)
-python tools/integration_check.py                  # 14 integration checks
-ruff check --select E9,F63,F7,F82 .                # what CI fails on
+python tools/integration_check.py [--live]         # 14 integration checks; --live downloads feeds
+ruff check --select E9,F63,F7,F82,F401,F841 .      # what CI fails on
 python main.py                                     # GUI + dashboard
 python main.py --headless [--review DIR]           # dashboard/API only
 python -m src.batch_scan PATH... [--skip GLOB] [--json]

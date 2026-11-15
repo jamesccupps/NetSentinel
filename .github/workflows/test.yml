@@ -6,6 +6,10 @@ on:
   pull_request:
   workflow_dispatch:
 
+# Reading the code is all these jobs do.
+permissions:
+  contents: read
+
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -15,9 +19,9 @@ jobs:
         python-version: ['3.10', '3.11', '3.12']
 
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
 
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6
         with:
           python-version: ${{ matrix.python-version }}
           cache: pip
@@ -56,9 +60,9 @@ jobs:
       # would also change open()'s default and hide the bugs this job is for.
       PYTHONIOENCODING: utf-8
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
 
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6
         with:
           python-version: '3.12'
           cache: pip
@@ -85,11 +89,12 @@ jobs:
   lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-python@v6
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6
         with:
           python-version: '3.11'
       - run: pip install ruff
-      # Syntax errors and undefined names fail the build; style is advisory.
-      - run: ruff check --select E9,F63,F7,F82 .
+      # Syntax errors, undefined names, unused imports and variables fail the
+      # build; style is advisory.
+      - run: ruff check --select E9,F63,F7,F82,F401,F841 .
       - run: ruff check . || true
