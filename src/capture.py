@@ -528,6 +528,7 @@ class CaptureEngine:
         self._dropped_cap = 0           # over twice max_pps
         self._dropped_queue = 0         # the queue was full
         self._shed_packets = 0          # bulk data over max_pps: counted, not inspected
+        self._callback_errors_seen = set()
 
         # Sampling: under load, only process 1 in N packets for IDS
         # (stats always count everything)
@@ -942,7 +943,15 @@ class CaptureEngine:
                 self._dropped_packets += 1
 
         except Exception as e:
-            logger.debug("Capture callback error: %s", e)
+            # Once per kind at WARNING: an error here repeats on every packet,
+            # and at DEBUG alone analysis could stop with nothing in the log.
+            kind = (type(e).__name__, str(e)[:200])
+            seen = self.__dict__.setdefault('_callback_errors_seen', set())
+            if kind not in seen and len(seen) < 50:
+                seen.add(kind)
+                logger.warning("Capture callback error, packets are not being analysed: %s", e)
+            else:
+                logger.debug("Capture callback error: %s", e)
 
     def _worker_loop(self, stop=None):
         """

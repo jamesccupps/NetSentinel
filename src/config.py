@@ -359,6 +359,72 @@ def capture_filter(config):
         return f"{BACNET_CAPTURE_EXCLUSION} and ({bpf})" if bpf else BACNET_CAPTURE_EXCLUSION
     return bpf
 
+# Numbers in config.json are typed by hand, and most readers take a setting as
+# it comes: alerts.max_stored as "5000" stopped NetSentinel starting, and
+# capture.max_pps as "2000" raised on every packet, so nothing reached the IDS
+# and nothing said so. load() makes every number a number first, of its
+# default's kind (whole numbers stay whole, except the durations and sizes in
+# FRACTIONAL_SETTINGS), within these limits; one not listed must not be
+# negative. A value that is not a number falls back to the default, with a
+# warning in the log.
+SETTING_LIMITS = {
+    ('capture', 'snap_length'): (64, 262144),
+    ('capture', 'max_pps'): (1, None),
+    ('capture', 'pcap_max_file_mb'): (1, None),
+    ('capture', 'pcap_max_files'): (1, None),
+    ('capture', 'pcap_on_alert_seconds'): (1, 3600),
+    ('analysis', 'flow_timeout_sec'): (1, None),
+    ('analysis', 'stats_interval_sec'): (1, 3600),
+    ('analysis', 'max_flows_tracked'): (100, None),
+    ('analysis', 'max_devices'): (10, None),
+    ('ml', 'contamination'): (0.001, 0.5),      # scikit-learn refuses others
+    ('ml', 'alert_threshold'): (0.0, 1.0),
+    ('ml', 'retrain_interval_min'): (1, None),
+    ('ml', 'min_samples_for_training'): (10, None),
+    ('ml', 'feature_history_days'): (1, None),
+    ('ids', 'beaconing_score_threshold'): (0.0, 1.0),
+    ('alerts', 'max_stored'): (1, None),
+    ('gui', 'refresh_rate_ms'): (100, 60000),
+    ('gui', 'max_log_lines'): (10, None),
+    ('syslog', 'port'): (1, 65535),
+}
+FRACTIONAL_SETTINGS = {
+    ('capture', 'pcap_max_file_mb'), ('capture', 'alert_min_free_mb'),
+    ('capture', 'pcap_on_alert_seconds'), ('analysis', 'flow_timeout_sec'),
+    ('analysis', 'stats_interval_sec'), ('ml', 'baseline_learning_hours'),
+    ('alerts', 'cooldown_sec'), ('review', 'capture_max_hours'),
+}
+# Names older versions used, still read when present.
+LEGACY_NUMBERS = {('ml', 'anomaly_threshold'): (0.001, 0.5)}
+
+
+def typed_settings(data):
+    """Every number in a loaded config as a number. See SETTING_LIMITS."""
+    for section, defaults in DEFAULT_CONFIG.items():
+        if not isinstance(defaults, dict):
+            continue
+        values = data.get(section)
+        if not isinstance(values, dict):
+            logger.warning("Settings section %s is not a section (%r); using the defaults.",
+                           section, values)
+            data[section] = copy.deepcopy(defaults)
+            continue
+        for key, default in defaults.items():
+            if isinstance(default, bool) or not isinstance(default, (int, float)) \
+                    or key not in values:
+                continue
+            lo, hi = SETTING_LIMITS.get((section, key), (0, None))
+            fractional = isinstance(default, float) or (section, key) in FRACTIONAL_SETTINGS
+            values[key] = (as_float if fractional else as_int)(
+                values[key], default, lo, hi, name=f'{section}.{key}')
+    for (section, key), (lo, hi) in LEGACY_NUMBERS.items():
+        values = data.get(section)
+        if isinstance(values, dict) and values.get(key) is not None:
+            # None, not a default: a reader falls back to today's setting.
+            values[key] = as_float(values[key], None, lo, hi, name=f'{section}.{key}')
+    return data
+
+
 # Defaults a saved config froze in place. save() writes every value, so a
 # default changed in a later version never reached an install that had saved
 # once: the capture filter that hid HTTPS was fixed in September, and the
@@ -393,7 +459,9 @@ class Config:
                 # the whole file was then replaced by defaults.
                 with open(CONFIG_FILE, encoding='utf-8-sig') as f:
                     saved = json.load(f)
-                self._data = self._deep_merge(DEFAULT_CONFIG, saved)
+                if not isinstance(saved, dict):
+                    raise ValueError('the file does not hold a set of settings')
+                self._data = typed_settings(self._deep_merge(DEFAULT_CONFIG, saved))
                 logger.info("Configuration loaded from %s", CONFIG_FILE)
                 if self._migrate():
                     self.save()
