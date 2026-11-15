@@ -1,9 +1,15 @@
 #!/usr/bin/env python3
 """
-NetSentinel v1.2.0 — Live Integration Test
-============================================
-Tests the full pipeline end-to-end with real network calls,
-real threat intel feeds, and simulated traffic patterns.
+NetSentinel — integration check
+===============================
+Exercises the pipeline end to end with simulated traffic: threat feeds, IDS,
+verification, ML, forensics, configuration.
+
+Offline by default, as CI runs it: the threat feeds come from a stand-in
+download, so a feed being down cannot fail the build and nothing reaches the
+internet (CLAUDE.md: tests never touch the network). `--live` downloads the
+real feeds instead, for a check by hand. NETSENTINEL_REPLAY_ALERTS names an
+alerts.json to replay in check 13; without it, that check is skipped.
 
 NOT unit tests — these exercise real code paths and real I/O.
 """
@@ -12,7 +18,6 @@ import os
 import sys
 import json
 import time
-import types
 import tempfile
 import shutil
 import traceback
@@ -61,13 +66,26 @@ def test(name):
 
 from src.config import Config, DEFAULT_CONFIG
 from src.ids_engine import IDSEngine
-from src.ml_engine import AnomalyDetector, BaselineProfile, TrafficFeatureExtractor
+from src.ml_engine import AnomalyDetector, BaselineProfile
 from src.net_detect import NetworkEnvironment
 from src.ioc_scanner import IOCScanner
 from src.capture import PacketInfo
 from src.forensics import NetworkForensics
 from src.threat_intel import ThreatIntelEngine
 from src.feature_store import FeatureStore
+
+LIVE = '--live' in sys.argv
+if not LIVE:
+    # A stand-in for every feed download. Feeds in another format fail to
+    # parse and are counted as failed, as a broken feed would be.
+    _STAND_IN_FEED = (b"# stand-in feed for the integration check\n"
+                      b"198.51.100.23\n203.0.113.99\n")
+
+    def _offline_get(self, url, limit=None):
+        if url.lower().endswith('.zip'):
+            raise OSError('offline: no archives in the integration check')
+        return _STAND_IN_FEED
+    ThreatIntelEngine._http_get = _offline_get
 
 import copy
 
@@ -87,15 +105,15 @@ def make_packet(**kwargs):
 # TEST 1: Threat Intel Feed Download (LIVE INTERNET)
 # ═══════════════════════════════════════════════════════════════════
 
-@test("Threat Intel — Live feed download from abuse.ch + DShield")
+@test("Threat Intel — feed download, parse and lookup" + (" (live)" if LIVE else ""))
 def test_threat_intel_live():
     config = make_config()
     ti = ThreatIntelEngine(config)
 
     stats = ti.get_stats()
-    print(f"    Feeds configured: {stats.get('feeds_configured', '?')}")
+    print(f"    Feeds available:  {stats.get('feeds_available', '?')}")
     print(f"    Feeds loaded:     {stats.get('feeds_loaded', '?')}")
-    print(f"    Total IPs:        {stats.get('malicious_ips', '?')}")
+    print(f"    Total IPs:        {stats.get('total_ips', '?')}")
     print(f"    Total domains:    {stats.get('malicious_domains', '?')}")
 
     total_indicators = stats.get('total_ips', 0) + stats.get('total_domains', 0)
@@ -191,14 +209,11 @@ def test_ml_full_cycle():
     config = make_config()
     config.set('ml', 'min_samples_for_training', 50)
 
-    db_path = os.path.join(TEMP_DIR, "baseline.json")
-
     # Create feature store
     config.set('ml', 'feature_history_days', 1)
     fs = FeatureStore(config)
 
     detector = AnomalyDetector(config, feature_store=fs)
-    extractor = TrafficFeatureExtractor()
 
     # Generate 60 windows of "normal" traffic
     np.random.seed(42)
@@ -218,7 +233,7 @@ def test_ml_full_cycle():
             )
             packets.append(pkt)
 
-        result = detector.analyze_window({}, packets, window_sec=5)
+        detector.analyze_window({}, packets, window_sec=5)
 
     print(f"    Training samples: {len(detector._training_buffer)}")
     print(f"    Model trained:    {detector.is_trained}")
@@ -581,14 +596,15 @@ def test_memory_cleanup():
 # TEST 13: Replay actual alerts — verify tuning impact
 # ═══════════════════════════════════════════════════════════════════
 
-@test("Alert replay — verify v1.2.0 tuning against real alerts.json")
+@test("Alert replay — a real alerts.json (NETSENTINEL_REPLAY_ALERTS)")
 def test_alert_replay():
-    alerts_path = "/mnt/user-data/uploads/alerts1.json"
-    if not os.path.exists(alerts_path):
-        print("    Skipping — alerts1.json not uploaded")
+    # Real alerts stay out of the repository (CLAUDE.md): a local path, given.
+    alerts_path = os.environ.get('NETSENTINEL_REPLAY_ALERTS', '')
+    if not alerts_path or not os.path.exists(alerts_path):
+        print("    Skipping — set NETSENTINEL_REPLAY_ALERTS to an alerts.json")
         return
 
-    with open(alerts_path) as f:
+    with open(alerts_path, encoding='utf-8') as f:
         alerts = json.load(f)
 
     print(f"    Loaded {len(alerts)} alerts from live capture")
@@ -596,8 +612,7 @@ def test_alert_replay():
     # Check ESET credential alerts would be downgraded
     eset_creds = [a for a in alerts if a['rule_id'] == 'FORENSICS-CREDENTIAL'
                   and 'eset' in json.dumps(a.get('evidence', {})).lower()]
-    print(f"    ESET credential alerts: {len(eset_creds)} (all should become LOW)")
-    assert len(eset_creds) >= 4, "Should have ESET digest auth alerts"
+    print(f"    ESET credential alerts: {len(eset_creds)} (all should be LOW)")
 
     # Check ML beaconing alerts — count how many only have beaconing+DNS
     ml_alerts = [a for a in alerts if a['rule_id'] == 'ML-ANOMALY']
