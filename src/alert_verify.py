@@ -139,6 +139,11 @@ class AlertVerifier:
         legacy = config.get('ml', 'anomaly_threshold', default=None)
         self.alert_threshold = config.get('ml', 'alert_threshold', default=legacy or 0.25)
 
+        # Reverse DNS, only when verification.reverse_dns is on: the question goes
+        # to the address's own name server, which for an attacker is the
+        # attacker's, and the hard rule says nothing about the owner's traffic
+        # leaves for lookups (owner's decision, 2026-11-15; outside review N11).
+        self.reverse_dns = bool(config.get('verification', 'reverse_dns', default=False))
         # Reverse DNS cache: {ip: (hostname, timestamp)}
         self._rdns_cache = {}
         self._rdns_ttl = 600  # 10 minutes
@@ -315,14 +320,17 @@ class AlertVerifier:
             score += 2
 
         # Reverse DNS check
-        rdns = self._reverse_dns(ip)
-        if rdns:
+        state, rdns = self._reverse_dns_state(ip)
+        if state == 'found':
             # Shown, never a reason to trust: whoever controls the address writes
             # its reverse DNS, and a C2 server's can say anything.
             reasoning.append(f"Reverse DNS: {rdns}")
-        else:
+        elif state == 'none':
             reasoning.append("No reverse DNS record — common for malicious infrastructure")
             score += 1
+        # 'pending' (asked, no answer yet) and 'off' say nothing. A lookup is
+        # started on first sight and answers later, so the first alert for every
+        # address took the point and the sentence (outside review, N9).
 
         # Determine verdict
         if score <= -2:
@@ -1349,9 +1357,23 @@ class AlertVerifier:
     # HELPERS
     # ═══════════════════════════════════════════════════════════════
 
+    def _reverse_dns_state(self, ip):
+        """('found', name), ('none', None) for a finished lookup with no record,
+        ('pending', None) while one runs, ('off', None) when reverse DNS is off."""
+        if not self.reverse_dns or not ip:
+            return 'off', None
+        cached = self._rdns_cache.get(ip)
+        name = self._reverse_dns(ip)
+        if name:
+            return 'found', name
+        if cached is not None and time.time() - cached[1] < self._rdns_ttl:
+            return 'none', None
+        return 'pending', None
+
     def _reverse_dns(self, ip):
         """
-        Non-blocking reverse DNS.
+        Non-blocking reverse DNS. None, and nothing asked, while
+        verification.reverse_dns is off.
 
         Returns the cached hostname if we have one, otherwise schedules a lookup in
         the background and returns None immediately.
@@ -1363,7 +1385,7 @@ class AlertVerifier:
         resolver. Enrichment is best-effort: an alert that misses a hostname on its
         first occurrence is fine, a sensor that goes deaf is not.
         """
-        if not ip:
+        if not ip or not getattr(self, 'reverse_dns', False):
             return None
         now = time.time()
         cached = self._rdns_cache.get(ip)

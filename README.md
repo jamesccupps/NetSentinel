@@ -58,7 +58,7 @@ TLS stack stands out even when everything it sends is encrypted.
 
 **GeoIP** — optional country and network operator for destinations, looked up on this machine. IP Geolocation by [DB-IP](https://db-ip.com), CC BY 4.0.
 
-**Threat data** — the lists NetSentinel matches against are downloaded whole and checked on this machine; nothing about your traffic is sent out. The dashboard's **Threat data** page (and Settings → Threat data → **Threat data status**) shows each one: in use or not, when it last updated, how many entries, and why not when it isn't.
+**Threat data** — the lists NetSentinel matches against are downloaded whole and checked on this machine; nothing about your traffic is sent out. Two lookups that would send something are off until you turn them on: reverse DNS of alerts' addresses, in Settings (an attacker's own name server would see the question), and VirusTotal lookups of programs' hashes, with your key as `verification.virustotal_api_key` in config.json. The dashboard's **Threat data** page (and Settings → Threat data → **Threat data status**) shows each one: in use or not, when it last updated, how many entries, and why not when it isn't.
 
 | Source | What it lists | Updated |
 |---|---|---|

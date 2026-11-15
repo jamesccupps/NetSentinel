@@ -2468,6 +2468,10 @@ class NetSentinelGUI:
             font=('Segoe UI', 8), fg=COLORS['text_dim'], bg=COLORS['bg_card'],
             anchor='w', justify='left', wraplength=560).pack(fill='x')
         self._add_setting_toggle(
+            intel_card, 'verification.reverse_dns',
+            "Look up the names behind alerts' addresses (asks DNS, which for an "
+            "attacker's address can tell the attacker)", False)
+        self._add_setting_toggle(
             intel_card, 'vulns.enabled',
             "Check devices' software against CISA's known exploited vulnerabilities "
             "(downloads the list daily)", True)

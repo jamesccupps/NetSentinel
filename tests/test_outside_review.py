@@ -532,6 +532,7 @@ class TestReverseDnsLowersNothing(unittest.TestCase):
         env = NetworkEnvironment()
         env._cloud_domain_set = set(KNOWN_CLOUD_DOMAINS)
         verifier = AlertVerifier(cfg(), net_env=env)
+        verifier.reverse_dns = True            # off by default (verification.reverse_dns)
         alert = Alert(rule, 'HIGH', 't', 'd', src_ip='203.0.113.66', dst_ip='192.168.1.5',
                       evidence=dict(evidence))
         with mock.patch.object(verifier, '_reverse_dns', return_value=rdns):

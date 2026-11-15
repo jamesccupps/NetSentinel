@@ -207,8 +207,12 @@ DEFAULT_CONFIG = {
     },
     "verification": {
         "auto_verify": True,              # Auto-verify process alerts
-        "virustotal_api_key": "",         # Free VT API key (4 lookups/min)
+        "virustotal_api_key": "",         # Free VT API key (4 lookups/min); sends hashes to VirusTotal
         "check_signatures": True,         # Verify Authenticode signatures
+        # Ask DNS for the name behind an alert's address. Off: the question goes
+        # to that address's own name server, which for an attacker's address is
+        # the attacker's, and nothing about the owner's traffic is to leave.
+        "reverse_dns": False,
     },
     "forensics": {
         "enabled": True,                  # Credential scanning and insecure protocol detection

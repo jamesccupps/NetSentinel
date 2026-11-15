@@ -187,4 +187,8 @@ device names (the hard rules below).
   a keyed feed's URL never goes in a log line or an error message. The update check
   (`updates.check`) sends GitHub only NetSentinel's version, and an update is
   installed only when the owner clicks, after its signature verifies. (Owner's
-  decision, 2026-11-01.)
+  decision, 2026-11-01.) Two lookups do leave the PC, and only when the owner
+  turns them on: reverse DNS of alerts' addresses (`verification.reverse_dns`,
+  off by default, since an attacker's own name server sees the question) and
+  VirusTotal hash lookups of programs (`verification.virustotal_api_key`, blank
+  by default). (Owner's decision, 2026-11-15.)

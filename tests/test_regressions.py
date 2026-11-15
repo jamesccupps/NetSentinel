@@ -740,6 +740,7 @@ class TestReverseDnsNonBlocking(unittest.TestCase):
         from src.alert_verify import AlertVerifier
 
         verifier = AlertVerifier(fresh_config())
+        verifier.reverse_dns = True            # off by default (verification.reverse_dns)
         slow_calls = []
 
         def slow_gethostbyaddr(ip):
@@ -764,6 +765,7 @@ class TestReverseDnsNonBlocking(unittest.TestCase):
         from src.alert_verify import AlertVerifier
 
         verifier = AlertVerifier(fresh_config())
+        verifier.reverse_dns = True
         original = av.socket.gethostbyaddr
         av.socket.gethostbyaddr = lambda ip: ('host.example.com', [], [ip])
         try:
