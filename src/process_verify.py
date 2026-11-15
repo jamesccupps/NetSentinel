@@ -635,11 +635,22 @@ class ProcessVerifier:
     # ─── Known Good Database ────────────────────────────────────
 
     def _load_known_good(self):
-        """Load known-good file hashes."""
+        """
+        Load known-good file hashes. Only NetSentinel writes them, and a listed
+        hash counts in a program's favour, so a file something else changed is
+        not trusted (src/outside_edits.py): a program could list itself.
+        """
         if os.path.exists(self._known_good_path):
+            from src.outside_edits import changed_outside
+            if changed_outside(self._known_good_path, 'programs verified as safe',
+                               adopt=False):
+                logger.warning("Not trusting %s; programs will be verified again.",
+                               os.path.basename(self._known_good_path))
+                return {}
             try:
-                with open(self._known_good_path) as f:
-                    return json.load(f)
+                with open(self._known_good_path, encoding='utf-8') as f:
+                    data = json.load(f)
+                return data if isinstance(data, dict) else {}
             except Exception:
                 pass
         return {}
@@ -650,19 +661,17 @@ class ProcessVerifier:
             'path': exe_path,
             'verified_at': time.time(),
         }
-        try:
-            with open(self._known_good_path, 'w') as f:
-                json.dump(self._known_good, f, indent=1)
-        except Exception as e:
-            logger.debug("Failed to save known-good: %s", e)
+        self._save_known_good()
 
     def _save_known_good(self):
-        """Persist the known-good database."""
+        """Persist the known-good database, atomically, and note what was written."""
         try:
-            with open(self._known_good_path, 'w') as f:
-                json.dump(self._known_good, f, indent=1)
-        except Exception:
-            pass
+            from src.config import atomic_write_json
+            from src.outside_edits import record
+            atomic_write_json(self._known_good_path, self._known_good, indent=1)
+            record(self._known_good_path)
+        except Exception as e:
+            logger.debug("Could not save known-good hashes: %s", e)
 
     # ─── Helpers ────────────────────────────────────────────────
 

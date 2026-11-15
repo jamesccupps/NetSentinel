@@ -453,6 +453,8 @@ class Config:
     def load(self):
         """Load config from disk, merging with defaults."""
         if os.path.exists(CONFIG_FILE):
+            from src.outside_edits import changed_outside
+            changed_outside(CONFIG_FILE, 'settings')       # logged; hand edits are allowed
             try:
                 # utf-8-sig: Notepad saves UTF-8 with a BOM. Read in the Windows
                 # code page, an edited name like "Küche" could fail to decode, and
@@ -497,6 +499,8 @@ class Config:
         """Persist current config to disk (atomically; contains the VirusTotal key)."""
         try:
             atomic_write_json(CONFIG_FILE, self._data, indent=2)
+            from src.outside_edits import record
+            record(CONFIG_FILE)
         except Exception as e:
             logger.error("Failed to save config: %s", e)
 

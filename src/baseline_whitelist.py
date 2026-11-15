@@ -201,6 +201,10 @@ class ConfirmedFalsePositives:
             return
         if mtime == self._mtime:
             return
+        # Logged, not refused: a verdict may come from the command line, which
+        # need not run elevated (src/outside_edits.py).
+        from src.outside_edits import changed_outside
+        changed_outside(self.path, 'alerts confirmed as false positives')
         try:
             with open(self.path, encoding='utf-8') as f:
                 data = json.load(f)
@@ -212,7 +216,9 @@ class ConfirmedFalsePositives:
 
     def _save(self):
         from src.config import atomic_write_json
+        from src.outside_edits import record
         atomic_write_json(self.path, list(self._entries.values()), indent=1)
+        record(self.path)
         try:
             self._mtime = os.stat(self.path).st_mtime
         except OSError:
