@@ -122,7 +122,7 @@ class RingBuffer:
         ]
         expression = self.filter_expression()
         if expression:
-            command.append(expression)
+            command += ['--', expression]   # never read as an option
         return command
 
     def describe(self):

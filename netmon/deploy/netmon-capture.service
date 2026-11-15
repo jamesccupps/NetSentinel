@@ -23,7 +23,7 @@ ExecStartPre=+/bin/chown netmon:netmon /var/lib/netmon/capture
 ExecStartPre=+/bin/chmod 700 /var/lib/netmon/capture
 ExecStart=/usr/bin/tcpdump -i mirror0 \
     -w /var/lib/netmon/capture/netmon-%%Y%%m%%d-%%H%%M%%S.pcap \
-    -G 900 -s 2048 -n -Z netmon --immediate-mode \
+    -G 900 -s 2048 -n -Z netmon --immediate-mode -- \
     'REPLACE WITH THE FILTER netmon capture --command PRINTS'
 
 Restart=always

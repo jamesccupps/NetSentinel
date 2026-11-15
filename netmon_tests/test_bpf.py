@@ -400,6 +400,39 @@ class TestEverythingItEmitsCompiles(unittest.TestCase):
         self.assertCompiles(filt)
 
 
+class TestAFilterIsNeverAnOption(unittest.TestCase):
+    """
+    The filter is tcpdump's last argument. Text starting with '-' was taken as
+    an option: '-w/path' wrote a file there as the service user, and tcpdump
+    has options that run programs. Needs no tcpdump: the calls are recorded.
+    """
+
+    def calls(self, expr):
+        from unittest import mock
+        made = []
+
+        def run(cmd, **kwargs):
+            made.append(cmd)
+            return mock.Mock(returncode=0, stdout='', stderr='')
+
+        with mock.patch('shutil.which', return_value='/usr/sbin/tcpdump'), \
+                mock.patch('subprocess.run', side_effect=run):
+            report = bpf.verify_filter(expr, __file__)
+        return report, made
+
+    def test_a_filter_that_starts_with_a_dash_is_refused_before_tcpdump_runs(self):
+        for expr in ('-w/tmp/written-by-filter.pcap', '  -z /bin/sh', '--version'):
+            with self.subTest(expr=expr):
+                report, made = self.calls(expr)
+                self.assertIn('cannot start with', report['error'])
+                self.assertEqual(made, [])
+
+    def test_the_filter_comes_after_the_end_of_the_options(self):
+        _, made = self.calls('tcp port 47808')
+        self.assertEqual(made[-1][-2:], ['--', 'tcp port 47808'])
+        self.assertNotIn('--', made[0])          # the unfiltered baseline run
+
+
 @requires_tools
 class TestVerifyFilter(unittest.TestCase):
     """The empirical check offered to users who capture on other stacks."""

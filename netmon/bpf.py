@@ -467,6 +467,10 @@ def verify_filter(bpf, pcap_path, tcpdump='tcpdump', restricted_vlans=(),
     import shutil
     import subprocess
 
+    # The filter is the last argument to tcpdump, so text starting with '-'
+    # would be an option instead (-w writes a file, -z runs a program).
+    if str(bpf or '').lstrip().startswith('-'):
+        return {'error': 'a filter cannot start with "-"', 'filter': bpf}
     if not shutil.which(tcpdump):
         return {'error': f'{tcpdump} not found on PATH'}
     if not os.path.exists(pcap_path):
@@ -475,7 +479,7 @@ def verify_filter(bpf, pcap_path, tcpdump='tcpdump', restricted_vlans=(),
     def run(expr):
         cmd = [tcpdump, '-r', pcap_path, '-nn', '-e', '-c', '200000']
         if expr:
-            cmd.append(expr)
+            cmd += ['--', expr]
         proc = subprocess.run(cmd, capture_output=True, text=True)
         if proc.returncode != 0:
             return None, proc.stderr.strip().splitlines()[-1:] or ['unknown error']

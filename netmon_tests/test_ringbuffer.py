@@ -106,6 +106,10 @@ class TestCaptureCommand(_RingCase):
             ring.capture_command()
         self.assertIn('capture.interface', str(ctx.exception))
 
+    def test_the_filter_comes_after_the_end_of_the_options(self):
+        command = self.ring.capture_command()
+        self.assertEqual(command[-2], '--')
+
     def test_the_restricted_vlans_are_excluded_by_name(self):
         """
         Not merely absent from the selection: a capture that happens not to
