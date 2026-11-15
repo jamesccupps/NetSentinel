@@ -4,7 +4,11 @@ Alert Correlation Engine
 Groups related security alerts into unified Incidents.
 
 Correlation rules:
-- Same source IP within a time window → single incident
+- Same host within a time window → single incident. The host is the alert's
+  source, or its destination when the source is this PC: on a single PC nearly
+  every alert comes from this PC, and grouping by it made unrelated alerts
+  minutes apart one "Multi-vector incident", and a threat-intel hit plus any
+  data exposure an "Escalation ... coordinated attack" at HIGH.
 - Port scan + brute force from same IP → "Reconnaissance then Attack"
 - Threat intel hit + data exfil to same IP → "Active Compromise"
 - Multiple forensics findings for same service → single service alert
@@ -79,6 +83,7 @@ class Incident:
         self.narrative = ""
         self.source_ips = set()
         self.dest_ips = set()
+        self.actors = set()          # the hosts it is grouped by (AlertCorrelator._actor)
         self.categories = set()
         self.rule_ids = set()
         self.is_escalation = False
@@ -162,9 +167,13 @@ class AlertCorrelator:
     time proximity, and category escalation patterns.
     """
 
-    def __init__(self, config):
+    def __init__(self, config, own_addresses=None):
         self.config = config
         self._lock = threading.Lock()
+        # This PC's addresses, never the host an incident is about.
+        if own_addresses is None:
+            from src.baseline_whitelist import this_machines_addresses as own_addresses
+        self._own_addresses = own_addresses
 
         # Active incidents: {correlation_key: Incident}
         self._active_incidents = {}
@@ -208,6 +217,9 @@ class AlertCorrelator:
                 self._all_incidents.append(incident)
 
             incident.add_alert(alert)
+            actor = self._actor(alert)
+            if actor:
+                incident.actors.add(actor)
 
             # Check for escalation patterns
             self._check_escalation(incident)
@@ -227,10 +239,24 @@ class AlertCorrelator:
 
         return incident
 
+    def _actor(self, alert):
+        """The host an alert is about: its source, or its destination when the
+        source is this PC; '' when both are this PC or a group address."""
+        from src.baseline_whitelist import _bare, _is_group_address
+        try:
+            own = self._own_addresses()
+        except Exception:
+            own = frozenset()
+        for ip in (alert.src_ip, alert.dst_ip):
+            if ip and _bare(ip) not in own and not _is_group_address(ip):
+                return ip
+        return ''
+
     def _correlation_key(self, alert):
         """Generate a key for grouping alerts into the same incident."""
-        # Group by source IP primarily
-        return f"{alert.src_ip}:{alert.category}"
+        actor = self._actor(alert)
+        # About no other host: grouped with its own rule only.
+        return f"{actor}:{alert.category}" if actor else f":{alert.category}:{alert.rule_id}"
 
     def _find_matching_incident(self, alert):
         """Find an active incident this alert belongs to. Must hold lock."""
@@ -243,11 +269,12 @@ class AlertCorrelator:
             if now - incident.updated < _CORRELATION_WINDOW:
                 return incident
 
-        # Also check if same source IP has a recent incident (cross-category)
+        # Also check if the same host has a recent incident (cross-category)
+        actor = self._actor(alert)
         for ikey, incident in self._active_incidents.items():
             if now - incident.updated > _CORRELATION_WINDOW:
                 continue
-            if alert.src_ip and alert.src_ip in incident.source_ips:
+            if actor and actor in incident.actors:
                 return incident
 
         return None
@@ -340,7 +367,7 @@ class AlertCorrelator:
         if not os.path.exists(self._db_path):
             return
         try:
-            with open(self._db_path) as f:
+            with open(self._db_path, encoding='utf-8') as f:
                 data = json.load(f)
             for item in data:
                 inc = Incident()
