@@ -377,6 +377,11 @@ class Alert:
         return f"<Alert [{self.severity}] {self.title} from {self.src_ip}>"
 
 
+# ODD-HOURS: what one device on this network sends between 2 and 5 in the
+# morning, within an hour, before it is worth a LOW alert.
+ODD_HOURS_BYTES = 50 * 1024 * 1024
+
+
 class IDSEngine:
     """
     Rule-based Intrusion Detection System.
@@ -404,6 +409,7 @@ class IDSEngine:
         # Suppressions measured in hours rather than seconds, kept separate so the
         # short-cooldown pruner cannot discard them.
         self._long_suppressions = {}
+        self._odd_hours_bytes = {}      # (source, hour slot) -> payload bytes, ODD-HOURS
 
         # Whitelists/Blacklists
         self.whitelist_ips = set(config.get('whitelists', 'ips', default=[]))
@@ -618,6 +624,9 @@ class IDSEngine:
         stale_long = [k for k, t in self._long_suppressions.items() if now - t > 7200]
         for k in stale_long:
             del self._long_suppressions[k]
+        slot = int(now // 3600)
+        self._odd_hours_bytes = {k: v for k, v in self._odd_hours_bytes.items()
+                                 if slot - k[1] <= 1}
 
         # Cap the ARP table. Bounded by LAN size in normal use, but an ARP flood
         # from a hostile host would otherwise grow it without limit.
@@ -1539,10 +1548,19 @@ class IDSEngine:
         # === Rule 12: Unusual time-of-day activity ===
         # Only alert once per source IP per hour window (not per packet). Offline,
         # the hour is the packet's, so a capture file is judged by when it was
-        # recorded (live, the two are the same).
+        # recorded (live, the two are the same). Added up per device on this
+        # network over the hour: it needed one packet of over 50,000 bytes,
+        # which only segmentation offload makes, so it almost never fired
+        # (outside review, 2026-11-14, N9).
         hour = (datetime.fromtimestamp(now) if self.offline else datetime.now()).hour
-        if hour >= 2 and hour <= 5:
-            if pkt_info.payload_size > 50000:  # 50KB minimum, not 10KB
+        if 2 <= hour <= 5 and pkt_info.payload_size > 0 and self._is_local_ip(pkt_info.src_ip):
+            weight = max(1, int(getattr(pkt_info, 'sample_weight', 1) or 1))
+            slot = (pkt_info.src_ip, int(now // 3600))
+            if slot not in self._odd_hours_bytes and len(self._odd_hours_bytes) >= 4096:
+                self._odd_hours_bytes.clear()
+            sent = self._odd_hours_bytes.get(slot, 0) + pkt_info.payload_size * weight
+            self._odd_hours_bytes[slot] = sent
+            if sent >= ODD_HOURS_BYTES:
                 # Custom cooldown: source IP + hour, so max 1 alert per IP per hour
                 odd_key = f"ODD-HOURS:{pkt_info.src_ip}:h{hour}"
                 # Kept out of _alert_cooldowns: that dict is pruned at cooldown_sec*5
@@ -1552,11 +1570,12 @@ class IDSEngine:
                     alerts.append(self._create_alert(
                         "ODD-HOURS", Severity.LOW,
                         "Unusual Off-Hours Network Activity",
-                        f"Significant traffic from {pkt_info.src_ip} at {hour}:00",
+                        f"{sent / 1048576:.0f} MB sent by {pkt_info.src_ip} in the "
+                        f"{hour}:00 hour",
                         pkt_info,
                         evidence={
                             'hour': hour,
-                            'payload_bytes': pkt_info.payload_size,
+                            'bytes_this_hour': sent,
                             'source': f"{pkt_info.src_ip}:{pkt_info.src_port}",
                             'destination': f"{pkt_info.dst_ip}:{pkt_info.dst_port}",
                             'process': pkt_info.process_name or 'Unknown',
