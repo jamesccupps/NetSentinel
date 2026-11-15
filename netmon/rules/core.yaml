@@ -317,16 +317,19 @@
     # The command, not the controller's answer to it. A SimpleACK names the
     # service it acknowledges, so without this every allowed write raised a
     # second, critical finding from the reply, with the two ends swapped and
-    # nothing in the allowlist to cover it. All five are confirmed services.
-    apdu_type: Confirmed-Request
-    service:
-      - WriteProperty
-      - WritePropertyMultiple
-      - DeviceCommunicationControl
-      - ReinitializeDevice
-      - AtomicWriteFile
+    # nothing in the allowlist to cover it.
+    apdu_type: [Confirmed-Request, Unconfirmed-Request]
+    # Every service the parser counts as a write (bacnet.WRITE_SERVICES). Five
+    # were listed here, so CreateObject, DeleteObject, AddListElement,
+    # RemoveListElement, LifeSafetyOperation and the unconfirmed WriteGroup
+    # never alerted (outside review, 2026-11-14, N9).
+    bacnet_write: true
   unless:
-    bacnet_write_allowed: true
+    any:
+      - bacnet_write_allowed: true
+      # The site's own controllers' private transfer, named by the parser
+      # (bacnet.KNOWN_PRIVATE_TRANSFERS): routine, not a command.
+      - object: siemens-p2-transfer
   device: dst_name
   key: "{src_ip}->{dst_ip}/{object}"
   describe: "{src_name} ({src_ip}) sent {service} to {dst_name} ({dst_ip})[, object {object}]"
@@ -474,9 +477,13 @@
   params:
     # Windows 10 builds past end of servicing. Update these as dates pass; a
     # build nobody else on site is running is caught by the peer comparison
-    # regardless of what is listed here.
+    # regardless of what is listed here. 19044 (21H2) ended in 2024 and 19045
+    # (22H2) in October 2025, its paid extended updates in October 2026. The
+    # LTSC editions of 17763 (until 2029) and 19044 (until 2027, IoT 2032) are
+    # still serviced, and the wire cannot tell the edition: remove those two
+    # here for a site that runs LTSC.
     unsupported_builds: [10240, 10586, 14393, 15063, 16299, 17134, 17763,
-                         18362, 18363, 19041, 19042, 19043]
+                         18362, 18363, 19041, 19042, 19043, 19044, 19045]
     minimum_build: 0
 
 - id: upload_anomaly

@@ -359,7 +359,7 @@ class TestEveryRuleRedactsClean(unittest.TestCase):
             'raw_body': 'POST /login HTTP/1.1',
             # Plus the fields rules legitimately match on, so they fire.
             'credential_type': 'http-basic', 'service': 'WriteProperty',
-            'apdu_type': 'Confirmed-Request',
+            'apdu_type': 'Confirmed-Request', 'bacnet_write': True,
             'object': 'analog-value-3', 'sni': 'relay.net.anydesk.com',
             'query': 'wpad', 'is_answer': True, 'message': 'offer',
             'action': 'blocked', 'bacnet_topology': True,

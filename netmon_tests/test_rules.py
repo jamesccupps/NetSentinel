@@ -708,7 +708,7 @@ class TestCoreRules(_RuleScenario):
             event('bacnet', src_ip='10.10.60.50', dst_ip='10.10.20.21',
                   dst_port=47808, protocol='udp',
                   fields={'service': 'WriteProperty', 'object': 'analog-value-3',
-                          'apdu_type': 'Confirmed-Request'}))
+                          'apdu_type': 'Confirmed-Request', 'bacnet_write': True}))
         self.assertEqual(finding.severity, Severity.CRITICAL)
         self.assertEqual(finding.tier, Tier.PUSH)
 
@@ -717,21 +717,55 @@ class TestCoreRules(_RuleScenario):
                          event('bacnet', src_ip='10.10.20.10', dst_ip='10.10.20.21',
                                dst_port=47808, protocol='udp',
                                fields={'service': 'WriteProperty',
-                                       'apdu_type': 'Confirmed-Request'}))
+                                       'apdu_type': 'Confirmed-Request', 'bacnet_write': True}))
 
     def test_the_object_scoped_exception_is_honoured(self):
         self.assertQuiet('bacnet_control',
                          event('bacnet', src_ip='10.10.60.50', dst_ip='10.10.20.21',
                                fields={'service': 'WriteProperty',
                                        'object': 'analog-value-7',
-                                       'apdu_type': 'Confirmed-Request'}))
+                                       'apdu_type': 'Confirmed-Request', 'bacnet_write': True}))
 
     def test_the_object_scoped_exception_does_not_cover_other_objects(self):
         self.assertFires('bacnet_control',
                          event('bacnet', src_ip='10.10.60.50', dst_ip='10.10.20.21',
                                fields={'service': 'WriteProperty',
                                        'object': 'binary-output-1',
-                                       'apdu_type': 'Confirmed-Request'}))
+                                       'apdu_type': 'Confirmed-Request', 'bacnet_write': True}))
+
+    def test_every_write_service_the_parser_knows_fires(self):
+        """Five were listed; the parser's WRITE_SERVICES has the rest (outside
+        review, 2026-11-14, N9). The event is built as the parser builds it."""
+        from netmon.protocols.bacnet import WRITE_SERVICES
+        for service in sorted(WRITE_SERVICES - {'ConfirmedPrivateTransfer',
+                                                'UnconfirmedPrivateTransfer'}):
+            apdu = 'Unconfirmed-Request' if service == 'WriteGroup' else 'Confirmed-Request'
+            with self.subTest(service=service):
+                self.assertFires('bacnet_control',
+                                 event('bacnet', src_ip='10.10.60.50', dst_ip='10.10.20.21',
+                                       fields={'service': service, 'apdu_type': apdu,
+                                               'bacnet_write': True}))
+
+    def test_an_unknown_private_transfer_fires_and_the_sites_own_is_quiet(self):
+        fields = {'service': 'ConfirmedPrivateTransfer', 'apdu_type': 'Confirmed-Request',
+                  'bacnet_write': True}
+        self.assertFires('bacnet_control',
+                         event('bacnet', src_ip='10.10.60.50', dst_ip='10.10.20.21',
+                               fields=dict(fields, vendor=99, vendor_service=1)))
+        self.assertQuiet('bacnet_control',
+                         event('bacnet', src_ip='10.10.60.50', dst_ip='10.10.20.21',
+                               fields=dict(fields, object='siemens-p2-transfer')))
+
+    def test_windows_10s_last_builds_are_past_servicing(self):
+        """21H2 and 22H2 were missing; 22H2's paid updates ended October 2026."""
+        builds = self.rules.by_id('os_support').params['unsupported_builds']
+        self.assertTrue({19044, 19045} <= set(builds))
+
+    def test_the_controllers_acknowledgement_is_not_a_command(self):
+        self.assertQuiet('bacnet_control',
+                         event('bacnet', src_ip='10.10.20.21', dst_ip='10.10.60.50',
+                               fields={'service': 'WriteProperty', 'apdu_type': 'SimpleACK',
+                                       'bacnet_write': True}))
 
     def test_a_bacnet_read_is_not_a_control_message(self):
         self.assertQuiet('bacnet_control',
