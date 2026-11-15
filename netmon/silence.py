@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import secrets
 import time
@@ -61,7 +62,14 @@ def _norm(value):
 
 def _expired(entry, now):
     until = entry.get('until')
-    return until is not None and float(until) <= now
+    if until is None:
+        return False
+    try:
+        until = float(until)
+    except (TypeError, ValueError):
+        return True
+    # NaN compares false both ways, so a NaN end would never come: over.
+    return not math.isfinite(until) or until <= now
 
 
 def _identities(finding):
@@ -150,6 +158,14 @@ class Silences:
             raise SilenceError(f'kind must be one of {", ".join(KINDS)}')
         rule, device, key = str(rule or '').strip(), _norm(device), str(key or '').strip()
         now = self._clock()
+        if until is not None:
+            try:
+                until = float(until)
+            except (TypeError, ValueError):
+                raise SilenceError('the end must be a time') from None
+            # NaN passes every comparison below and never expires: a mute.
+            if not math.isfinite(until):
+                raise SilenceError('the end must be a real time, not NaN or infinity')
 
         if kind == 'ack':
             if not rule or not device:

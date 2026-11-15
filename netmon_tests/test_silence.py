@@ -118,6 +118,21 @@ class TestSnooze(_Case):
         with self.assertRaises(SilenceError):
             self.store.add('snooze', rule='r', until=NOW - 1)
 
+    def test_an_end_of_nan_is_refused(self):
+        """NaN passed every comparison, so the snooze never ended: a mute."""
+        for kind in ('snooze', 'maintenance'):
+            for until in (float('nan'), float('inf'), 'soon'):
+                with self.subTest(kind=kind, until=until), self.assertRaises(SilenceError):
+                    self.store.add(kind, rule='r', until=until)
+        self.assertEqual(self.store.active(), [])
+
+    def test_a_nan_end_already_in_the_file_has_ended(self):
+        os.makedirs(os.path.dirname(self.path), exist_ok=True)
+        with open(self.path, 'w', encoding='utf-8') as f:
+            json.dump({'entries': [{'id': 'x', 'kind': 'snooze', 'rule': 'bacnet_control',
+                                    'until': float('nan')}]}, f)
+        self.assertEqual(Silences(self.path, clock=lambda: NOW).decide(finding()), 'push')
+
 
 class TestMaintenance(_Case):
 
@@ -290,6 +305,12 @@ class TestWeb(_Case):
         status, body = self.post('/api/silence', {'kind': 'snooze', 'hours': 2})
         self.assertEqual(status, 400)
         self.assertIn('everything', body['error'])
+
+    def test_nan_hours_are_a_400(self):
+        status, body = self.post('/api/silence', {'kind': 'snooze', 'rule': 'r',
+                                                  'hours': float('nan')})
+        self.assertEqual(status, 400)
+        self.assertIn('NaN', body['error'])
 
 
 if __name__ == '__main__':
