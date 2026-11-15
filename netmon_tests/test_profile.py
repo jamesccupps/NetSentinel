@@ -322,6 +322,39 @@ class TestKnownDeadReferences(unittest.TestCase):
 
 # ─── Quiet hours ─────────────────────────────────────────────────────────────
 
+class TestTheSitesClock(unittest.TestCase):
+    """site.timezone was read and never used: quiet hours followed the sensor's
+    clock (outside review, 2026-11-14, N9)."""
+
+    def test_quiet_hours_are_the_sites_whatever_the_sensors_clock_says(self):
+        import calendar
+        from unittest import mock
+        from netmon.events import Event, enrich
+        p = profile(site={'timezone': 'UTC', 'quiet_hours': [22, 6]})
+        late = calendar.timegm((2026, 11, 14, 23, 30, 0))       # 23:30 at the site
+        noon = mock.Mock(return_value=mock.Mock(tm_hour=12))      # the sensor says noon
+        with mock.patch('netmon.events.time.localtime', noon),                 mock.patch('netmon.profile.time.localtime', noon):
+            self.assertEqual(p.local_hour(late), 23)
+            e = Event(kind='flow', src_ip='10.10.60.50', dst_ip='10.10.20.21', ts=late)
+            enrich(e, p)
+        self.assertEqual(e.fields['hour'], 23)
+        self.assertTrue(e.fields['quiet_hours'])
+
+    def test_a_named_zone(self):
+        import calendar
+        from netmon.profile import _site_zone
+        if _site_zone('America/New_York') is None:
+            self.skipTest('no time zone database here (pip install tzdata)')
+        p = profile(site={'timezone': 'America/New_York'})
+        self.assertEqual(p.local_hour(calendar.timegm((2026, 11, 14, 23, 30, 0))), 18)
+
+    def test_a_zone_this_machine_cannot_load_is_the_sensors_clock(self):
+        import time as _time
+        with self.assertLogs('netmon.profile', level='WARNING'):
+            p = profile(site={'timezone': 'Nowhere/Atlantis'})
+        self.assertEqual(p.local_hour(1_800_000_000), _time.localtime(1_800_000_000).tm_hour)
+
+
 class TestQuietHours(unittest.TestCase):
 
     def test_a_window_that_wraps_midnight(self):

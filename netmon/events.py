@@ -332,7 +332,12 @@ def enrich(event, profile, now=None):
     if not event.fields['may_store_payload']:
         event.fields.pop('payload', None)
 
-    hour = time.localtime(event.ts).tm_hour if now is None else now
+    if now is not None:
+        hour = now
+    elif hasattr(profile, 'local_hour'):
+        hour = profile.local_hour(event.ts)       # the site's clock, site.timezone
+    else:
+        hour = time.localtime(event.ts).tm_hour
     event.fields['hour'] = hour
     event.fields['quiet_hours'] = profile.in_quiet_hours(hour)
 

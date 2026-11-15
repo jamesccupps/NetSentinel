@@ -32,7 +32,9 @@ import ipaddress
 import logging
 import os
 import re
+import time
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 
 import yaml
 
@@ -179,6 +181,21 @@ def _endpoint_matches(spec, ip, resolver=None):
     return False
 
 
+_ZONES_WARNED = set()
+
+
+def _site_zone(name):
+    """The site's time zone, or None when this machine cannot load it."""
+    text = str(name or '').strip()
+    if text.upper() in ('UTC', 'GMT', 'Z', 'ETC/UTC'):
+        return timezone.utc                 # needs no zone database
+    try:
+        from zoneinfo import ZoneInfo
+        return ZoneInfo(text)
+    except Exception:
+        return None
+
+
 class SiteProfile:
     """Loaded, validated site profile with lookup helpers."""
 
@@ -190,6 +207,12 @@ class SiteProfile:
         site = data.get('site') or {}
         self.name = site.get('name', 'unnamed site')
         self.timezone = site.get('timezone', 'UTC')
+        self._zone = _site_zone(self.timezone)
+        if self._zone is None and self.timezone not in _ZONES_WARNED:
+            _ZONES_WARNED.add(self.timezone)
+            logger.warning("site.timezone %r is not a time zone this machine knows (on "
+                           "Windows, pip install tzdata); quiet hours use this machine's "
+                           "clock", self.timezone)
         self.quiet_hours = tuple(site.get('quiet_hours', (22, 6)))
 
         self.vlans = {}
@@ -405,6 +428,17 @@ class SiteProfile:
                     continue
             return True
         return False
+
+    def local_hour(self, ts):
+        """
+        The hour at the site when ts happened. site.timezone was read and never
+        used, so quiet hours followed the sensor's clock: on a sensor set to UTC
+        they were five hours off for a site in New York (outside review,
+        2026-11-14, N9).
+        """
+        if self._zone is None:
+            return time.localtime(ts).tm_hour
+        return datetime.fromtimestamp(ts, self._zone).hour
 
     def in_quiet_hours(self, hour):
         start, end = self.quiet_hours
