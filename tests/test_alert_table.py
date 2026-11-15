@@ -45,7 +45,7 @@ class _WithTk(unittest.TestCase):
         self.root.withdraw()
 
     def tearDown(self):
-        self.root.destroy()
+        _test_support.destroy_tk(self)
 
     def titles(self, table):
         return [table.tree.set(item, 'title') for item in table.tree.get_children()]

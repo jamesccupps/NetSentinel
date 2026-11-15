@@ -144,7 +144,7 @@ class TestTheDesktopDashboard(unittest.TestCase):
         except tk.TclError as e:           # no display (GitHub's Linux runners)
             self.skipTest(f'no display for Tk: {e}')
         self.root.withdraw()
-        self.addCleanup(self.root.destroy)
+        self.addCleanup(_test_support.destroy_tk, self)
 
     def test_the_card_shows_the_rows_and_redraws_only_when_they_change(self):
         import tkinter as tk

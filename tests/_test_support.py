@@ -26,7 +26,7 @@ import sys
 import tempfile
 import types
 
-__all__ = ['SCAPY_REAL', 'TEST_HOME', 'reset_config']
+__all__ = ['SCAPY_REAL', 'TEST_HOME', 'reset_config', 'destroy_tk']
 
 # ─── 1. Isolated HOME, established before anything imports src.config ─────────
 TEST_HOME = os.environ.get('NETSENTINEL_TEST_HOME')
@@ -80,3 +80,20 @@ def reset_config(**overrides):
         section, key = section_key.split('.', 1)
         cfg.set(section, key, value)
     return cfg
+
+
+def destroy_tk(case):
+    """
+    Destroy a test's Tk root and free its widgets now, on this thread. Widgets
+    and their root reference each other, so only the garbage collector frees
+    them, and it runs on whichever thread is allocating: a later test's worker
+    thread (the network audit's), where Tcl aborts the whole run with "async
+    handler deleted by the wrong thread".
+    """
+    import gc
+    root = getattr(case, 'root', None)
+    if root is not None:
+        root.destroy()
+        case.root = None
+    del root
+    gc.collect()
