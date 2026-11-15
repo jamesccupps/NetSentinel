@@ -332,6 +332,9 @@ class TcpRoles:
 
 # Map port numbers to process (Windows)
 _port_process_cache = {}
+# The same by (port, 'TCP'|'UDP'): a TCP and a UDP socket on one port number
+# are different programs as often as not.
+_port_process_by_proto = {}
 _port_cache_time = 0
 _PORT_CACHE_TTL = 2  # seconds between full psutil enumerations
 # Refreshed with it, for TcpRoles: this computer's addresses and listening ports.
@@ -347,14 +350,14 @@ _RECENT_CONNECTION_SEC = 300
 def _refresh_port_process_map(force=False):
     """Build a map of local ports to process names using psutil."""
     global _port_process_cache, _port_cache_time, _local_addresses, _listening_ports
-    global _recent_connections
+    global _recent_connections, _port_process_by_proto
     if not PSUTIL_AVAILABLE:
         return
     now = time.time()
     if not force and now - _port_cache_time < _PORT_CACHE_TTL:
         return
     try:
-        new_map, listening = {}, set()
+        new_map, by_proto, listening = {}, {}, set()
         recent = {key: seen for key, seen in _recent_connections.items()
                   if now - seen[2] < _RECENT_CONNECTION_SEC}
         for conn in psutil.net_connections(kind='inet'):
@@ -366,10 +369,15 @@ def _refresh_port_process_map(force=False):
                     new_map[conn.laddr.port] = (proc.name(), conn.pid)
                 except (psutil.NoSuchProcess, psutil.AccessDenied):
                     continue
+                kind = getattr(conn, 'type', None)
+                if kind in (socket.SOCK_STREAM, socket.SOCK_DGRAM):
+                    proto = 'TCP' if kind == socket.SOCK_STREAM else 'UDP'
+                    by_proto[(conn.laddr.port, proto)] = new_map[conn.laddr.port]
                 if conn.raddr:
                     recent[(conn.laddr.port, conn.raddr.ip)] = (new_map[conn.laddr.port][0],
                                                                conn.pid, now)
         _port_process_cache = new_map
+        _port_process_by_proto = by_proto
         _recent_connections = recent
         _listening_ports = frozenset(listening)
         _local_addresses = frozenset(
@@ -382,6 +390,38 @@ def _refresh_port_process_map(force=False):
 
 def _get_process_for_port(port):
     """Look up which process owns a given local port. Pure dict read — no syscalls."""
+    return _port_process_cache.get(port, ("", 0))
+
+
+def _process_for_packet(info):
+    """
+    (name, pid) of the program at this PC's end of a packet, or ('', 0). Dict
+    reads only.
+
+    By this PC's own end: on a mirror port or in promiscuous mode, a packet
+    between two other hosts whose port matched a local program's was put down
+    to that program, and the IOC scanner could then call it a suspicious
+    process and count uploads against it (outside review, 2026-11-14, N9).
+    The exact connection first, the local port with the remote address, since
+    Windows soon reuses a port for another program; then the port and the
+    protocol; then the port.
+    """
+    local = _local_addresses
+    src, dst = (info.src_ip or '').split('%')[0], (info.dst_ip or '').split('%')[0]
+    if src in local:
+        port, remote = info.src_port, dst
+    elif dst in local:
+        port, remote = info.dst_port, src
+    else:
+        return ("", 0)
+    if not port:
+        return ("", 0)
+    seen = _recent_connections.get((port, remote))
+    if seen:
+        return seen[0], seen[1]
+    by_proto = _port_process_by_proto.get((port, info.protocol))
+    if by_proto:
+        return by_proto
     return _port_process_cache.get(port, ("", 0))
 
 
@@ -818,11 +858,7 @@ class CaptureEngine:
         # background thread; this is a dict lookup, so every packet can be attributed
         # instead of roughly one per refresh interval.
         if not offline:
-            proc_name, proc_pid = _get_process_for_port(info.src_port)
-            if not proc_name:
-                proc_name, proc_pid = _get_process_for_port(info.dst_port)
-            info.process_name = proc_name
-            info.process_pid = proc_pid
+            info.process_name, info.process_pid = _process_for_packet(info)
 
         if info.payload_size > 0:
             self._inspect_payload(info, payload, tcp_seq)
