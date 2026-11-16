@@ -529,6 +529,72 @@ def _iter_dns_records(section, count):
         record = getattr(record, 'payload', None)
 
 
+# ─── Which adapter to capture ───────────────────────────────────────────────
+# A documentation address (RFC 5737). Connecting a UDP socket to it sends
+# nothing; it only asks the OS which of this PC's addresses it would send from.
+_ROUTE_PROBE = '192.0.2.1'
+# Monitoring this long without a packet is reported on both dashboards.
+NO_PACKETS_WARN_SEC = 120
+
+
+def routed_source_address(probe=_ROUTE_PROBE):
+    """This PC's address on the route the OS uses for the internet, with its
+    own metrics, or '' when there is no such route."""
+    sock = None
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.connect((probe, 9))
+        return sock.getsockname()[0]
+    except OSError:
+        return ''
+    finally:
+        if sock is not None:
+            sock.close()
+
+
+def _flag_text(iface):
+    try:
+        return str(getattr(iface, 'flags', '') or '').upper()
+    except Exception:
+        return ''
+
+
+def is_wireless(iface):
+    """A Wi-Fi adapter. Npcap flags one WIRELESS; its name says so otherwise."""
+    if iface is None or isinstance(iface, str):
+        return False
+    if 'WIRELESS' in _flag_text(iface):
+        return True
+    text = f"{getattr(iface, 'name', '')} {getattr(iface, 'description', '')}".lower()
+    return any(word in text for word in ('wi-fi', 'wifi', 'wireless', 'wlan', '802.11'))
+
+
+def interface_with_address(ifaces, address):
+    """The connected adapter holding this IPv4 address, or None."""
+    for iface in ifaces:
+        try:
+            addresses = (getattr(iface, 'ips', None) or {}).get(4) or ()
+        except Exception:
+            continue
+        if address in addresses and 'DISCONNECTED' not in _flag_text(iface):
+            return iface
+    return None
+
+
+def _iface_key(iface):
+    """What tells two adapters apart: Scapy's objects carry a GUID on Windows."""
+    if iface is None or isinstance(iface, str):
+        return iface
+    return (getattr(iface, 'guid', None) or getattr(iface, 'network_name', None)
+            or getattr(iface, 'name', None) or str(iface))
+
+
+def _iface_label(iface):
+    if iface is None:
+        return 'no adapter'
+    return str(getattr(iface, 'name', '') or iface)
+
+
 class CaptureEngine:
     """
     Core packet capture engine.
@@ -552,6 +618,11 @@ class CaptureEngine:
         self._lifecycle_lock = threading.Lock()
         self._sniffer = None
         self._thread = None
+        # The adapter the sniffer runs on, since when, and the packet count then.
+        self._capture_iface = None
+        self._sniffer_started = 0.0
+        self._packets_at_sniffer_start = 0
+        self._no_packets_logged = False
         self._lock = threading.Lock()
 
         # Handshakes that span packets, joined per flow (bounded; see each class).
@@ -643,37 +714,122 @@ class CaptureEngine:
         if self.interface != 'auto':
             return self.interface
         try:
-            iface = conf.iface
+            iface = self._routed_interface()
             logger.info("Auto-selected interface: %s", iface)
             return iface
         except Exception as e:
             logger.error("Could not auto-detect interface: %s", e)
             return None
 
+    def _routed_interface(self, reload=True):
+        """
+        The adapter the OS sends internet traffic through, by asking it which
+        address it would send from. Scapy's conf.iface is worked out once, when
+        Scapy loads, and by its own reading of the routes: a docked laptop
+        captured its Wi-Fi, which carried none of the traffic, through Stop
+        and Start. `reload` reads the adapters again when none holds the
+        address (one connected since Scapy loaded); the dashboards pass False.
+        """
+        source = routed_source_address()
+        ifaces = getattr(conf, 'ifaces', None)
+        if source and ifaces is not None:
+            found = interface_with_address(list(ifaces.values()), source)
+            if found is None and reload:
+                try:
+                    ifaces.reload()
+                except Exception as e:
+                    logger.debug("Could not read the adapters again: %s", e)
+                found = interface_with_address(list(ifaces.values()), source)
+            if found is not None:
+                return found
+        return conf.iface
+
+    def _iface_object(self, iface):
+        """Scapy's adapter for a name from capture.interface, when it knows one."""
+        if not isinstance(iface, str):
+            return iface
+        ifaces = getattr(conf, 'ifaces', None)
+        for candidate in (ifaces.values() if ifaces is not None else ()):
+            names = {str(getattr(candidate, attr, '') or '')
+                     for attr in ('name', 'network_name', 'description', 'guid')}
+            if iface in names:
+                return candidate
+        return None
+
     def interface_info(self):
         """
         The adapter the capture uses, or would at its next start: name,
-        description and IPv4 address, for the dashboards' "This network".
+        description and IPv4 address, for the dashboards' "This network",
+        and `problem` when monitoring has seen no packets on it.
         Without _select_interface's logging: the dashboards ask every few seconds.
         """
         if not SCAPY_AVAILABLE:
             return {}
         try:
-            iface = conf.iface if self.interface == 'auto' else self.interface
+            iface = getattr(self, '_capture_iface', None) if getattr(self, '_running', False) \
+                else None
+            if iface is None:
+                iface = (self._routed_interface(reload=False) if self.interface == 'auto'
+                         else self.interface)
         except Exception:
             return {}
         if iface is None:
             return {}
+        problem = self.capture_problem()
         if isinstance(iface, str):
-            return {'name': iface}
-        name = str(getattr(iface, 'name', '') or iface)
-        description = str(getattr(iface, 'description', '') or '')
-        try:
-            ip = str(getattr(iface, 'ip', '') or '')
-        except Exception:
-            ip = ''
-        return {'name': name, 'description': description if description != name else '',
-                'ip': ip}
+            info = {'name': iface}
+        else:
+            name = str(getattr(iface, 'name', '') or iface)
+            description = str(getattr(iface, 'description', '') or '')
+            try:
+                ip = str(getattr(iface, 'ip', '') or '')
+            except Exception:
+                ip = ''
+            info = {'name': name, 'description': description if description != name else '',
+                    'ip': ip}
+        if problem:
+            info['problem'] = problem
+        return info
+
+    def capture_problem(self, now=None):
+        """Why monitoring shows nothing, or '': no packet on the adapter in
+        NO_PACKETS_WARN_SEC. "Monitoring" with a count stuck at 0 said nothing."""
+        if not getattr(self, '_running', False):
+            return ''
+        started = getattr(self, '_sniffer_started', 0.0)
+        now = time.time() if now is None else now
+        if not started or now - started < NO_PACKETS_WARN_SEC:
+            return ''
+        if getattr(self, '_atomic_packets', 0) > getattr(self, '_packets_at_sniffer_start', 0):
+            return ''
+        minutes = int((now - started) // 60)
+        return (f"No packets on {_iface_label(getattr(self, '_capture_iface', None))} "
+                f"in {minutes} minutes")
+
+    def follow_routed_adapter(self):
+        """
+        Move the capture when the OS starts sending traffic through another
+        adapter: docked, undocked, from Wi-Fi to a cable. Only with
+        capture.interface "auto". True when it moved.
+        """
+        if self.interface != 'auto' or not SCAPY_AVAILABLE or not self._running:
+            return False
+        with self._lifecycle_lock:
+            if not self._running:
+                return False
+            wanted = self._routed_interface()
+            current = self._capture_iface
+            if wanted is None or _iface_key(wanted) == _iface_key(current):
+                return False
+            logger.warning("Traffic now goes through %s, not %s: moving the capture there.",
+                           _iface_label(wanted), _iface_label(current))
+            if self._sniffer is not None:
+                self._stop_sniffer(self._sniffer)
+            old = self._thread
+            if old is not None and old.is_alive() and old is not threading.current_thread():
+                old.join(timeout=3)
+            self._start_capture_thread(self._stop_event)
+            return True
 
     @staticmethod
     def _extract_dns(dns, info):
@@ -1120,17 +1276,29 @@ class CaptureEngine:
                 logger.error("Capture cannot start with the current configuration. "
                              "Watchdog standing down.")
                 return
-            if self._thread and not self._thread.is_alive():
-                if self._restart_count < self._max_restarts:
+            problem = self.capture_problem()
+            if problem and not self._no_packets_logged:
+                self._no_packets_logged = True
+                logger.warning("%s: is the traffic going through another adapter?", problem)
+            # Not while follow_routed_adapter (or stop) holds the lock: between
+            # its stopping one sniffer and starting the next, this would see a
+            # dead thread and start a second.
+            if not self._lifecycle_lock.acquire(blocking=False):
+                continue
+            try:
+                dead = self._thread and not self._thread.is_alive() and not stop.is_set()
+                if dead and self._restart_count < self._max_restarts:
                     self._restart_count += 1
                     logger.warning(
                         "Capture thread died. Restarting (attempt %d/%d)...",
                         self._restart_count, self._max_restarts
                     )
                     self._start_capture_thread(stop)
-                else:
+                elif dead:
                     logger.error("Capture thread exceeded max restarts (%d). Giving up.",
                                  self._max_restarts)
+            finally:
+                self._lifecycle_lock.release()
 
             # Check worker thread
             if self._worker_thread and not self._worker_thread.is_alive() \
@@ -1206,11 +1374,23 @@ class CaptureEngine:
         iface = self._select_interface()
         from src.config import capture_filter
         bpf = capture_filter(self.config)
+        promisc = bool(self.config.get('capture', 'promiscuous', default=True))
+        if promisc and is_wireless(self._iface_object(iface)):
+            # A Wi-Fi adapter shows only this PC's traffic in any mode, and some
+            # Wi-Fi drivers deliver no packets at all once asked for promiscuous
+            # mode: a laptop on Wi-Fi monitored for an hour and counted none.
+            promisc = False
+            logger.info("%s is a Wi-Fi adapter: capturing without promiscuous mode.",
+                        _iface_label(iface))
         sniff_options = self._supported_sniff_kwargs({
-            'promisc': self.config.get('capture', 'promiscuous', default=True),
+            'promisc': promisc,
             'snaplen': self.config.get('capture', 'snap_length', default=65535),
         })
         logger.info("Capture starting on interface: %s", iface)
+        self._capture_iface = iface
+        self._sniffer_started = time.time()
+        self._packets_at_sniffer_start = self._atomic_packets
+        self._no_packets_logged = False
 
         if AsyncSniffer is not None:
             sniffer = AsyncSniffer(

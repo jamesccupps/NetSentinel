@@ -321,6 +321,8 @@ def network_rows(env, adapter=None):
     if name:
         rows.append(('Adapter', f"{name} ({description})" if description and description != name
                      else name))
+    if adapter.get('problem'):
+        rows.append(('Capture', adapter['problem']))
     others = [a for a in usable if a != primary]
     if others:
         rows.append(('Other addresses', ', '.join(others)))

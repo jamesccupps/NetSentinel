@@ -912,6 +912,12 @@ class NetSentinelApp:
         if now - getattr(self, '_last_network_check', 0.0) < NETWORK_CHECK_SEC:
             return False
         self._last_network_check = now
+        engine = getattr(self, 'capture_engine', None)
+        if engine is not None:
+            try:
+                engine.follow_routed_adapter()
+            except Exception as e:
+                logger.warning("Could not move the capture to the new adapter: %s", e)
         try:
             return self.net_env.refresh_if_changed()
         except Exception as e:

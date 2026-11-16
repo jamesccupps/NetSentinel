@@ -1,6 +1,20 @@
 # NetSentinel Changelog
 
-## Unreleased — VirusTotal, set up and checked
+## Unreleased — VirusTotal, and the right adapter
+
+- **A docked laptop captured nothing.** On its dock's cable and its Wi-Fi at
+  once, it monitored the Wi-Fi for over an hour and counted no packets, and
+  Stop and Start chose the Wi-Fi again: the adapter was the one Scapy picked
+  when it loaded. NetSentinel now asks Windows which address it sends from and
+  captures that adapter, and moves the capture within a minute when that
+  changes (docked, undocked, Wi-Fi to cable). A capture.interface set by hand
+  is left alone.
+- **Wi-Fi without promiscuous mode.** A Wi-Fi adapter shows only this PC's
+  traffic in any mode, and some Wi-Fi drivers deliver nothing once asked for
+  promiscuous mode, so NetSentinel no longer asks.
+- **"Monitoring" with nothing captured says so.** After two minutes without a
+  packet, This network on both dashboards shows "No packets on <adapter>",
+  and the log says it once.
 
 - **VirusTotal key in Settings** (Threat data). With it, each alert about a
   program on this PC gets VirusTotal's verdict on the program: only its
