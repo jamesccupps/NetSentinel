@@ -2469,6 +2469,14 @@ class NetSentinelGUI:
             "hash list. It is sent only to abuse.ch, with each download."),
             font=('Segoe UI', 8), fg=COLORS['text_dim'], bg=COLORS['bg_card'],
             anchor='w', justify='left', wraplength=560).pack(fill='x')
+        self._add_setting_secret(
+            intel_card, 'verification.virustotal_api_key', 'VirusTotal API key')
+        tk.Label(intel_card, text=(
+            "Free from virustotal.com (your profile, API key). Each alert about a program "
+            "on this PC then gets VirusTotal's verdict on it: only the program's SHA-256 "
+            "is sent, never the file, at most 4 a minute."),
+            font=('Segoe UI', 8), fg=COLORS['text_dim'], bg=COLORS['bg_card'],
+            anchor='w', justify='left', wraplength=560).pack(fill='x')
         self._add_setting_toggle(
             intel_card, 'verification.reverse_dns',
             "Look up the names behind alerts' addresses (asks DNS, which for an "

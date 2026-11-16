@@ -25,6 +25,8 @@ import logging
 import subprocess
 import json
 import ntpath
+import threading
+from collections import OrderedDict
 from datetime import datetime
 
 from src.winpaths import program_files_dirs, system_directory, system_tool
@@ -52,6 +54,17 @@ class Verdict:
     UNKNOWN = "UNKNOWN"                 # Can't determine — manual review needed
     SUSPICIOUS = "SUSPICIOUS"           # Multiple concerning signals
     MALICIOUS = "MALICIOUS"             # VirusTotal hit or strong malware indicators
+
+
+# ─── VirusTotal (opt-in: verification.virustotal_api_key) ───────────────────
+# Only the SHA-256 of a program an alert names is sent, never the file. The free
+# API allows 4 lookups a minute and 500 a day.
+VT_MIN_INTERVAL_SEC = 15
+# Engines learn about a file over days, so an answer is asked for again after this.
+VT_ANSWER_TTL_SEC = 24 * 3600
+VT_ANSWERS_KEPT = 5000
+# After VirusTotal answers 429 (the minute's or the day's quota is used up).
+VT_PAUSE_SEC = 600
 
 
 # ─── Known Safe Publishers (Authenticode signers) ────────────────────────────
@@ -181,10 +194,20 @@ class ProcessVerifier:
         self._known_good_path = os.path.join(DB_DIR, "known_good_hashes.json")
         self._known_good = self._load_known_good()
 
-        # VirusTotal API (free tier: 4 requests/min)
-        self._vt_api_key = config.get('verification', 'virustotal_api_key', default='')
-        self._vt_last_request = 0
-        self._vt_min_interval = 15  # seconds between VT requests
+        # VirusTotal. Answers are kept by hash in memory only: a file on disk is
+        # one a program running as the owner could write, and a forged "0
+        # detections" in it would clear malware.
+        self._vt_api_key = str(config.get('verification', 'virustotal_api_key',
+                                          default='') or '').strip()
+        self._vt_lock = threading.Lock()
+        self._vt_next_slot = 0.0
+        self._vt_paused_until = 0.0
+        self._vt_key_refused = False
+        self._vt_answers = OrderedDict()       # sha256 -> (answer, time)
+        self._vt_lookups = 0
+        self._vt_last_answer = None
+        self._sleep = time.sleep
+        self._vt_open = urllib.request.urlopen if URLLIB_AVAILABLE else None
 
         # User-facing switches (previously declared in config but never consulted)
         self.auto_verify = config.get('verification', 'auto_verify', default=True)
@@ -302,7 +325,7 @@ class ProcessVerifier:
         else:
             checks['known_good_hash'] = False
 
-        # 6. VirusTotal lookup (if API key configured and not rate-limited)
+        # 6. VirusTotal lookup (if an API key is configured)
         if file_hash and self._vt_api_key:
             vt_result = self._check_virustotal(file_hash)
             checks['virustotal'] = vt_result
@@ -354,11 +377,13 @@ class ProcessVerifier:
         result['score'] = score
         result['checks'] = checks
 
-        # Cache the result
-        if len(self._cache) >= self._cache_max:
-            oldest_key = min(self._cache, key=lambda k: self._cache[k][2])
-            del self._cache[oldest_key]
-        self._cache[cache_key] = (result['verdict'], result, time.time())
+        # Cache the result, unless VirusTotal could not answer this time (paused,
+        # unreachable): the next alert for this program asks again.
+        if not checks.get('virustotal', {}).get('retry'):
+            if len(self._cache) >= self._cache_max:
+                oldest_key = min(self._cache, key=lambda k: self._cache[k][2])
+                del self._cache[oldest_key]
+            self._cache[cache_key] = (result['verdict'], result, time.time())
 
         # If verified safe, add to known-good for future. Only on a signature that
         # verifies: the list adds +3 for good, so a wrong entry is permanent.
@@ -555,42 +580,113 @@ class ProcessVerifier:
             return None
 
     def _check_virustotal(self, file_hash):
-        """Check file hash against VirusTotal API (free tier)."""
-        if not self._vt_api_key or not URLLIB_AVAILABLE:
+        """
+        The file's VirusTotal verdict, by its SHA-256. A lookup waits for its
+        turn rather than being skipped: it runs in the app's verification worker,
+        after the alert is already shown (app._SLOW_VERIFY_RULES), and a skipped
+        one left every alert after the first in a burst without an answer.
+        """
+        if not self._vt_api_key or self._vt_open is None:
             return {'checked': False, 'reason': 'No API key configured'}
+        known = self._vt_known(file_hash)
+        if known is not None:
+            return known
+        if self._vt_key_refused:
+            return {'checked': False, 'reason': 'VirusTotal refused the API key'}
+        if time.time() < self._vt_paused_until:
+            return {'checked': False, 'retry': True,
+                    'reason': 'VirusTotal quota used up; lookups resume shortly'}
+        with self._vt_lock:
+            now = time.time()
+            slot = max(now, self._vt_next_slot)
+            self._vt_next_slot = slot + VT_MIN_INTERVAL_SEC
+        if slot > now:
+            self._sleep(slot - now)
+        answer = self._vt_lookup(file_hash)
+        if answer.get('checked'):
+            with self._vt_lock:
+                self._vt_answers[file_hash] = (answer, time.time())
+                self._vt_answers.move_to_end(file_hash)
+                while len(self._vt_answers) > VT_ANSWERS_KEPT:
+                    self._vt_answers.popitem(last=False)
+        return dict(answer)
 
-        # Rate limiting
-        now = time.time()
-        if now - self._vt_last_request < self._vt_min_interval:
-            return {'checked': False, 'reason': 'Rate limited'}
+    def _vt_known(self, file_hash):
+        with self._vt_lock:
+            kept = self._vt_answers.get(file_hash)
+            if kept is None:
+                return None
+            if time.time() - kept[1] >= VT_ANSWER_TTL_SEC:
+                del self._vt_answers[file_hash]
+                return None
+            return dict(kept[0])
 
+    def _vt_lookup(self, file_hash):
+        """One request. Never logs the key: it rides in a header, not the URL."""
+        self._vt_lookups += 1
+        req = urllib.request.Request(
+            f"https://www.virustotal.com/api/v3/files/{file_hash}",
+            headers={'x-apikey': self._vt_api_key, 'User-Agent': 'NetSentinel'})
         try:
-            self._vt_last_request = now
-            url = f"https://www.virustotal.com/api/v3/files/{file_hash}"
-            req = urllib.request.Request(url, headers={
-                'x-apikey': self._vt_api_key,
-                'User-Agent': 'NetSentinel/1.0',
-            })
-            with urllib.request.urlopen(req, timeout=10) as resp:
-                data = json.loads(resp.read())
-                stats = data.get('data', {}).get('attributes', {}).get(
-                    'last_analysis_stats', {})
-                result = {
-                    'found': True,
-                    'checked': True,
-                    'detections': stats.get('malicious', 0) + stats.get('suspicious', 0),
-                    'total': sum(stats.values()),
-                    'harmless': stats.get('harmless', 0),
-                    'undetected': stats.get('undetected', 0),
-                }
-                return result
+            with self._vt_open(req, timeout=10) as resp:
+                data = json.loads(resp.read(4 * 1024 * 1024))
         except urllib.request.HTTPError as e:
             if e.code == 404:
+                self._vt_last_answer = time.time()
                 return {'found': False, 'checked': True,
                         'note': 'File not in VirusTotal database (never submitted)'}
-            return {'checked': False, 'reason': f'HTTP {e.code}'}
+            if e.code in (401, 403):
+                if not self._vt_key_refused:
+                    logger.warning("VirusTotal refused the API key (HTTP %d); no more "
+                                   "lookups until NetSentinel restarts. Check the key "
+                                   "in Settings, Threat data.", e.code)
+                self._vt_key_refused = True
+                return {'checked': False, 'reason': 'VirusTotal refused the API key'}
+            if e.code == 429:
+                self._vt_paused_until = time.time() + VT_PAUSE_SEC
+                logger.info("VirusTotal says the API quota is used up; pausing lookups "
+                            "for %d minutes", VT_PAUSE_SEC // 60)
+                return {'checked': False, 'retry': True,
+                        'reason': 'VirusTotal quota used up; lookups resume shortly'}
+            return {'checked': False, 'retry': True, 'reason': f'HTTP {e.code}'}
         except Exception as e:
-            return {'checked': False, 'reason': str(e)}
+            return {'checked': False, 'retry': True, 'reason': str(e)[:200] or type(e).__name__}
+        attributes = (data.get('data') or {}).get('attributes') or {}
+        stats = attributes.get('last_analysis_stats') or {}
+        if not isinstance(stats, dict):
+            stats = {}
+        counts = {k: v for k, v in stats.items() if isinstance(v, int)}
+        self._vt_last_answer = time.time()
+        return {
+            'found': True,
+            'checked': True,
+            'detections': counts.get('malicious', 0) + counts.get('suspicious', 0),
+            'total': sum(counts.values()),
+            'harmless': counts.get('harmless', 0),
+            'undetected': counts.get('undetected', 0),
+        }
+
+    def virustotal_status(self):
+        """The Threat data page's row for the lookups."""
+        row = {'name': 'virustotal', 'category': 'Malware',
+               'description': 'VirusTotal - Lookups of the programs behind alerts',
+               'updated': self._vt_last_answer, 'entries': len(self._vt_answers),
+               'refresh_hours': None}
+        if not self._vt_api_key:
+            return dict(row, state='needs key', note=(
+                'Needs a free VirusTotal API key (Settings, Threat data). Sends only the '
+                'SHA-256 of a program an alert names, never the file.'))
+        if self._vt_key_refused:
+            return dict(row, state='failed', note=(
+                'VirusTotal refused the API key. Check it in Settings, Threat data, '
+                'and restart NetSentinel.'))
+        if time.time() < self._vt_paused_until:
+            resume = datetime.fromtimestamp(self._vt_paused_until).strftime('%H:%M')
+            return dict(row, state='waiting', note=(
+                f'VirusTotal says the quota is used up; lookups resume at {resume}.'))
+        return dict(row, state='ok', note=(
+            f'{self._vt_lookups} lookups since NetSentinel started, at most 4 a minute. '
+            'Sends only the SHA-256 of a program an alert names, never the file.'))
 
     def _check_parent_process(self, pid):
         """Check the parent process chain for anomalies."""

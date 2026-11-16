@@ -1,5 +1,21 @@
 # NetSentinel Changelog
 
+## Unreleased — VirusTotal, set up and checked
+
+- **VirusTotal key in Settings** (Threat data). With it, each alert about a
+  program on this PC gets VirusTotal's verdict on the program: only its
+  SHA-256 is sent, never the file. Before, the key could only be typed into
+  config.json.
+- **Lookups wait their turn.** The free API allows 4 a minute; a lookup
+  within 15 seconds of the last was skipped, and the empty answer kept for
+  that program for an hour, so in a burst of alerts only the first got
+  VirusTotal's verdict. Answers are kept by hash for a day (in memory only),
+  so a program is asked about once. A refused key or a used-up quota shows on
+  the Threat data page, and the key is never logged.
+- **Releases are checked on VirusTotal.** After each release, a workflow
+  uploads the published exe to VirusTotal and reports how many engines flag
+  it, and which, in the run's summary. Report only.
+
 ## v1.17.0 — An outside review, worked through
 
 **2778 unit tests** plus 14 integration checks. The fixes for a full outside

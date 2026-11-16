@@ -106,6 +106,13 @@ signing change; delete it after. Before signing, VirusTotal had the unsigned
 1.14.1 exe at 2/64 (Bkav's hash-named generic and DeepInstinct's ML verdict;
 Microsoft and the major engines clean; Kaspersky timed out on the 81 MB file).
 
+After each release, `.github/workflows/virustotal.yml` runs
+`tools/virustotal_check.py`: it uploads the released exe to VirusTotal (key: the
+`VT_API_KEY` repository secret, in that workflow only, never in release.yml)
+and reports how many engines flag it, in the run's summary and as a warning.
+Report only; a red run means VirusTotal could not be asked. Run it by hand
+(workflow_dispatch, a tag or blank for the latest) to check any release.
+
 NetSentinel is also in the owner's Scoop bucket (`jamesccupps/scoop-bucket`,
 `bucket/netsentinel.json`). Its manifest updates itself from the latest GitHub
 release every 4 hours, so a release needs no Scoop work as long as these hold:

@@ -44,6 +44,12 @@ def collect(app):
                 logger.debug("%s status unavailable: %s", name, e)
     rows.append(_geoip(app))
     rows.append(_hash_lists())
+    verifier = getattr(app, 'process_verifier', None)
+    if verifier is not None:
+        try:
+            rows.append(verifier.virustotal_status())
+        except Exception as e:
+            logger.debug("VirusTotal status unavailable: %s", e)
     rows.extend(_bundled())
     return rows
 

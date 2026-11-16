@@ -1,0 +1,51 @@
+name: virustotal
+
+# How VirusTotal's engines see a released NetSentinel.exe: after every release
+# (when the release workflow finishes on a vX.Y.Z tag), and by hand for any
+# release. Report only, in the run's summary and as a warning when an engine
+# flags the exe; a release is never held for it. A red run means VirusTotal
+# could not be asked, not that the exe was flagged.
+#
+# Apart from release.yml, so the VirusTotal key (the VT_API_KEY repository
+# secret) never shares a job with the signing steps. It installs nothing and
+# runs only tools/virustotal_check.py (standard library) against the release's
+# public files: uploading the exe to VirusTotal shares nothing not already
+# public. The tag reaches the script through the environment, never pasted
+# into the script, and the script accepts only vX.Y.Z.
+on:
+  workflow_run:
+    workflows: [release]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag, e.g. v1.17.0 (blank: the latest release)'
+        required: false
+        default: ''
+
+permissions: {}
+
+jobs:
+  check:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'push' &&
+       startsWith(github.event.workflow_run.head_branch, 'v') &&
+       !contains(github.event.workflow_run.head_branch, '-signtest'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
+        with:
+          persist-credentials: false
+
+      - name: Ask VirusTotal about the release's exe
+        env:
+          VT_API_KEY: ${{ secrets.VT_API_KEY }}
+          TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.event.workflow_run.head_branch }}
+          GH_TOKEN: ${{ github.token }}
+          PYTHONIOENCODING: utf-8
+        run: python3 tools/virustotal_check.py
