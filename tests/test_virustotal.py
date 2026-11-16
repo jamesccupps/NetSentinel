@@ -195,8 +195,10 @@ def release_check():
 class _Site:
     """GitHub and VirusTotal, as the release check sees them."""
 
-    def __init__(self, vt_file=None, exe=EXE, scans=('queued', 'completed'), key_ok=True):
+    def __init__(self, vt_file=None, exe=EXE, scans=('queued', 'completed'), key_ok=True,
+                 upload_url=UPLOAD):
         self.vt_file, self.exe, self.scans, self.key_ok = vt_file, exe, list(scans), key_ok
+        self.upload_url = upload_url
         self.calls = []
 
     def __call__(self, method, url, headers=None, body=None, limit=None, timeout=None):
@@ -214,7 +216,7 @@ class _Site:
                 return 404, b'{}'
             return 200, json.dumps({'data': {'attributes': self.vt_file}}).encode()
         if url.endswith('/files/upload_url'):
-            return 200, json.dumps({'data': UPLOAD}).encode()
+            return 200, json.dumps({'data': self.upload_url}).encode()
         if url == UPLOAD:
             self.uploaded = body
             return 200, b'{"data": {"type": "analysis", "id": "an-1"}}'
@@ -262,6 +264,29 @@ class TestReleaseCheck(unittest.TestCase):
         self.assertNotIn('\n::stop', text)
         self.assertFalse([line for line in text.splitlines()
                           if line.startswith('::') and not line.startswith('::warning title=Virus')])
+
+    def test_an_http_upload_address_is_used_over_https(self):
+        """VirusTotal hands out http:// addresses; the 1.17.1 check refused one,
+        and sending the key over plain HTTP is not the answer either."""
+        site = _Site(upload_url=UPLOAD.replace('https://', 'http://'))
+        code, text = self.run_check(site)
+        self.assertEqual(code, 0, text)
+        posts = [c for c in site.calls if c[0] == 'POST']
+        self.assertEqual([c[1] for c in posts], [UPLOAD])
+        self.assertFalse([c for c in site.calls if c[1].startswith('http://')])
+
+    def test_an_upload_address_off_virustotal_is_refused(self):
+        for address in ('https://uploads.example.net/_ah/upload/TOKEN123',
+                        'https://www.virustotal.com.example.net/TOKEN123',
+                        'https://user:pw@www.virustotal.com/TOKEN123',
+                        'ftp://www.virustotal.com/TOKEN123'):
+            site = _Site(upload_url=address)
+            code, text = self.run_check(site)
+            self.assertEqual(code, 1, address)
+            self.assertFalse(hasattr(site, 'uploaded'), address)
+            self.assertNotIn('TOKEN123', text, address)      # a one-time upload token
+        self.assertIn('https://uploads.example.net', self.run_check(
+            _Site(upload_url='https://uploads.example.net/_ah/upload/abc'))[1])
 
     def test_a_known_file_is_not_uploaded_again(self):
         site = _Site(vt_file={'last_analysis_stats': {'malicious': 0, 'undetected': 70},

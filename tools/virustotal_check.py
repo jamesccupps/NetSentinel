@@ -26,6 +26,7 @@ import time
 import urllib.error
 import urllib.request
 import uuid
+from urllib.parse import urlsplit, urlunsplit
 
 API = 'https://www.virustotal.com/api/v3'
 REPO = 'jamesccupps/NetSentinel'
@@ -66,6 +67,31 @@ def _json(data):
         return json.loads(data or b'{}')
     except ValueError:
         return {}
+
+
+def upload_address(url):
+    """
+    VirusTotal's upload address, over HTTPS, or None for one off virustotal.com.
+    Its API hands out http:// addresses (the 1.17.1 check stopped at one), and
+    the key rides in a header, so the upload never goes over plain HTTP.
+    """
+    if not isinstance(url, str):
+        return None
+    parts = urlsplit(url.strip())
+    host = (parts.hostname or '').lower()
+    if parts.scheme not in ('http', 'https') or parts.username or parts.password \
+            or not (host == 'virustotal.com' or host.endswith('.virustotal.com')):
+        return None
+    return urlunsplit(('https', host, parts.path or '/', parts.query, ''))
+
+
+def _where(url):
+    """Where an address points, for an error: its scheme and host, never the
+    path, which is a one-time upload token."""
+    if not isinstance(url, str) or not url:
+        return 'no address'
+    parts = urlsplit(url.strip())
+    return clean(f'{parts.scheme}://{parts.hostname or "?"}', 80)
 
 
 def clean(text, limit=80):
@@ -142,9 +168,11 @@ class Checker:
 
     def upload(self, exe):
         status, doc = self.vt('GET', f'{API}/files/upload_url')
-        url = doc.get('data') if status == 200 else None
-        if not isinstance(url, str) or not url.startswith('https://www.virustotal.com/'):
-            raise CheckFailed(f'VirusTotal gave no upload address (HTTP {status}).')
+        given = doc.get('data') if status == 200 else None
+        url = upload_address(given)
+        if url is None:
+            raise CheckFailed(f'VirusTotal gave no upload address this check will use '
+                              f'(HTTP {status}, {_where(given)}).')
         boundary = uuid.uuid4().hex
         body = (f'--{boundary}\r\nContent-Disposition: form-data; name="file"; '
                 f'filename="NetSentinel.exe"\r\nContent-Type: application/octet-stream'
