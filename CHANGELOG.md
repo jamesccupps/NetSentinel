@@ -1,6 +1,9 @@
 # NetSentinel Changelog
 
-## Unreleased — VirusTotal, and the right adapter
+## v1.17.1 — VirusTotal, and the right adapter
+
+**2811 unit tests** plus 14 integration checks. A docked laptop that captured
+nothing, and VirusTotal set up in Settings and checked on every release.
 
 - **A docked laptop captured nothing.** On its dock's cable and its Wi-Fi at
   once, it monitored the Wi-Fi for over an hour and counted no packets, and
