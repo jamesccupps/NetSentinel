@@ -1,0 +1,21 @@
+# Actions are pinned by commit SHA (tags can be moved, and the release job holds a
+# token that can publish). A pinned SHA goes stale silently, so Dependabot keeps
+# them current, once a month, in one pull request: it understands the `# v7.0.1`
+# comment convention and updates the SHA and the comment together.
+#
+# Python packages are left out on purpose. The exe is built from
+# requirements-build.lock, which pip-compile writes and Dependabot can't read (it
+# only reads .txt and .in files); requirements.txt holds only minimum versions.
+# After changing requirements.txt, regenerate the lock (the command is at the top
+# of release.yml).
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "monthly"
+    groups:
+      actions:
+        patterns: ["*"]
+    commit-message:
+      prefix: "CI"
