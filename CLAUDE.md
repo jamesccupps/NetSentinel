@@ -59,11 +59,12 @@ machine's interfaces raise there. In Claude's sandbox on the owner's Windows PC,
 scratch folder (scapy cannot read `~\.cache` there, and ~175 tests skip silently)
 and `PYTHONIOENCODING=utf-8`.
 
-CI (`.github/workflows/test.yml`) runs the tests on Python 3.10, 3.11 and 3.12 on
+CI (`.github/workflows/test.yml`) runs the tests on Python 3.11 and 3.12 on
 Linux, and on 3.12 on Windows, where the exe runs. On Windows, pass `encoding=` to
 every text `open()` and `FileHandler`, and skip tests of POSIX file modes there.
-Code must work on 3.10: no multi-line expressions inside f-strings, and remember
-3.10's `fromisoformat` only takes 3 or 6 fractional digits.
+Code must work on 3.11, the lowest supported (netmon on a sensor runs its system
+`python3`). Inside an f-string's braces, no line breaks, backslashes, comments or
+the f-string's own quote character. 3.12 allows them; 3.11 does not.
 
 ## Releasing
 

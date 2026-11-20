@@ -870,7 +870,7 @@ class HeadlessServer:
         ml = data.get('ml', {})
         by_sev = alerts.get('by_severity', {})
         # Computed out of line: a multi-line expression inside an f-string needs
-        # Python 3.12, and this project supports 3.10.
+        # Python 3.12, and this project supports 3.11.
         threat = presentation.threat_level(
             data.get('ml_result', {}).get('anomaly_score', 0))[0]
 

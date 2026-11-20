@@ -121,7 +121,7 @@ def parse_timestamp(value):
     if not text:
         return 0.0
     normalised = text.replace('Z', '+00:00').replace('/', '-')
-    # Python 3.10's fromisoformat takes only 3 or 6 fractional digits.
+    # Exactly six fractional digits: the strptime fallbacks' %f takes no more.
     normalised = re.sub(r'(:\d\d)\.(\d+)',
                         lambda m: f'{m.group(1)}.{(m.group(2) + "000000")[:6]}',
                         normalised, count=1)

@@ -16,6 +16,8 @@ apply.
 
 ## Try it
 
+It needs Python 3.11 or newer.
+
 ```
 pip install pyyaml scapy          # all it needs
 python -m netmon                  # what there is

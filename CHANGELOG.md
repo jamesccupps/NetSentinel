@@ -4,11 +4,16 @@
 
 - **Minimum versions past known advisories.** An install from source accepted
   versions with published security advisories: cryptography from 41 (now
-  50.0), py7zr from 1.0 (now 1.1.3) and scikit-learn from 1.3 (now 1.5).
+  50.0), py7zr from 1.0 (now 1.1.3), scikit-learn from 1.3 (now 1.5) and
+  Pillow from 10 (now 13.0).
   The exe was not affected: it is built from the lock, which already pinned
   fixed versions. A test keeps the minimums there, keeps requirements.txt and
   pyproject.toml in step, and checks the build lock meets every minimum.
-  Pillow's fixes need 13.0, which needs Python 3.11.
+- **Python 3.11 or newer.** Python 3.10 reached its end of life in October
+  2026, and Pillow's fixes (13.0) need 3.11. setup.bat now says so instead of
+  failing partway through the install. The exe is unchanged: it carries its
+  own Python 3.12. netmon needs 3.11 too, so check a sensor's `python3
+  --version` before updating it (Ubuntu 22.04's is 3.10).
 - **The release check uploads to VirusTotal.** Its first run stopped because
   VirusTotal hands out http:// upload addresses; it now uses any virustotal.com
   address over HTTPS. 1.17.1: 1 of 67 engines flag it.

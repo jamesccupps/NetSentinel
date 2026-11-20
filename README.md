@@ -6,7 +6,7 @@ NetSentinel is a desktop network security application that monitors all traffic 
 
 **[⬇ Download NetSentinel.exe](https://github.com/jamesccupps/NetSentinel/releases/latest/download/NetSentinel.exe)** (Windows; live capture needs [Npcap](https://npcap.com/)) · [All releases](https://github.com/jamesccupps/NetSentinel/releases) · [Website](https://jamesccupps.github.io/NetSentinel/)
 
-![Python](https://img.shields.io/badge/python-3.10+-blue) ![Platform](https://img.shields.io/badge/platform-Windows-lightgrey) ![License](https://img.shields.io/badge/license-MIT-green) [![Tests](https://github.com/jamesccupps/NetSentinel/actions/workflows/test.yml/badge.svg)](https://github.com/jamesccupps/NetSentinel/actions/workflows/test.yml)
+![Python](https://img.shields.io/badge/python-3.11+-blue) ![Platform](https://img.shields.io/badge/platform-Windows-lightgrey) ![License](https://img.shields.io/badge/license-MIT-green) [![Tests](https://github.com/jamesccupps/NetSentinel/actions/workflows/test.yml/badge.svg)](https://github.com/jamesccupps/NetSentinel/actions/workflows/test.yml)
 
 ![NetSentinel's dashboard while monitoring: packets, bandwidth, active flows and alert counts, traffic and bandwidth charts, the protocol breakdown, and recent alerts for DGA domains, DNS tunneling, a known malicious IP, ARP spoofing and a port scan](site/images/dashboard-dark.png)
 
@@ -85,7 +85,7 @@ TLS stack stands out even when everything it sends is encrypted.
 
 ### Prerequisites
 
-- **Python 3.10+**
+- **Python 3.11+**
 - **Npcap** (Windows packet capture driver) — download from [npcap.com](https://npcap.com/)
   - During install, check "Install in WinPcap API-compatible mode"
 - **Administrator privileges** (required for packet capture)
@@ -419,7 +419,7 @@ python tools/integration_check.py
 python tools/simulate_attacks.py --list
 ```
 
-CI runs the suite on Python 3.10, 3.11 and 3.12 — see
+CI runs the suite on Python 3.11 and 3.12 — see
 [`.github/workflows/test.yml`](.github/workflows/test.yml).
 
 ## Project Structure

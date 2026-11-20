@@ -5,9 +5,9 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "netsentinel"
 version = "1.17.1"
-description = "AI-powered network monitor and intrusion detection system"
+description = "Network monitor and intrusion detection for Windows, with machine-learning anomaly detection"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 license = { text = "MIT" }
 authors = [{ name = "NetSentinel Contributors" }]
 keywords = ["network-security", "ids", "packet-capture", "anomaly-detection", "forensics"]
@@ -15,7 +15,6 @@ classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: System Administrators",
     "License :: OSI Approved :: MIT License",
-    "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Topic :: Security",
@@ -31,7 +30,7 @@ dependencies = [
     "py7zr>=1.1.3",
     "python-evtx>=0.8",
     "pystray>=0.19",
-    "pillow>=10.0",
+    "pillow>=13.0",
 ]
 
 [project.optional-dependencies]
@@ -51,7 +50,7 @@ py-modules = ["main"]
 
 [tool.ruff]
 line-length = 100
-target-version = "py310"
+target-version = "py311"
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "B", "UP"]

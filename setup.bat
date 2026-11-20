@@ -20,8 +20,17 @@ REM --- Check Python ---
 python --version >nul 2>&1
 if errorlevel 1 (
     echo [ERROR] Python is not installed or not in PATH.
-    echo Please install Python 3.10+ from https://www.python.org/downloads/
+    echo Please install Python 3.11+ from https://www.python.org/downloads/
     echo Make sure to check "Add Python to PATH" during installation.
+    pause
+    exit /b 1
+)
+
+python -c "import sys; sys.exit(sys.version_info < (3, 11))" >nul 2>&1
+if errorlevel 1 (
+    echo [ERROR] NetSentinel needs Python 3.11 or newer. This one is:
+    python --version
+    echo Please install Python 3.11+ from https://www.python.org/downloads/
     pause
     exit /b 1
 )

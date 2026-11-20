@@ -3,6 +3,10 @@
 Two units, deliberately. tcpdump captures; netmon analyses. A crash in the
 analysis loses analysis, which can be redone, and not the capture, which cannot.
 
+The units run the system's `/usr/bin/python3`, which must be 3.11 or newer
+(`python3 --version`). Ubuntu 22.04's is 3.10; Ubuntu 24.04, Debian 12 and
+Raspberry Pi OS bookworm ship newer ones.
+
 ## 1. The capture
 
 Get the command, filter and all:
