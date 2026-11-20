@@ -1,5 +1,22 @@
 # NetSentinel Changelog
 
+## Unreleased
+
+- **Minimum versions past known advisories.** An install from source accepted
+  versions with published security advisories: cryptography from 41 (now
+  50.0), py7zr from 1.0 (now 1.1.3) and scikit-learn from 1.3 (now 1.5).
+  The exe was not affected: it is built from the lock, which already pinned
+  fixed versions. A test keeps the minimums there, keeps requirements.txt and
+  pyproject.toml in step, and checks the build lock meets every minimum.
+  Pillow's fixes need 13.0, which needs Python 3.11.
+- **The release check uploads to VirusTotal.** Its first run stopped because
+  VirusTotal hands out http:// upload addresses; it now uses any virustotal.com
+  address over HTTPS. 1.17.1: 1 of 67 engines flag it.
+- **CI.** Dependabot keeps the commit-pinned actions current (checkout 7.0.1,
+  setup-python 7.1.0, upload-artifact 7.0.2). Every green run no longer
+  shows four "failure" annotations: tests that make the code fail on purpose
+  now capture the error it logs, and check that it is logged.
+
 ## v1.17.1 — VirusTotal, and the right adapter
 
 **2811 unit tests** plus 14 integration checks. A docked laptop that captured

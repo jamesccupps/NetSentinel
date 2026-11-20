@@ -359,10 +359,14 @@ class TestResponseHardening(_ApiTestCase):
         def explode(params):
             raise RuntimeError('boom')
         self.server.routes['/api/status'] = explode
-        with self.assertRaises(urllib.error.HTTPError) as ctx:
+        # Captured, so the traceback stays out of the run's output: CI's problem
+        # matcher made it a "failure" annotation on every green run.
+        with self.assertLogs('NetSentinel.Headless', level='ERROR') as logs, \
+                self.assertRaises(urllib.error.HTTPError) as ctx:
             self.get('/api/status')
         self.assertEqual(ctx.exception.code, 500)
         self.assertEqual(json.loads(ctx.exception.read())['error'], 'internal error')
+        self.assertIn('Error serving /api/status', logs.output[0])
 
 
 class TestDashboard(_ApiTestCase):

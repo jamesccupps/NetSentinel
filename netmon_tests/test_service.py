@@ -439,10 +439,14 @@ class TestScheduling(_ServiceCase):
             raise RuntimeError('unreachable')
 
         service.check_drift = explode
-        service.tick(now=1000.0)
-        service.tick(now=1100.0)
+        # Captured, so the traceback stays out of the run's output: CI's problem
+        # matcher made it a "failure" annotation on every green run.
+        with self.assertLogs('netmon.service', level='ERROR') as logs:
+            service.tick(now=1000.0)
+            service.tick(now=1100.0)
         self.assertEqual(len(calls), 1)
         self.assertEqual(service.counts['errors'], 1)
+        self.assertEqual(len(logs.records), 1)
 
     def test_one_job_failing_does_not_stop_the_others(self):
         """The alternative is a sensor that goes quiet for a reason nobody sees."""
@@ -456,10 +460,15 @@ class TestScheduling(_ServiceCase):
 
         service.check_drift = explode
         service.read_canary = explode
-        findings = service.tick()
+        with self.assertLogs('netmon.service', level='ERROR') as logs:
+            findings = service.tick()
         self.assertTrue(findings)
         self.assertEqual(service.counts['captures'], 1)
         self.assertEqual(service.counts['errors'], 2)
+        # Each failure is logged by name, or the sensor goes quiet for a reason
+        # nobody sees.
+        failed = sorted(r.getMessage().split()[0] for r in logs.records if r.levelname == 'ERROR')
+        self.assertEqual(failed, ['canary', 'configuration'])
 
     def test_pruning_runs_on_its_own_interval(self):
         service = self.service(prune_interval=3600)
